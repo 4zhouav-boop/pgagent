@@ -23,12 +23,14 @@ final class APIRouter {
     let log: LogStore
     let ble: BLEController
     let cfgStore: ConfigStore
+    let grabber: ScreenGrabber
     var httpPort: UInt16 = 0
 
-    init(log: LogStore, ble: BLEController, cfgStore: ConfigStore) {
+    init(log: LogStore, ble: BLEController, cfgStore: ConfigStore, grabber: ScreenGrabber) {
         self.log = log
         self.ble = ble
         self.cfgStore = cfgStore
+        self.grabber = grabber
     }
 
     // MARK: - 工具
@@ -63,7 +65,7 @@ final class APIRouter {
 
         case ("GET", "/"):
             return .json([
-                "app": "PGAgent", "version": "0.3.2",
+                "app": "PGAgent", "version": "0.4.0",
                 "endpoints": ["/status", "/probe", "/reload", "/config", "/elements",
                               "/page", "/nav", "/ocr", "/files", "/file", "/write",
                               "/mkdir", "/ble/scan", "/ble/connect", "/ble/send",
@@ -74,10 +76,41 @@ final class APIRouter {
         case ("GET", "/probe"):
             return .json(["ok": true, "t": Date().timeIntervalSince1970])
 
+        // ⭐⭐⭐ 「眼」—— App **自己取画面**（⛔ 不依赖 PC）
+        //    App 触发快捷指令「拍摄截屏」⇒ 截图落到自己的 Documents
+        case ("POST", "/grab"):
+            let sem = DispatchSemaphore(value: 0)
+            var gotURL: URL?
+            var gotErr = ""
+            grabber.grab(timeout: 10.0) { u, e in
+                gotURL = u; gotErr = e; sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + 14)
+            if let u = gotURL {
+                return .json(["ok": true, "file": u.lastPathComponent,
+                              "path": u.path,
+                              "bytes": (try? Data(contentsOf: u).count) ?? -1])
+            }
+            return .json(["ok": false, "error": gotErr.isEmpty ? "超时" : gotErr,
+                          "shortcut": grabber.shortcutName], status: 500)
+
+        // 只触发快捷指令，不等文件（快）
+        case ("POST", "/shoot"):
+            let ok = grabber.triggerShortcut()
+            return .json(["ok": ok, "shortcut": grabber.shortcutName,
+                          "error": grabber.lastError])
+
+        // 设置快捷指令名
+        case ("POST", "/shortcut"):
+            if let n = r.query["name"], !n.isEmpty {
+                grabber.shortcutName = n
+            }
+            return .json(["ok": true, "shortcut": grabber.shortcutName])
+
         case ("GET", "/status"):
             let cfgOK = cfgStore.cfg != nil
             return .json([
-                "app": "PGAgent", "version": "0.3.2",
+                "app": "PGAgent", "version": "0.4.0",
                 "ios": UIDevice.current.systemVersion,
                 "httpPort": Int(httpPort),
                 "documents": docsURL().path,
@@ -137,6 +170,53 @@ final class APIRouter {
                 }
             }
             return .json(["ok": true, "count": out.count, "results": out])
+
+        // ⭐⭐⭐ `/see` —— **App 自己取画面 + 自己识别**（一步到位，⛔ 不依赖 PC）
+        //    这是「以后全部交到手机上」的核心接口。
+        case ("GET", "/see"):
+            // ① 自己抓帧
+            let sem = DispatchSemaphore(value: 0)
+            var gotURL: URL?
+            var gotErr = ""
+            grabber.grab(timeout: 10.0) { u, e in gotURL = u; gotErr = e; sem.signal() }
+            _ = sem.wait(timeout: .now() + 14)
+            guard let u = gotURL, let img = UIImage(contentsOfFile: u.path) else {
+                return .json(["ok": false, "stage": "grab",
+                              "error": gotErr.isEmpty ? "抓帧超时" : gotErr], status: 500)
+            }
+            guard let c = cfgStore.cfg else {
+                return .json(["ok": false, "stage": "config",
+                              "error": "配置未加载"], status: 500)
+            }
+            let rec = makeRecognizer()
+            let nav = Navigator(cfg: c, rec: rec, ble: ble) { _ in }
+
+            // ② 判页
+            let page = nav.pageHere(img) ?? "unknown"
+
+            // ③ 元素检测
+            var hits: [[String: Any]] = []
+            for name in c.elements.keys.sorted() {
+                if let h = nav.detect(name, img: img) {
+                    hits.append(["element": name, "score": h.score,
+                                 "x": h.rect.minX, "y": h.rect.minY,
+                                 "w": h.rect.width, "h": h.rect.height,
+                                 "evidence": h.evidence])
+                }
+            }
+
+            // ④ OCR（可选，?ocr=0 关掉省时间）
+            var ocrOut: [[String: Any]] = []
+            if r.query["ocr"] != "0" {
+                for (t, rr, cf) in rec.ocr(img, minConfidence: 0.3) {
+                    ocrOut.append(["text": t, "conf": cf,
+                                   "x": rr.minX, "y": rr.minY,
+                                   "w": rr.width, "h": rr.height])
+                }
+            }
+
+            return .json(["ok": true, "file": u.lastPathComponent, "page": page,
+                          "hits": hits, "ocr": ocrOut])
 
         case ("GET", "/page"):
             let (im, err) = loadImage(r.query)

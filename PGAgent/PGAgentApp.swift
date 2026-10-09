@@ -63,6 +63,7 @@ struct ContentView: View {
     @EnvironmentObject var ble: BLEController
     @StateObject private var http = HTTPServerHolder()
     @StateObject private var cfgStore = ConfigStore()
+    @StateObject private var grabber = ScreenGrabber()
     @State private var router: APIRouter?
     @State private var started = false
     @State private var port: UInt16 = 0
@@ -89,6 +90,26 @@ struct ContentView: View {
                 }
                 .padding(.horizontal, 8)
 
+                // ⭐ 「眼」—— App 自己取画面（触发快捷指令截图）
+                HStack(spacing: 6) {
+                    Button("📷 抓一帧") {
+                        store.log("▶️ 手动抓帧（快捷指令 \(grabber.shortcutName)）")
+                        grabber.grab(timeout: 10) { u, e in
+                            if let u = u {
+                                store.log("✅ 抓到 \(u.lastPathComponent)")
+                            } else {
+                                store.log("⛔ 抓帧失败：\(e)")
+                            }
+                        }
+                    }
+                    Button("只触发") {
+                        let ok = grabber.triggerShortcut()
+                        store.log("触发快捷指令: \(ok ? "✅ 已发起" : "⛔ \(grabber.lastError)")")
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.top, 4)
+
                 ScrollView {
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(Array(store.snapshot().enumerated()), id: \.offset) { _, l in
@@ -99,7 +120,7 @@ struct ContentView: View {
                     .padding(6)
                 }
             }
-            .navigationTitle("PGAgent v0.3.1")
+            .navigationTitle("PGAgent v0.4.0")
             .onAppear(perform: boot)
         }
         .navigationViewStyle(.stack)
@@ -109,11 +130,11 @@ struct ContentView: View {
         guard !started else { return }
         started = true
 
-        store.log("=== PGAgent v0.3.1 启动 ===")
+        store.log("=== PGAgent v0.4.0 启动 ===")
         store.log("Documents = \(DocsScanner.docPath())")
 
         // ⭐ 起 HTTP 服务
-        let rt = APIRouter(log: store, ble: ble, cfgStore: cfgStore)
+        let rt = APIRouter(log: store, ble: ble, cfgStore: cfgStore, grabber: grabber)
         router = rt
         http.server.onRequest = { [weak rt] req in
             rt?.handle(req) ?? HTTPServer.Response.text("no router", status: 500)
