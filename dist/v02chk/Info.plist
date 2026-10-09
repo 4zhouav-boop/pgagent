@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>BuildMachineOSBuild</key>
+	<string>25G83</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>PGAgent</string>
+	<key>CFBundleExecutable</key>
+	<string>PGAgent</string>
+	<key>CFBundleIdentifier</key>
+	<string>run.pgagent.PGAgent.8W9ZSMW4UW</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>PGAgent</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.0</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>iPhoneOS</string>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>DTCompiler</key>
+	<string>com.apple.compilers.llvm.clang.1_0</string>
+	<key>DTPlatformBuild</key>
+	<string>23F81a</string>
+	<key>DTPlatformName</key>
+	<string>iphoneos</string>
+	<key>DTPlatformVersion</key>
+	<string>26.5</string>
+	<key>DTSDKBuild</key>
+	<string>23F81a</string>
+	<key>DTSDKName</key>
+	<string>iphoneos26.5</string>
+	<key>DTXcode</key>
+	<string>2660</string>
+	<key>DTXcodeBuild</key>
+	<string>17F113</string>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>shortcuts</string>
+	</array>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+	<key>MinimumOSVersion</key>
+	<string>17.0</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>连接 ESP32 外设以发送点击指令</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>连接 ESP32 外设以发送点击指令</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>与本地设备通信</string>
+	<key>UIDeviceFamily</key>
+	<array>
+		<integer>1</integer>
+	</array>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UIRequiredDeviceCapabilities</key>
+	<array>
+		<string>arm64</string>
+	</array>
+	<key>ALTBundleIdentifier</key>
+	<string>run.pgagent.PGAgent</string>
+</dict>
+</plist>

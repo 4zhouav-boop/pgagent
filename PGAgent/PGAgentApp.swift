@@ -62,6 +62,7 @@ struct ContentView: View {
     @EnvironmentObject var store: LogStore
     @EnvironmentObject var ble: BLEController
     @StateObject private var http = HTTPServerHolder()
+    @StateObject private var cfgStore = ConfigStore()
     @State private var router: APIRouter?
     @State private var started = false
     @State private var port: UInt16 = 0
@@ -98,7 +99,7 @@ struct ContentView: View {
                     .padding(6)
                 }
             }
-            .navigationTitle("PGAgent v0.2")
+            .navigationTitle("PGAgent v0.3")
             .onAppear(perform: boot)
         }
         .navigationViewStyle(.stack)
@@ -108,11 +109,11 @@ struct ContentView: View {
         guard !started else { return }
         started = true
 
-        store.log("=== PGAgent v0.2 启动 ===")
+        store.log("=== PGAgent v0.3 启动 ===")
         store.log("Documents = \(DocsScanner.docPath())")
 
         // ⭐ 起 HTTP 服务
-        let rt = APIRouter(log: store, ble: ble)
+        let rt = APIRouter(log: store, ble: ble, cfgStore: cfgStore)
         router = rt
         http.server.onRequest = { [weak rt] req in
             rt?.handle(req) ?? HTTPServer.Response.text("no router", status: 500)
@@ -123,6 +124,14 @@ struct ContentView: View {
         http.lastError = http.server.lastError
         rt.httpPort = http.server.port
         store.log("HTTP 已起 127.0.0.1:\(http.server.port)  err=\(http.server.lastError)")
+
+        // ⭐ 读运行时配置（改逻辑只推这个文件，⛔ 不重装）
+        ConfigStore.ensureDirs()
+        if cfgStore.reload() {
+            store.log("✅ 配置已加载：\(cfgStore.cfg?.elements.count ?? 0) 个元素 / \(cfgStore.cfg?.pages.count ?? 0) 个页型")
+        } else {
+            store.log("⚠️ 配置未加载：\(cfgStore.lastError)")
+        }
 
         // 通知
         NotificationCenter.default.addObserver(

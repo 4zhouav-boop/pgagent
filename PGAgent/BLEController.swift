@@ -81,10 +81,13 @@ final class BLEController: NSObject, ObservableObject {
         return true
     }
 
-    /// ⭐ 把 PG 的坐标（基准 451×977）转成 HID 的 0..32767
-    static func moveAndClick(x: Double, y: Double) -> [String] {
-        let hx = Int((x / 451.0) * 32767.0)
-        let hy = Int(((y + 4.0) / 977.0) * 32767.0)   // Y_FIX = 4（与生产脚本一致）
+    /// ⭐ 把 PG 的基准坐标（默认 451×977）转成 HID 的 0..32767
+    ///    公式与生产脚本 `ks_io.py` 一致（含 `Y_FIX = 4`）
+    static func moveAndClick(x: Double, y: Double,
+                             baseW: Double = 451, baseH: Double = 977,
+                             yFix: Double = 4) -> [String] {
+        let hx = Int((x / baseW) * 32767.0)
+        let hy = Int(((y + yFix) / baseH) * 32767.0)
         return ["P:\(hx),\(hy)", "C:L"]
     }
 

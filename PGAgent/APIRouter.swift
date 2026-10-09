@@ -1,36 +1,59 @@
 import Foundation
 import UIKit
 
-/// ⭐ HTTP API 路由 —— 主机（经 USB 隧道）调用 App 的唯一入口。
+/// ⭐⭐⭐ HTTP API —— 主机（经 USB 隧道）调用 App 的唯一入口。
 ///
-/// 设计原则（`_note_1801` §4）：
-///   主机侧 `pymobiledevice3 usbmux forward 8899 8899` 之后，
-///   `curl http://127.0.0.1:8899/<path>` 就能直接驱动 App。
+/// 设计：`_note_1801` §4 —— 主机 `pymobiledevice3 usbmux forward 8899 8899` 之后，
+/// `curl http://127.0.0.1:8899/<path>` 直接驱动 App。
 ///
-/// 接口（全部返回 JSON）：
-///   GET  /                  服务信息
-///   GET  /status            设备/App/HTTP/BLE 状态
-///   GET  /files             列 Documents 里的文件（截图）
-///   GET  /file?name=X       取文件（base64）
-///   POST /write?name=X      写文件（body 为原始字节）← ⭐ 主机可直接注入截图
-///   DELETE /file?name=X     删文件
-///   GET  /ble/scan          扫 BLE 外设（异步，返回已发现的）
-///   GET  /ble/connect?name=X 连 ESP32
-///   POST /ble/send?cmd=X    发一条 HID 命令（如 P:100,200）
-///   POST /click?x=..&y=..   移动并点击（自动换算成 HID 坐标）
-///   GET  /log               取最近的 App 日志
-///   POST /log/clear         清日志
+/// ⭐ 关键接口（**配置驱动**，改逻辑只推文件，⛔ 不重装）：
+///   GET  /status           App/HTTP/BLE 状态 + 配置是否已加载
+///   POST /reload           重新读 Documents/pgconfig/config.json  ⭐
+///   GET  /config           回显当前配置（排查用）
+///   GET  /elements?img=X   对某张图跑一遍所有元素的检测（识别自测）⭐
+///   GET  /page?img=X       对某张图判页型
+///   POST /nav?dest=X&img=Y 跑导航（到某页）
+///   POST /ocr?img=X        对某张图跑 OCR，返回全部文字+坐标  ⭐
+///
+/// 文件接口：
+///   GET  /files  /file?name=X  POST /write?name=X  DELETE /file?name=X
+///   POST /mkdir?name=X         建子目录（推模板用）
 final class APIRouter {
 
-    let docs = DocsScanner()
     let log: LogStore
     let ble: BLEController
+    let cfgStore: ConfigStore
     var httpPort: UInt16 = 0
 
-    init(log: LogStore, ble: BLEController) {
+    init(log: LogStore, ble: BLEController, cfgStore: ConfigStore) {
         self.log = log
         self.ble = ble
+        self.cfgStore = cfgStore
     }
+
+    // MARK: - 工具
+
+    private func docsURL() -> URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    }
+
+    /// 取一张图：优先 `?img=<Documents 里的文件名>`；没有则报错（⛔ App 不能截别的 App 的屏）
+    private func loadImage(_ q: [String: String]) -> (UIImage?, String) {
+        guard let name = q["img"], !name.isEmpty else {
+            return (nil, "need ?img=<filename>（App 无法自己截别的 App 的屏，见 /PLAN）")
+        }
+        let u = docsURL().appendingPathComponent(name)
+        guard let d = try? Data(contentsOf: u), let im = UIImage(data: d) else {
+            return (nil, "读不到图: \(name)")
+        }
+        return (im, "")
+    }
+
+    private func makeRecognizer() -> Recognizer {
+        Recognizer(templatesDir: ConfigStore.templatesDir())
+    }
+
+    // MARK: - 路由
 
     func handle(_ r: HTTPServer.Request) -> HTTPServer.Response {
         let p = r.path
@@ -40,38 +63,123 @@ final class APIRouter {
 
         case ("GET", "/"):
             return .json([
-                "app": "PGAgent",
-                "version": "0.2.0",
-                "bundle": Bundle.main.bundleIdentifier ?? "?",
-                "endpoints": ["/status", "/files", "/file", "/write", "/ble/scan",
-                              "/ble/connect", "/ble/send", "/click", "/log"],
+                "app": "PGAgent", "version": "0.3.0",
+                "endpoints": ["/status", "/reload", "/config", "/elements", "/page",
+                              "/nav", "/ocr", "/files", "/file", "/write", "/mkdir",
+                              "/ble/scan", "/ble/connect", "/ble/send", "/click", "/log"],
             ])
 
         case ("GET", "/status"):
+            let cfgOK = cfgStore.cfg != nil
             return .json([
-                "app": "PGAgent",
+                "app": "PGAgent", "version": "0.3.0",
                 "ios": UIDevice.current.systemVersion,
-                "model": UIDevice.current.model,
                 "httpPort": Int(httpPort),
-                "documents": DocsScanner.docPath(),
-                "fileCount": (try? FileManager.default
-                    .contentsOfDirectory(atPath: DocsScanner.docPath()).count) ?? -1,
+                "documents": docsURL().path,
+                "configLoaded": cfgOK,
+                "configError": cfgStore.lastError,
+                "configPath": ConfigStore.configPath().path,
+                "elements": cfgStore.cfg?.elements.count ?? 0,
+                "pages": cfgStore.cfg?.pages.count ?? 0,
                 "bleState": ble.state,
                 "bleDevices": ble.devices,
                 "bleError": ble.lastError,
-                "documentsVisibleToFilesApp": Bundle.main
-                    .object(forInfoDictionaryKey: "UIFileSharingEnabled") as? Bool ?? false,
             ])
 
+        case ("POST", "/reload"):
+            let ok = cfgStore.reload()
+            return .json(["ok": ok, "error": cfgStore.lastError,
+                          "elements": cfgStore.cfg?.elements.count ?? 0,
+                          "pages": cfgStore.cfg?.pages.count ?? 0],
+                         status: ok ? 200 : 500)
+
+        case ("GET", "/config"):
+            guard let c = cfgStore.cfg else {
+                return .json(["ok": false, "error": cfgStore.lastError], status: 500)
+            }
+            let els = c.elements.keys.sorted()
+            let pgs = c.pages.keys.sorted()
+            return .json(["ok": true, "elements": els, "pages": pgs,
+                          "loadedAt": cfgStore.loadedAt.map { "\($0)" } ?? "-"])
+
+        case ("GET", "/ocr"):
+            let (im, err) = loadImage(r.query)
+            guard let img = im else { return .json(["ok": false, "error": err], status: 400) }
+            let rec = makeRecognizer()
+            let items = rec.ocr(img, minConfidence: 0.3)
+            let list: [[String: Any]] = items.map { (t, r, c) in
+                ["text": t, "conf": c,
+                 "x": r.minX, "y": r.minY, "w": r.width, "h": r.height]
+            }
+            return .json(["ok": true, "count": list.count, "items": list])
+
+        case ("GET", "/elements"):
+            let (im, err) = loadImage(r.query)
+            guard let img = im else { return .json(["ok": false, "error": err], status: 400) }
+            guard let c = cfgStore.cfg else {
+                return .json(["ok": false, "error": "配置未加载，先 POST /reload"], status: 500)
+            }
+            let nav = Navigator(cfg: c, rec: makeRecognizer(), ble: ble) { _ in }
+            var out: [[String: Any]] = []
+            for name in c.elements.keys.sorted() {
+                if let h = nav.detect(name, img: img) {
+                    out.append(["element": name, "hit": true, "score": h.score,
+                                "x": h.rect.minX, "y": h.rect.minY,
+                                "w": h.rect.width, "h": h.rect.height,
+                                "evidence": h.evidence])
+                } else {
+                    out.append(["element": name, "hit": false])
+                }
+            }
+            return .json(["ok": true, "count": out.count, "results": out])
+
+        case ("GET", "/page"):
+            let (im, err) = loadImage(r.query)
+            guard let img = im else { return .json(["ok": false, "error": err], status: 400) }
+            guard let c = cfgStore.cfg else {
+                return .json(["ok": false, "error": "配置未加载"], status: 500)
+            }
+            let nav = Navigator(cfg: c, rec: makeRecognizer(), ble: ble) { _ in }
+            let here = nav.pageHere(img) ?? "unknown"
+            return .json(["ok": true, "page": here])
+
+        case ("POST", "/nav"):
+            let (im, err) = loadImage(r.query)
+            guard let img = im else { return .json(["ok": false, "error": err], status: 400) }
+            guard let dest = r.query["dest"] else {
+                return .json(["ok": false, "error": "need ?dest=<page>"], status: 400)
+            }
+            guard let c = cfgStore.cfg else {
+                return .json(["ok": false, "error": "配置未加载"], status: 500)
+            }
+            var trace: [String] = []
+            let nav = Navigator(cfg: c, rec: makeRecognizer(), ble: ble) { trace.append($0) }
+            let ok = nav.go(to: dest, img: img)
+            return .json(["ok": ok, "dest": dest, "trace": trace])
+
+        case ("POST", "/click"):
+            guard let xs = r.query["x"], let ys = r.query["y"],
+                  let x = Double(xs), let y = Double(ys) else {
+                return .text("need ?x=..&y=..", status: 400)
+            }
+            let bw = cfgStore.cfg?.settings?.base_w ?? 451
+            let bh = cfgStore.cfg?.settings?.base_h ?? 977
+            let yf = cfgStore.cfg?.settings?.y_fix ?? 4
+            let cmds = BLEController.moveAndClick(x: x, y: y, baseW: bw, baseH: bh, yFix: yf)
+            var sent: [String] = []
+            for c in cmds { if ble.send(c) { sent.append(c) }; usleep(60_000) }
+            return .json(["ok": sent.count == cmds.count, "sent": sent,
+                          "state": ble.state, "error": ble.lastError])
+
+        // ── 文件 ──
         case ("GET", "/files"):
-            return .json(["documents": DocsScanner.docPath(),
-                          "files": listFiles()])
+            return .json(["documents": docsURL().path, "files": listFiles()])
 
         case ("GET", "/file"):
             guard let name = r.query["name"], !name.isEmpty else {
                 return .text("need ?name=", status: 400)
             }
-            let u = URL(fileURLWithPath: DocsScanner.docPath()).appendingPathComponent(name)
+            let u = docsURL().appendingPathComponent(name)
             guard let d = try? Data(contentsOf: u) else {
                 return .text("not found: \(name)", status: 404)
             }
@@ -81,10 +189,12 @@ final class APIRouter {
             guard let name = r.query["name"], !name.isEmpty else {
                 return .text("need ?name=", status: 400)
             }
-            if name.contains("/") || name.contains("..") {
-                return .text("bad name", status: 400)
+            if name.contains("..") { return .text("bad name", status: 400) }
+            let u = docsURL().appendingPathComponent(name)
+            if name.contains("/") {
+                try? FileManager.default.createDirectory(
+                    at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
             }
-            let u = URL(fileURLWithPath: DocsScanner.docPath()).appendingPathComponent(name)
             do {
                 try r.body.write(to: u)
                 log.log("写文件 \(name) \(r.body.count)B")
@@ -93,12 +203,18 @@ final class APIRouter {
                 return .json(["ok": false, "error": "\(error)"], status: 500)
             }
 
+        case ("POST", "/mkdir"):
+            guard let name = r.query["name"] else { return .text("need ?name=", status: 400) }
+            let u = docsURL().appendingPathComponent(name)
+            try? FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
+            return .json(["ok": true, "dir": name])
+
         case ("DELETE", "/file"):
             guard let name = r.query["name"] else { return .text("need ?name=", status: 400) }
-            let u = URL(fileURLWithPath: DocsScanner.docPath()).appendingPathComponent(name)
-            try? FileManager.default.removeItem(at: u)
+            try? FileManager.default.removeItem(at: docsURL().appendingPathComponent(name))
             return .json(["ok": true, "deleted": name])
 
+        // ── BLE ──
         case ("GET", "/ble/scan"):
             ble.scan { _ in }
             return .json(["ok": true, "state": ble.state, "found": ble.devices])
@@ -118,20 +234,7 @@ final class APIRouter {
             return .json(["ok": ok, "cmd": c, "state": ble.state, "error": ble.lastError],
                          status: ok ? 200 : 500)
 
-        case ("POST", "/click"):
-            guard let xs = r.query["x"], let ys = r.query["y"],
-                  let x = Double(xs), let y = Double(ys) else {
-                return .text("need ?x=..&y=..", status: 400)
-            }
-            let cmds = BLEController.moveAndClick(x: x, y: y)
-            var sent: [String] = []
-            for c in cmds {
-                if ble.send(c) { sent.append(c) }
-                usleep(60_000)
-            }
-            return .json(["ok": sent.count == cmds.count, "sent": sent,
-                          "state": ble.state, "error": ble.lastError])
-
+        // ── 日志 ──
         case ("GET", "/log"):
             return .json(["lines": log.snapshot()])
 
@@ -144,19 +247,22 @@ final class APIRouter {
         }
     }
 
+    /// 递归列 Documents（含 pgconfig 子目录）
     private func listFiles() -> [[String: Any]] {
         let fm = FileManager.default
-        let dir = URL(fileURLWithPath: DocsScanner.docPath())
-        guard let items = try? fm.contentsOfDirectory(
-            at: dir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey],
-            options: [.skipsHiddenFiles]) else { return [] }
-        return items.sorted { $0.lastPathComponent < $1.lastPathComponent }.map { u in
+        let root = docsURL()
+        guard let en = fm.enumerator(at: root, includingPropertiesForKeys:
+                                     [.fileSizeKey, .contentModificationDateKey],
+                                     options: [.skipsHiddenFiles]) else { return [] }
+        var out: [[String: Any]] = []
+        for case let u as URL in en {
+            let rel = u.path.replacingOccurrences(of: root.path + "/", with: "")
             let sz = (try? u.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
             let mt = (try? u.resourceValues(forKeys: [.contentModificationDateKey])
                 .contentModificationDate) ?? Date(timeIntervalSince1970: 0)
-            return ["name": u.lastPathComponent,
-                    "bytes": sz,
-                    "mtime": ISO8601DateFormatter().string(from: mt)]
+            out.append(["name": rel, "bytes": sz,
+                        "mtime": ISO8601DateFormatter().string(from: mt)])
         }
+        return out.sorted { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
     }
 }

@@ -1,0 +1,163 @@
+{
+  "_schema": "pgagent/1",
+  "_doc": [
+    "PGAgent 的运行时配置 —— App 从 Documents/pgconfig/ 读取，⛔ 不需要重编/重签/重装。",
+    "改识别逻辑 = 改这个 JSON + 推模板 PNG，App 下一轮自动重载。",
+    "",
+    "设计来源（都是实测过的）：",
+    "  · _dev/anchors/registry.json  —— 页型表（16 个页型，声明式判据）",
+    "  · _1765_nav.py                —— 导航引擎（页面图 + 恢复漏斗 + 卡死检测）",
+    "  · _1765_match.py              —— 掩码模板匹配（masked_match / pool_match）",
+    "  · _note_1793 方案 B+          —— 判据配置化 + Swift 只写执行器"
+  ],
+
+  "version": 1,
+
+  "settings": {
+    "base_w": 451,
+    "base_h": 977,
+    "y_fix": 4,
+    "ocr_min_confidence": 0.5,
+    "template_threshold": 0.80,
+    "max_steps": 12
+  },
+
+  "rois": {
+    "top_bar":    [0, 62, 451, 140],
+    "bottom_bar": [0, 878, 451, 945],
+    "content":    [0, 150, 451, 860],
+    "float_area": [0.60, 0.55, 1.00, 1.00],
+    "pill_band":  [0, 74, 240, 100]
+  },
+
+  "elements": {
+    "back_arrow": {
+      "desc": "左上返回键 〈（暗色 V）",
+      "roi": [0, 55, 110, 130],
+      "match": "template",
+      "templates": ["nav/chevron_dark.png", "nav/chevron_dark2.png"],
+      "threshold": 0.80,
+      "mask": "ink"
+    },
+    "back_circle": {
+      "desc": "左上圆形返回钮",
+      "roi": [0, 55, 110, 130],
+      "match": "template",
+      "templates": ["nav/back_circle_lt.png", "nav/back_circle_dk.png"],
+      "threshold": 0.80
+    },
+    "white_chevron": {
+      "desc": "白色 〈（深色背景页）",
+      "roi": [0, 55, 110, 130],
+      "match": "template",
+      "templates": ["nav/chevron_white.png"],
+      "threshold": 0.80
+    },
+    "float_x": {
+      "desc": "右下悬浮球 ✕",
+      "roi": [0.60, 0.55, 1.00, 1.00],
+      "match": "template",
+      "templates": ["ad/float_x.png"],
+      "threshold": 0.80,
+      "mask": "none"
+    },
+    "pill_x": {
+      "desc": "顶栏胶囊 ✕",
+      "roi": [0, 74, 240, 100],
+      "match": "template",
+      "templates": ["ad/pill_x.png"],
+      "threshold": 0.80,
+      "mask": "none"
+    },
+    "tab_home": {
+      "desc": "底栏「首页」",
+      "roi": [0, 878, 451, 945],
+      "match": "ocr",
+      "words": ["首页"],
+      "target_pos": "center"
+    },
+    "tab_featured": {
+      "desc": "底栏「精选」",
+      "roi": [0, 878, 451, 945],
+      "match": "ocr",
+      "words": ["精选"]
+    },
+    "tab_msg": {
+      "desc": "底栏「消息」",
+      "roi": [0, 878, 451, 945],
+      "match": "ocr",
+      "words": ["消息"]
+    },
+    "center_marker": {
+      "desc": "金币中心（顶栏含「我的金币」）",
+      "roi": [0, 62, 451, 140],
+      "match": "ocr",
+      "words": ["我的金币", "话费充值", "金币商城"],
+      "min_hits": 2
+    },
+    "mall_marker": {
+      "desc": "商城页（内容区那排图标 ≥2）",
+      "roi": [0, 150, 451, 260],
+      "match": "ocr",
+      "words": ["我的订单", "购物车", "充值中心", "低价特卖", "赚金币", "天天领"],
+      "min_hits": 2
+    },
+    "ad_capsule": {
+      "desc": "广告页（顶栏胶囊：可领取/已成功领取）",
+      "roi": [0, 62, 451, 140],
+      "match": "ocr",
+      "words": ["可领取", "已成功领取"],
+      "min_hits": 1
+    }
+  },
+
+  "pages": {
+    "center": {
+      "desc": "金币中心（根）",
+      "check": ["center_marker"],
+      "parent": null,
+      "go": null
+    },
+    "feed": {
+      "desc": "信息流首页",
+      "check": ["tab_home"],
+      "not": ["mall_marker"],
+      "parent": "center",
+      "go": "tab_home"
+    },
+    "featured": {
+      "desc": "精选页（悬浮球在这）",
+      "check": ["tab_featured"],
+      "parent": "center",
+      "go": "tab_featured"
+    },
+    "mall": {
+      "desc": "商城页",
+      "check": ["mall_marker"],
+      "parent": "feed",
+      "go": "tab_home"
+    },
+    "ad_video": {
+      "desc": "视频广告页（⛔ 放行页，交给广告模块，导航不碰）",
+      "check": ["ad_capsule"],
+      "parent": null,
+      "go": null,
+      "island": true
+    }
+  },
+
+  "funnel": [
+    {"element": "pill_x",      "interval": 1.0, "desc": "顶栏胶囊 ✕"},
+    {"element": "float_x",     "interval": 1.0, "desc": "悬浮球 ✕"},
+    {"element": "back_arrow",  "interval": 1.0, "desc": "左上 〈"},
+    {"element": "back_circle", "interval": 1.0, "desc": "左上圆钮"},
+    {"element": "white_chevron","interval": 1.0, "desc": "白色 〈"}
+  ],
+
+  "stuck": {
+    "same_n": 12,
+    "same_window": 15,
+    "alt_n": 6,
+    "no_progress_s": 60.0
+  }
+}
