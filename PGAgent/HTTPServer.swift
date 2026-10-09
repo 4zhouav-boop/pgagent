@@ -174,7 +174,8 @@ final class HTTPServer {
                 }
                 r.headers = headers
                 r.body = rest.prefix(want)
-                self.respond(conn, self.onRequest?(r) ?? Response.text("no handler", status: 500))
+                // ⭐ 异步处理（慢请求不堵队列）
+                self.handleAsync(conn, r)
                 _ = isDone
                 return
             }
@@ -204,6 +205,16 @@ final class HTTPServer {
         conn.send(content: out, completion: .contentProcessed { _ in
             conn.cancel()
         })
+    }
+
+    /// ⭐ 把 handler 放到**独立队列**执行 —— 一个慢请求（如 Vision OCR 几秒）
+    ///    不会堵住后面的请求。
+    private func handleAsync(_ conn: NWConnection, _ req: Request) {
+        let h = onRequest
+        DispatchQueue.global(qos: .userInitiated).async {
+            let resp = h?(req) ?? Response.text("no handler", status: 500)
+            self.respond(conn, resp)
+        }
     }
 
     func stop() {

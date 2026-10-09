@@ -63,16 +63,21 @@ final class APIRouter {
 
         case ("GET", "/"):
             return .json([
-                "app": "PGAgent", "version": "0.3.0",
-                "endpoints": ["/status", "/reload", "/config", "/elements", "/page",
-                              "/nav", "/ocr", "/files", "/file", "/write", "/mkdir",
-                              "/ble/scan", "/ble/connect", "/ble/send", "/click", "/log"],
+                "app": "PGAgent", "version": "0.3.1",
+                "endpoints": ["/status", "/probe", "/reload", "/config", "/elements",
+                              "/page", "/nav", "/ocr", "/files", "/file", "/write",
+                              "/mkdir", "/ble/scan", "/ble/connect", "/ble/send",
+                              "/click", "/log"],
             ])
+
+        // ⭐ 极简探活（⛔ 不碰文件系统、不做识别）—— 用来区分「App 挂了」和「handler 慢」
+        case ("GET", "/probe"):
+            return .json(["ok": true, "t": Date().timeIntervalSince1970])
 
         case ("GET", "/status"):
             let cfgOK = cfgStore.cfg != nil
             return .json([
-                "app": "PGAgent", "version": "0.3.0",
+                "app": "PGAgent", "version": "0.3.1",
                 "ios": UIDevice.current.systemVersion,
                 "httpPort": Int(httpPort),
                 "documents": docsURL().path,
@@ -247,22 +252,36 @@ final class APIRouter {
         }
     }
 
-    /// 递归列 Documents（含 pgconfig 子目录）
+    /// 列 Documents（⛔ 不用 enumerator —— 它在 iOS 上会跟符号链接/深目录卡死）
+    /// 只列一层 + 已知子目录一层，深度上限写死。
     private func listFiles() -> [[String: Any]] {
         let fm = FileManager.default
         let root = docsURL()
-        guard let en = fm.enumerator(at: root, includingPropertiesForKeys:
-                                     [.fileSizeKey, .contentModificationDateKey],
-                                     options: [.skipsHiddenFiles]) else { return [] }
         var out: [[String: Any]] = []
-        for case let u as URL in en {
-            let rel = u.path.replacingOccurrences(of: root.path + "/", with: "")
-            let sz = (try? u.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
-            let mt = (try? u.resourceValues(forKeys: [.contentModificationDateKey])
-                .contentModificationDate) ?? Date(timeIntervalSince1970: 0)
-            out.append(["name": rel, "bytes": sz,
-                        "mtime": ISO8601DateFormatter().string(from: mt)])
+
+        func addDir(_ dir: URL, depth: Int) {
+            guard depth <= 2 else { return }
+            let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey, .isDirectoryKey]
+            guard let items = try? fm.contentsOfDirectory(at: dir,
+                                                          includingPropertiesForKeys: keys,
+                                                          options: [.skipsHiddenFiles]) else { return }
+            for u in items {
+                let isDir = (try? u.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+                let rel = u.path.replacingOccurrences(of: root.path + "/", with: "")
+                if isDir {
+                    out.append(["name": rel + "/", "bytes": 0, "mtime": "", "dir": true])
+                    addDir(u, depth: depth + 1)
+                } else {
+                    let sz = (try? u.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
+                    let mt = (try? u.resourceValues(forKeys: [.contentModificationDateKey])
+                        .contentModificationDate) ?? Date(timeIntervalSince1970: 0)
+                    out.append(["name": rel, "bytes": sz,
+                                "mtime": ISO8601DateFormatter().string(from: mt)])
+                }
+            }
         }
+
+        addDir(root, depth: 0)
         return out.sorted { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
     }
 }
