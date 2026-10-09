@@ -62,8 +62,12 @@ final class Recognizer {
         return out
     }
 
-    /// OCR 找词（支持 ROI 过滤 + 最少命中数）
+    /// OCR 找词（支持 ROI 过滤 + 最少命中数 + **容错匹配**）
     /// `roi` 是**基准分辨率**下的像素框（451×977），返回坐标也是基准像素。
+    ///
+    /// ⭐ 容错匹配（§1821 实测必要）：Vision 对中文小字常认错形近字
+    ///   实测例子：「259金**币**」被认成「259金**市**」、「**联**系信息」→「**眹**系信息」
+    ///   ⇒ 精确 `contains` 会漏检 ⇒ 用**编辑距离 + 字符重合率**兜底
     func findWords(_ img: UIImage, words: [String], roi: CGRect?,
                    minHits: Int = 1, minConfidence: Double = 0.5) -> Hit? {
         let size = img.size
@@ -74,7 +78,7 @@ final class Recognizer {
             let px = CGRect(x: nb.minX * size.width, y: nb.minY * size.height,
                             width: nb.width * size.width, height: nb.height * size.height)
             if let r = roi, !r.intersects(px) { continue }
-            for w in words where txt.contains(w) {
+            for w in words where Self.fuzzyContains(txt, w) {
                 matched.append((txt, px))
                 break
             }
@@ -85,6 +89,41 @@ final class Recognizer {
         for (_, r) in matched.dropFirst() { u = u.union(r) }
         return Hit(name: "ocr", rect: u, score: 1.0,
                    evidence: matched.map { $0.0 }.joined(separator: "/"))
+    }
+
+    /// ⭐ 容错包含：先精确，再编辑距离兜底
+    /// 规则（保守，⛔ 不放松到误检）：
+    ///   · 精确包含 ⇒ 直接过
+    ///   · 关键词 ≥3 字时，允许**最多 1 个字的差异**（编辑距离 ≤1）
+    ///   · 关键词 =2 字时，要求**逐字相同**（2 字容错太容易误检）
+    static func fuzzyContains(_ hay: String, _ needle: String) -> Bool {
+        if needle.isEmpty { return false }
+        if hay.contains(needle) { return true }
+        let n = Array(needle)
+        guard n.count >= 3 else { return false }
+        let h = Array(hay)
+        guard h.count >= n.count else { return false }
+        // 在 hay 上滑一个 n.count 长的窗，算最小编辑距离
+        for start in 0...(h.count - n.count) {
+            let win = Array(h[start..<(start + n.count)])
+            if editDistance(win, n) <= 1 { return true }
+        }
+        return false
+    }
+
+    /// 标准 Levenshtein（短串，直接 DP）
+    static func editDistance(_ a: [Character], _ b: [Character]) -> Int {
+        var prev = Array(0...b.count)
+        var cur = [Int](repeating: 0, count: b.count + 1)
+        for i in 1...a.count {
+            cur[0] = i
+            for j in 1...b.count {
+                let cost = a[i - 1] == b[j - 1] ? 0 : 1
+                cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+            }
+            prev = cur
+        }
+        return prev[b.count]
     }
 
     // MARK: - 模板匹配

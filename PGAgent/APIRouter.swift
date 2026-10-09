@@ -63,7 +63,7 @@ final class APIRouter {
 
         case ("GET", "/"):
             return .json([
-                "app": "PGAgent", "version": "0.3.1",
+                "app": "PGAgent", "version": "0.3.2",
                 "endpoints": ["/status", "/probe", "/reload", "/config", "/elements",
                               "/page", "/nav", "/ocr", "/files", "/file", "/write",
                               "/mkdir", "/ble/scan", "/ble/connect", "/ble/send",
@@ -77,7 +77,7 @@ final class APIRouter {
         case ("GET", "/status"):
             let cfgOK = cfgStore.cfg != nil
             return .json([
-                "app": "PGAgent", "version": "0.3.1",
+                "app": "PGAgent", "version": "0.3.2",
                 "ios": UIDevice.current.systemVersion,
                 "httpPort": Int(httpPort),
                 "documents": docsURL().path,
