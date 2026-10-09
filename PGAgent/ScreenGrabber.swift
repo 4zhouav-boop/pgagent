@@ -106,6 +106,7 @@ final class ScreenGrabber: ObservableObject {
         }
 
         let deadline = Date().addingTimeInterval(timeout)
+        let shortName = self.shortcutName
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             while Date() < deadline {
                 guard let self = self else { return }
@@ -133,10 +134,11 @@ final class ScreenGrabber: ObservableObject {
                 Thread.sleep(forTimeInterval: 0.25)
             }
             let afterCount = Self.listPNGs().count
-            let msg = "超时 \(timeout)s 没等到新截图｜open结果=\(self.lastOpenResult)"
+            let openRes = self?.lastOpenResult ?? "?"
+            let msg = "超时 \(timeout)s 没等到新截图｜open结果=\(openRes)"
                 + "｜抓帧前 PNG 数=\(beforeCount) 现在=\(afterCount)"
-                + "｜快捷指令名=\(self.shortcutName)"
-            DispatchQueue.main.async { self.lastError = msg }
+                + "｜快捷指令名=\(shortName)"
+            DispatchQueue.main.async { self?.lastError = msg }
             completion(nil, msg)
         }
     }
