@@ -41,6 +41,11 @@ final class ScreenGrabber: ObservableObject {
     @Published private(set) var lastShot: URL?
     @Published private(set) var lastError = ""
 
+    /// ⭐ 诊断信息（v0.4.1 加）—— 用来排查「抓帧为什么失败」
+    @Published private(set) var lastOpenResult: String = "未尝试"
+    @Published private(set) var grabAttempts = 0
+    @Published private(set) var grabSuccesses = 0
+
     private var lastSeen: [String: Date] = [:]
 
     /// 记录当前 Documents 里的 PNG（用于「发现新文件」）
@@ -72,11 +77,16 @@ final class ScreenGrabber: ObservableObject {
         guard let enc = n.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
               let url = URL(string: "shortcuts://run-shortcut?name=\(enc)") else {
             lastError = "URL 构造失败: \(n)"
+            lastOpenResult = "URL 构造失败"
             return false
         }
         lastError = ""
+        grabAttempts += 1
         DispatchQueue.main.async {
+            // ⭐ 记录 open 的返回结果（排查用）
             UIApplication.shared.open(url, options: [:]) { ok in
+                self.lastOpenResult = ok ? "✅ 系统接受了 shortcuts:// (name=\(n))"
+                                         : "⛔ 系统拒绝打开（快捷指令没装？名字不对？）"
                 completion?(ok)
             }
         }
@@ -88,6 +98,7 @@ final class ScreenGrabber: ObservableObject {
     func grab(timeout: Double = 8.0, completion: @escaping (URL?, String) -> Void) {
         snapshotExisting()
         let before = Set(lastSeen.keys)
+        let beforeCount = before.count
 
         guard triggerShortcut() else {
             completion(nil, lastError)
@@ -103,19 +114,30 @@ final class ScreenGrabber: ObservableObject {
                 for u in now {
                     let nm = u.lastPathComponent
                     if !before.contains(nm) {
-                        DispatchQueue.main.async { self.lastShot = u }
+                        DispatchQueue.main.async {
+                            self.lastShot = u
+                            self.grabSuccesses += 1
+                        }
                         completion(u, "")
                         return
                     }
                     if let old = self.lastSeen[nm], self.modDate(u) > old {
-                        DispatchQueue.main.async { self.lastShot = u }
+                        DispatchQueue.main.async {
+                            self.lastShot = u
+                            self.grabSuccesses += 1
+                        }
                         completion(u, "")
                         return
                     }
                 }
                 Thread.sleep(forTimeInterval: 0.25)
             }
-            completion(nil, "超时 \(timeout)s 没等到新截图（快捷指令没装？名字不对？）")
+            let afterCount = Self.listPNGs().count
+            let msg = "超时 \(timeout)s 没等到新截图｜open结果=\(self.lastOpenResult)"
+                + "｜抓帧前 PNG 数=\(beforeCount) 现在=\(afterCount)"
+                + "｜快捷指令名=\(self.shortcutName)"
+            DispatchQueue.main.async { self.lastError = msg }
+            completion(nil, msg)
         }
     }
 }

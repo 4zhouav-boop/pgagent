@@ -65,7 +65,7 @@ final class APIRouter {
 
         case ("GET", "/"):
             return .json([
-                "app": "PGAgent", "version": "0.4.0",
+                "app": "PGAgent", "version": "0.4.1",
                 "endpoints": ["/status", "/probe", "/reload", "/config", "/elements",
                               "/page", "/nav", "/ocr", "/files", "/file", "/write",
                               "/mkdir", "/ble/scan", "/ble/connect", "/ble/send",
@@ -92,7 +92,26 @@ final class APIRouter {
                               "bytes": (try? Data(contentsOf: u).count) ?? -1])
             }
             return .json(["ok": false, "error": gotErr.isEmpty ? "超时" : gotErr,
-                          "shortcut": grabber.shortcutName], status: 500)
+                          "shortcut": grabber.shortcutName,
+                          "openResult": grabber.lastOpenResult,
+                          "attempts": grabber.grabAttempts,
+                          "successes": grabber.grabSuccesses], status: 500)
+
+        // ⭐ 诊断：App 侧「眼」的全部状态（v0.4.1）
+        case ("GET", "/grabinfo"):
+            return .json([
+                "shortcut": grabber.shortcutName,
+                "openResult": grabber.lastOpenResult,
+                "lastError": grabber.lastError,
+                "attempts": grabber.grabAttempts,
+                "successes": grabber.grabSuccesses,
+                "lastShot": grabber.lastShot?.lastPathComponent ?? "-",
+                "documents": docsURL().path,
+                "pngCount": ScreenGrabber.listPNGs().count,
+                "pngFiles": ScreenGrabber.listPNGs().map { $0.lastPathComponent },
+                "canOpenShortcuts": UIApplication.shared
+                    .canOpenURL(URL(string: "shortcuts://")!),
+            ])
 
         // 只触发快捷指令，不等文件（快）
         case ("POST", "/shoot"):
@@ -110,7 +129,7 @@ final class APIRouter {
         case ("GET", "/status"):
             let cfgOK = cfgStore.cfg != nil
             return .json([
-                "app": "PGAgent", "version": "0.4.0",
+                "app": "PGAgent", "version": "0.4.1",
                 "ios": UIDevice.current.systemVersion,
                 "httpPort": Int(httpPort),
                 "documents": docsURL().path,

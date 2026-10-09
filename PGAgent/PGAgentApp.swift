@@ -120,7 +120,7 @@ struct ContentView: View {
                     .padding(6)
                 }
             }
-            .navigationTitle("PGAgent v0.4.0")
+            .navigationTitle("PGAgent v0.4.1")
             .onAppear(perform: boot)
         }
         .navigationViewStyle(.stack)
@@ -130,7 +130,7 @@ struct ContentView: View {
         guard !started else { return }
         started = true
 
-        store.log("=== PGAgent v0.4.0 启动 ===")
+        store.log("=== PGAgent v0.4.1 启动 ===")
         store.log("Documents = \(DocsScanner.docPath())")
 
         // ⭐ 起 HTTP 服务
