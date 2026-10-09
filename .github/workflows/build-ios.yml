@@ -1,0 +1,78 @@
+name: Build unsigned IPA
+
+# ⭐ 这个 workflow 就是「不用 Mac 编 iOS App」的答案：
+#    - runner 是 GitHub 的 macOS 机器（公共仓库免费，见 GitHub 官方 billing 文档）
+#    - 三个 CODE_SIGN_* 开关 ⇒ 完全跳过签名，产出**未签名 IPA**
+#    - 产物用 upload-artifact 传回，在 Windows 上下载
+#
+# 出处（我亲手取到原文）：
+#   https://cdn.jsdelivr.net/npm/shopify2app@1.3.0/templates/.github/workflows/build-ios.yml
+#   https://docs.github.com/en/billing/concepts/product-billing/github-actions
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: .
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      # ⭐ 从纯文本 project.yml 生成 .xcodeproj
+      #    ⇒ Windows 上不用装 Xcode，只要写 YAML
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build archive (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project PGAgent.xcodeproj \
+            -scheme PGAgent \
+            -sdk iphoneos \
+            -configuration Release \
+            -archivePath "$RUNNER_TEMP/PGAgent.xcarchive" \
+            archive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_ENTITLEMENTS="" \
+            | xcpretty || true
+          ls -la "$RUNNER_TEMP/PGAgent.xcarchive/Products/Applications/" || true
+
+      # ⭐ 关键补丁：shopify2app 那份模板只产 .xcarchive，**不是 IPA**
+      #    必须手动组装 Payload/ 再 zip 才是 .ipa
+      - name: Package into unsigned IPA
+        run: |
+          set -e
+          cd "$RUNNER_TEMP"
+          rm -rf Payload PGAgent-unsigned.ipa
+          mkdir -p Payload
+          cp -R "PGAgent.xcarchive/Products/Applications/PGAgent.app" Payload/
+          # 去掉旧签名残留（否则装的时候会被判无效）
+          rm -rf Payload/PGAgent.app/_CodeSignature || true
+          rm -f  Payload/PGAgent.app/embedded.mobileprovision || true
+          zip -qry PGAgent-unsigned.ipa Payload
+          echo "=== IPA 内容 ==="
+          unzip -l PGAgent-unsigned.ipa | head -30
+          echo "=== 大小 ==="
+          ls -la PGAgent-unsigned.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgagent-unsigned-ipa
+          path: ${{ runner.temp }}/PGAgent-unsigned.ipa
+          retention-days: 30

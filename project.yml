@@ -1,0 +1,45 @@
+name: PGAgent
+options:
+  bundleIdPrefix: run.pgagent
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+targets:
+  PGAgent:
+    type: application
+    platform: iOS
+    sources:
+      - path: PGAgent
+    info:
+      path: PGAgent/Info.plist
+      properties:
+        CFBundleDisplayName: PGAgent
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        # ⭐ 关键 1：让 App 的 Documents 暴露给「文件」App
+        #   ⇒ 快捷指令「存储到文件」才能把截图写进来（这是「眼」的命门）
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        # ⭐ 关键 2：蓝牙权限（连 ESP32 发 HID）
+        NSBluetoothAlwaysUsageDescription: "连接 ESP32 外设以发送点击指令"
+        NSBluetoothPeripheralUsageDescription: "连接 ESP32 外设以发送点击指令"
+        # ⭐ 关键 3：后台模式（能不能保活，靠实测）
+        UIBackgroundModes:
+          - bluetooth-central
+        # ⭐ 关键 4：允许调快捷指令的 URL scheme
+        LSApplicationQueriesSchemes:
+          - shortcuts
+        # 本地网络（iOS 14+ 需要，虽然我们走 BLE 不走网络，先留着）
+        NSLocalNetworkUsageDescription: "与本地设备通信"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: run.pgagent.PGAgent
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        DEVELOPMENT_TEAM: ""

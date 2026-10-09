@@ -1,0 +1,8 @@
+# XcodeGen 生成物（每次 CI 重新生成）
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+build/
+*.ipa
+*.xcarchive
