@@ -1,13 +1,16 @@
 name: Build unsigned IPA
 
-# ⭐ 这个 workflow 就是「不用 Mac 编 iOS App」的答案：
-#    - runner 是 GitHub 的 macOS 机器（公共仓库免费，见 GitHub 官方 billing 文档）
-#    - 三个 CODE_SIGN_* 开关 ⇒ 完全跳过签名，产出**未签名 IPA**
+# ⭐ 「不用 Mac 编 iOS App」的答案：
+#    - runner 是 GitHub 的 macOS 机器（公共仓库免费）
+#    - 三个 CODE_SIGN_* 开关 ⇒ 跳过签名，产出**未签名 IPA**
 #    - 产物用 upload-artifact 传回，在 Windows 上下载
 #
-# 出处（我亲手取到原文）：
-#   https://cdn.jsdelivr.net/npm/shopify2app@1.3.0/templates/.github/workflows/build-ios.yml
-#   https://docs.github.com/en/billing/concepts/product-billing/github-actions
+# ⛔ §1803 踩过的坑：第 7 步曾报
+#     `cp: PGAgent.xcarchive/Products/Applications/PGAgent.app: No such file or directory`
+#   根因：第 6 步 `| xcpretty || true` —— **xcpretty 没装**（brew 里没这一步），
+#         管道整体返回非 0 被 `|| true` 吃掉，**真正的报错被吞了**。
+#   ✅ 修法：① 不用 xcpretty（直接看 xcodebuild 输出）
+#            ② 编完**先 ls 出 archive 的真实结构**，再按实际路径打包（不再硬编码）
 
 on:
   push:
@@ -17,9 +20,6 @@ on:
 jobs:
   build:
     runs-on: macos-latest
-    defaults:
-      run:
-        working-directory: .
 
     steps:
       - uses: actions/checkout@v4
@@ -30,11 +30,10 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
-      # ⭐ 从纯文本 project.yml 生成 .xcodeproj
-      #    ⇒ Windows 上不用装 Xcode，只要写 YAML
       - name: Generate Xcode project
         run: xcodegen generate
 
+      # ⛔ 不再 `| xcpretty || true`（会吞掉真实错误）
       - name: Build archive (unsigned)
         run: |
           set -o pipefail
@@ -48,26 +47,38 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGN_ENTITLEMENTS="" \
-            | xcpretty || true
-          ls -la "$RUNNER_TEMP/PGAgent.xcarchive/Products/Applications/" || true
+            CODE_SIGN_ENTITLEMENTS=""
 
-      # ⭐ 关键补丁：shopify2app 那份模板只产 .xcarchive，**不是 IPA**
-      #    必须手动组装 Payload/ 再 zip 才是 .ipa
+      # ⭐ 关键：先看清 archive 的真实结构，再据此打包
+      - name: Inspect archive layout
+        run: |
+          echo "=== xcarchive 顶层 ==="
+          ls -la "$RUNNER_TEMP/PGAgent.xcarchive" || true
+          echo "=== Products ==="
+          find "$RUNNER_TEMP/PGAgent.xcarchive/Products" -maxdepth 3 | head -40 || true
+
       - name: Package into unsigned IPA
         run: |
           set -e
+          ARCH="$RUNNER_TEMP/PGAgent.xcarchive"
+          # ⭐ 按实际找到的 .app 打包（不再硬编码 Applications/PGAgent.app）
+          APP="$(find "$ARCH/Products" -maxdepth 3 -name '*.app' -type d | head -1)"
+          if [ -z "$APP" ]; then
+            echo "⛔ 在 $ARCH/Products 下找不到 .app"
+            find "$ARCH" -maxdepth 4 | head -60
+            exit 1
+          fi
+          echo "找到 app: $APP"
           cd "$RUNNER_TEMP"
           rm -rf Payload PGAgent-unsigned.ipa
           mkdir -p Payload
-          cp -R "PGAgent.xcarchive/Products/Applications/PGAgent.app" Payload/
-          # 去掉旧签名残留（否则装的时候会被判无效）
-          rm -rf Payload/PGAgent.app/_CodeSignature || true
-          rm -f  Payload/PGAgent.app/embedded.mobileprovision || true
+          cp -R "$APP" Payload/
+          APPNAME="$(basename "$APP")"
+          rm -rf "Payload/$APPNAME/_CodeSignature" || true
+          rm -f  "Payload/$APPNAME/embedded.mobileprovision" || true
           zip -qry PGAgent-unsigned.ipa Payload
           echo "=== IPA 内容 ==="
           unzip -l PGAgent-unsigned.ipa | head -30
-          echo "=== 大小 ==="
           ls -la PGAgent-unsigned.ipa
 
       - name: Upload IPA
