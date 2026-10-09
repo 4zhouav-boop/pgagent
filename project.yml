@@ -22,12 +22,20 @@ targets:
         #   ⇒ 快捷指令「存储到文件」才能把截图写进来（这是「眼」的命门）
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
-        # ⭐ 关键 2：蓝牙权限（连 ESP32 发 HID）
+        # ⭐ 关键 2：蓝牙权限（连 ESP32 发 HID）—— 前台用蓝牙**不需要 entitlement**，免费账号可用
         NSBluetoothAlwaysUsageDescription: "连接 ESP32 外设以发送点击指令"
         NSBluetoothPeripheralUsageDescription: "连接 ESP32 外设以发送点击指令"
-        # ⭐ 关键 3：后台模式（能不能保活，靠实测）
-        UIBackgroundModes:
-          - bluetooth-central
+        # ⛔⛔ §1798 **删掉 UIBackgroundModes: bluetooth-central**
+        #   ⛔ 实测（真机）：声明了它 ⇒ iOS **拒绝启动**，错误
+        #      `BSErrorCodeDescription: Security` / `RequestDenied`
+        #   📏 根因：`bluetooth-central` 需要 entitlement `com.apple.developer.bluetooth-central`，
+        #      而**免费 Apple ID 的描述文件里没有这一项**（只有 4 项：
+        #      application-identifier / team-identifier / get-task-allow / keychain-access-groups）。
+        #   ⭐ 而且**去掉它不影响最终架构** —— `_note_1792` 的结论本来就是
+        #      「活」要靠**「事件驱动回合」**而不是"长期后台"，
+        #      所以先拿掉后台模式，把 App 跑起来验证 V0 生死线（快捷指令截屏 → Documents）。
+        # UIBackgroundModes:
+        #   - bluetooth-central
         # ⭐ 关键 4：允许调快捷指令的 URL scheme
         LSApplicationQueriesSchemes:
           - shortcuts
