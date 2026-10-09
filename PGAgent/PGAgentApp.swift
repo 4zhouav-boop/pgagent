@@ -50,10 +50,18 @@ final class LogStore: ObservableObject {
     }
 }
 
+/// ⚠️ `HTTPServer` 不是 `ObservableObject`（它只管网络，不发 UI 通知）
+/// ⇒ 用这个 holder 把它包一层，才能放进 `@StateObject`
+final class HTTPServerHolder: ObservableObject {
+    let server = HTTPServer()
+    @Published var port: UInt16 = 0
+    @Published var lastError = ""
+}
+
 struct ContentView: View {
     @EnvironmentObject var store: LogStore
     @EnvironmentObject var ble: BLEController
-    @StateObject private var http = HTTPServer()
+    @StateObject private var http = HTTPServerHolder()
     @State private var router: APIRouter?
     @State private var started = false
     @State private var port: UInt16 = 0
@@ -106,13 +114,15 @@ struct ContentView: View {
         // ⭐ 起 HTTP 服务
         let rt = APIRouter(log: store, ble: ble)
         router = rt
-        http.onRequest = { [weak rt] req in
+        http.server.onRequest = { [weak rt] req in
             rt?.handle(req) ?? HTTPServer.Response.text("no router", status: 500)
         }
-        http.start(preferredPort: 8899)
-        port = http.port
-        rt.httpPort = http.port
-        store.log("HTTP 已起 127.0.0.1:\(http.port)  err=\(http.lastError)")
+        http.server.start(preferredPort: 8899)
+        port = http.server.port
+        http.port = http.server.port
+        http.lastError = http.server.lastError
+        rt.httpPort = http.server.port
+        store.log("HTTP 已起 127.0.0.1:\(http.server.port)  err=\(http.server.lastError)")
 
         // 通知
         NotificationCenter.default.addObserver(
