@@ -90,6 +90,12 @@ struct PGConfig: Codable {
         var loop_grab_timeout: Double?
         /// 画面连续 N 次不变就判卡死
         var loop_stall_limit: Int?
+        /// ⭐⭐ 连续 N 帧「认不出」才停手（§2240）
+        ///
+        /// 用户原话：「认不出就不做了，**直接自杀** 你还推荐。**要眼睛干什么**」
+        /// ⇒ `unknown` 多是**瞬时态**（转场/广告首尾/弹窗动画/首帧未渲染）
+        /// ⇒ 容忍几帧再重抓，默认 6。
+        var loop_unknown_limit: Int?
 
         // ⭐⭐ 照 **荔枝RPA** 实测值（_note_2010/2011/2012）
         /// 广告页最短停留（秒）—— 荔枝 settingsAdTimeMin = 40

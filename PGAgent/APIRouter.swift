@@ -316,7 +316,21 @@ final class APIRouter {
         // ⭐⭐⭐⭐ 录屏广播 —— 「眼」的**正路**（荔枝/所有 RPA App 的做法）
         //    ⛔ 不需要快捷指令、⛔ 不需要人手点：
         //    `RPSystemBroadcastPickerView().triggerPicker()` 程序化启动
+        //
+        // ⚠️⚠️ **`?verify=1` 才是真正可用的那个**（§2240）：
+        //    「触发 picker」**不等于**「录屏在跑」——
+        //    系统面板弹出后若没人点「开始直播」，或上一次会话半死，
+        //    就会「看起来成功、一帧都不来」。
+        //    ⇒ `/rec/start?verify=1` 会用**共享容器的帧时间戳**去验证，
+        //      不进行就重试（最多 3 轮 × 8 秒）。
+        //    ⚠️ 它会**阻塞**最多 ~30 秒 ⇒ 只在 handler 队列上跑（安全）。
         case ("POST", "/rec/start"):
+            if r.query["verify"] == "1" || r.query["verify"] == "true" {
+                let res = broadcaster.startAndVerify()
+                return .json(["ok": res.ok, "waited": res.waited,
+                              "state": broadcaster.snapshot()],
+                             status: res.ok ? 200 : 500)
+            }
             let ok = broadcaster.start()
             return .json(["ok": ok, "state": broadcaster.snapshot()],
                          status: ok ? 200 : 500)

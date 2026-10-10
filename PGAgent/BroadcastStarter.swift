@@ -112,6 +112,8 @@ final class BroadcastStarter: ObservableObject {
 
     /// ⭐ 最近一帧的到达时间（任意线程读写，⛔ 不是 @Published）
     private var lastFrameReceivedAt: Date?
+    /// ⭐⭐ 帧是否**已验证**在进（`startAndVerify` 的结论；诊断用）
+    private(set) var framesVerified = false
     private var lastSeq = -1
     /// ⭐ 上一帧的修改时间（判新用；见 `pollFrame`）
     private var lastFrameMTime: Date?
@@ -351,6 +353,105 @@ final class BroadcastStarter: ObservableObject {
         return _lastFrame != nil
     }
 
+    // MARK: - ⭐⭐ 启动**并验证**（§2240）
+
+    /// ⭐ 启动录屏，然后**确认帧真的开始进**；不进行就重试。
+    ///
+    /// ## 为什么必须有这一步（实测踩过）
+    /// `RPSystemBroadcastPickerView` 触发了 picker，但**用户（或自动化）没点
+    /// 「开始直播」**，或上一次广播留了个**半死会话**（手机弹
+    /// 「PGShot的直播已停止，因为：尝试开始无效的直播会话」）⇒
+    /// **picker 弹了、App 以为成功了、但一帧都不来**。
+    ///
+    /// ⇒ 所以「触发 picker」⛔ 不等于「录屏在跑」。
+    ///    必须用**共享容器的帧文件时间戳**去验证（那是唯一的真相来源）。
+    ///
+    /// ## 做法
+    /// ```
+    /// ① 触发一次
+    /// ② 等最多 `waitSec` 秒，看共享容器的帧 mtime **有没有变新**
+    /// ③ 没变 ⇒ 记一次失败，**重建** picker 再触发（最多 `tries` 次）
+    /// ④ 返回「帧是否真的在进」这个**事实**，而不是「有没有点到按钮」
+    /// ```
+    /// ⚠️ 本方法**会阻塞** `waitSec * tries` 秒 ⇒ 只适合 HTTP handler
+    ///    （它跑在独立队列，见 `HTTPServer.handleAsync`）。
+    @discardableResult
+    func startAndVerify(tries: Int = 3, waitSec: Double = 8) -> (ok: Bool, waited: Double) {
+        let t0 = Date()
+
+        guard let dir = Self.framesDir() else {
+            setLastError("⛔ 没有 App Group 共享容器 ⇒ 扩展写了也读不到")
+            return (false, 0)
+        }
+        NSLog("PGAgent BroadcastStarter: 共享容器 = %@", dir.path)
+
+        // 起始 mtime（用容器里的 lastframe.jpg 或任一 frame_*.jpg）
+        func newestFrameMTime() -> Date? {
+            let fm = FileManager.default
+            var best: Date?
+            for u in Self.frameCandidates(Self.frameName) {
+                if let a = try? fm.attributesOfItem(atPath: u.path),
+                   let m = a[.modificationDate] as? Date {
+                    if best == nil || m > best! { best = m }
+                }
+            }
+            return best
+        }
+
+        var baseline = newestFrameMTime()
+        NSLog("PGAgent BroadcastStarter: 起始帧 mtime = %@",
+              baseline.map { "\($0)" } ?? "(还没有帧)")
+
+        for attempt in 1...max(1, tries) {
+            NSLog("PGAgent BroadcastStarter: 触发第 %d/%d 次", attempt, tries)
+            _ = start()                      // ← 触发 picker（内部已回主线程）
+
+            // 等帧时间戳**变新**
+            let deadline = Date().addingTimeInterval(waitSec)
+            while Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.5)
+                pollFrame()                  // 主动读一次（不依赖 timer）
+                if let m = newestFrameMTime(), (baseline == nil || m > baseline!) {
+                    let dt = Date().timeIntervalSince(t0)
+                    // ⭐ 帧在进 = 录屏**真的**跑起来了
+                    NSLog("PGAgent BroadcastStarter: ✅ 帧开始进（%.1fs）", dt)
+                    setLastError("")
+                    framesVerified = true
+                    return (true, dt)
+                }
+            }
+            // 这一轮没等到 ⇒ 收掉可能的半死会话，下一轮重来
+            NSLog("PGAgent BroadcastStarter: ⚠️ 第 %d 次等 %.0fs 没等到新帧",
+                  attempt, waitSec)
+            _ = stopAndReap()
+            baseline = nil                   // 下一轮只要**有**帧就算新
+            Thread.sleep(forTimeInterval: 1.5)
+        }
+
+        let dt = Date().timeIntervalSince(t0)
+        setLastError("⛔ 触发 \(tries) 次、共等 \(Int(dt))s，共享容器里**始终没有新帧**。"
+                     + "常见原因：① 系统面板弹出后没人点「开始直播」"
+                     + " ② 上一次广播会话半死（去控制中心把它停掉再试）")
+        NSLog("PGAgent BroadcastStarter: %@", lastError)
+        return (false, dt)
+    }
+
+    /// ⭐ 停掉录屏并**清理半死会话**的痕迹（重试前调用）
+    private func stopAndReap() -> Bool {
+        stop()                               // 放停止标志，让扩展自己结束
+        framesVerified = false
+        // ⚠️ 给系统一点时间真正收掉广播会话（否则下一次触发会撞上
+        //    「尝试开始无效的直播会话」——真机实测过这个弹窗）
+        Thread.sleep(forTimeInterval: 1.5)
+        return true
+    }
+
+    /// ⭐ 安全地改 `lastError`
+    private func setLastError(_ s: String) {
+        if Thread.isMainThread { lastError = s }
+        else { DispatchQueue.main.async { self.lastError = s } }
+    }
+
     /// 扩展送帧进来时调用（HTTP 路也走这里）
     ///
     /// ⛔ `@Published` 属性（`frames` / `lastFrameAt`）**只能在主线程改**，
@@ -394,6 +495,7 @@ final class BroadcastStarter: ObservableObject {
         return [
             "started": started,
             "frames": frameCount,
+            "framesVerified": framesVerified,
             "lastFrameAgo": (recvAt ?? lastFrameAt)
                 .map { Date().timeIntervalSince($0) } ?? -1,
             "lastFrameBytes": bytes,

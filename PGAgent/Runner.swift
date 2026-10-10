@@ -70,6 +70,20 @@ final class Runner: ObservableObject {
     /// ⭐ 广告停留（荔枝 40/60 秒）
     private var adStayMin: Double { cfgStore.cfg?.settings?.ad_stay_min ?? 40 }
     private var adStayMax: Double { cfgStore.cfg?.settings?.ad_stay_max ?? 60 }
+    /// ⭐⭐⭐ 「认不出」的**容忍次数**（§2240）
+    ///
+    /// ## 为什么必须容忍（用户原话）
+    /// > 「认不出就不做了，**直接自杀** 你还推荐。**要眼睛干什么**」
+    ///
+    /// ⇒ 铁律是「⛔ **不盲点**」（不猜坐标），但**不是**「一帧认不出就放弃」。
+    ///    真实的 `unknown` 大多来自**瞬时态**：页面转场、广告开头/结尾、
+    ///    弹窗动画、首帧还没渲染完。这些**下一帧就好了**。
+    ///
+    /// ⇒ 所以：`unknown` 时**再抓几帧 + 跑漏斗**，
+    ///    连续 `unknownLimit` 次才认输。
+    private var unknownLimit: Int {
+        cfgStore.cfg?.settings?.loop_unknown_limit ?? 6
+    }
     /// ⭐ OCR 超时（荔枝 10.1s / 99 次）
     private var ocrTimeout: Double { cfgStore.cfg?.settings?.ocr_timeout_s ?? 10.0 }
     private var ocrMaxTries: Int { cfgStore.cfg?.settings?.ocr_max_tries ?? 99 }
@@ -170,11 +184,13 @@ final class Runner: ObservableObject {
 
         var stall = 0
         var lastSig = ""
+        /// ⭐ 连续「认不出」计数（见 `unknownLimit` 的说明）
+        var unknownStreak = 0
 
         for k in 0..<maxSteps {
             if cancelFlag { finish("用户停止"); return }
             DispatchQueue.main.async { self.step = k + 1 }
-            writeHeartbeat(["phase": "loop", "k": k])
+            writeHeartbeat(["phase": "loop", "k": k, "unknownStreak": unknownStreak])
 
             // ① 抓帧
             guard let img = grabSync() else {
@@ -198,11 +214,39 @@ final class Runner: ObservableObject {
             if page == "ad_video" {
                 log("§run ⛔ 广告页 ⇒ 放行（待够 \(Int(adStayMin))~\(Int(adStayMax))s，⛔ 不点 ✕）")
                 DispatchQueue.main.async { self.lastAction = "ad-stay" }
+                unknownStreak = 0
                 adStayLoop()
                 continue
             }
 
-            // ⑤ 卡死检测
+            // ⑤ ⭐⭐ **认不出 ⇒ 先容忍，别自杀**（§2240）
+            //
+            // 用户原话：「认不出就不做了，直接自杀 你还推荐。要眼睛干什么」
+            // ⇒ `unknown` 多是**瞬时态**（转场/广告首尾/弹窗动画/首帧未渲染）
+            // ⇒ 再抓几帧、顺带跑一遍漏斗（弹窗常在这时能被认出来），
+            //    连续 `unknownLimit` 次才认输。
+            if page == "unknown" {
+                unknownStreak += 1
+                DispatchQueue.main.async { self.lastAction = "unknown-retry(\(unknownStreak))" }
+                log("§run ⚠️ 画面认不出（第 \(unknownStreak)/\(unknownLimit) 次）⇒ 重抓再看")
+                // 顺手试试漏斗：弹窗盖屏时**底下**的页面判不出来，
+                // 但漏斗元素（关闭✕/跳过/我知道了）往往能认出来
+                if nav.runFunnel(img) {
+                    DispatchQueue.main.async { self.lastAction = "funnel(unknown)" }
+                    unknownStreak = 0
+                }
+                if unknownStreak >= unknownLimit {
+                    finish("⛔ 连续 \(unknownLimit) 帧认不出 ⇒ 停手（不盲点）")
+                    return
+                }
+                writeHeartbeat(["phase": "unknown-retry", "k": k,
+                                "unknownStreak": unknownStreak])
+                sleep(stepWait)
+                continue
+            }
+            unknownStreak = 0
+
+            // ⑥ 卡死检测
             let sig = signature(img)
             if sig == lastSig {
                 stall += 1
@@ -215,14 +259,14 @@ final class Runner: ObservableObject {
                 lastSig = sig
             }
 
-            // ⑥ ⭐ 杂七杂八处理（荔枝的「杂七杂八处理」）—— 弹窗优先
+            // ⑦ ⭐ 杂七杂八处理（荔枝的「杂七杂八处理」）—— 弹窗优先
             if nav.runFunnel(img) {
                 DispatchQueue.main.async { self.lastAction = "funnel" }
                 sleep(stepWait)
                 continue
             }
 
-            // ⑦ ⭐ 转化关键词检查（荔枝的 `settingsConversionKeyword`）
+            // ⑧ ⭐ 转化关键词检查（荔枝的 `settingsConversionKeyword`）
             if !conversionKeywords.isEmpty {
                 let hits = rec.findWords(img, words: conversionKeywords, roi: nil,
                                          minHits: 1, minConfidence: 0.5)
@@ -234,7 +278,7 @@ final class Runner: ObservableObject {
                 }
             }
 
-            // ⑧ 页面图上前进一跳
+            // ⑨ 页面图上前进一跳
             if let p = cfg.pages[page], let go = p.go, go != "stop" {
                 if nav.tap(go, img: img) {
                     DispatchQueue.main.async { self.lastAction = "tap:\(go)" }
@@ -242,10 +286,18 @@ final class Runner: ObservableObject {
                     continue
                 }
                 log("§run ⚠️ 在 \(page) 想点 \(go) 但没找到")
+                // ⭐ 认得出页面但**点不到**出路 ⇒ 也容忍几次（可能正被弹窗挡着）
+                unknownStreak += 1
+                if unknownStreak >= unknownLimit {
+                    finish("⛔ 在 \(page) 连续 \(unknownLimit) 次点不到 \(go) ⇒ 停手")
+                    return
+                }
+                sleep(stepWait)
+                continue
             }
 
-            // ⑨ ⛔ 认不出出路 ⇒ 停手（⛔ 不盲点）
-            finish("⛔ 在 \(page) 认不出出路 ⇒ 停手")
+            // ⑩ ⛔ 页面认得、但配置里没给出路 ⇒ 停手（⛔ 不盲点）
+            finish("⛔ 在 \(page) 配置里没有出路 ⇒ 停手")
             return
         }
 
