@@ -44,6 +44,11 @@ class SampleHandler: RPBroadcastSampleHandler {
     /// 停止标志文件名（主 App 放/删它来控制录屏，照荔枝的做法 `_note_2011` §8）
     private let stopFlag = "stop_broadcast"
 
+    /// ⭐ 主 App 的 HTTP 端口（帧 POST 到这里）
+    private let port: UInt16 = 8899
+    /// ⭐ 复用 URLSession（扩展存活期内一直用）
+    private var session: URLSession?
+
     private var dir: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
@@ -88,16 +93,57 @@ class SampleHandler: RPBroadcastSampleHandler {
         let scaled = downscale(img, toWidth: outWidth)
         guard let jpg = scaled.jpegData(compressionQuality: 0.7) else { return }
 
-        // ⑤ 写盘（⭐ 原子写：先写 .tmp 再 rename，避免 PC 读到半截）
         seq += 1
+
+        // ⑤ ⭐⭐ 两条路都发（实测扩充）：
+        //
+        // ⚠️⚠️ **关键实测（§2200）**：扩展的 Documents **不是主 App 的 Documents**！
+        //   · 扩展容器: run.pgagent.PGAgent.8W9ZSMW4UW.PGShot/Documents  ⇒ 实测 128 个帧文件
+        //   · 主 App 容器: run.pgagent.PGAgent.8W9ZSMW4UW/Documents        ⇒ 只有 pgconfig
+        //   ⇒ 免费 Apple ID **没有 App Group** ⇒ 两者**不能共享目录**
+        //
+        // ⇒ 所以必须把帧**推给主 App**：
+        //   ① ⭐ **HTTP POST** 到主 App 的 `127.0.0.1:8899/frame`（同一台设备，回环可达）
+        //   ② 同时**留一份本地**（调试用；PC 可用 `ios file ls --app=<ext-id>` 读）
         write(jpg, name: "lastframe.jpg")
-        // 每 10 帧留一张存档（调试用）
         if seq % 10 == 0 {
             write(jpg, name: "frame_\(seq).jpg")
         }
+        post(jpg, seq: seq)
     }
 
     // MARK: - 工具
+
+    /// ⭐⭐ 把帧 **POST 给主 App**（`http://127.0.0.1:8899/frame`）。
+    ///
+    /// **为什么必须这样**（§2200 实测）：
+    ///   · 扩展与主 App 的 Documents **是两个不同容器**
+    ///     （扩展 `...PGShot/Documents` 有 128 个帧；主 App `/Documents` 只有 pgconfig）
+    ///   · 免费 Apple ID **没有 App Group** ⇒ 不能共享目录
+    ///   ⇒ 只能走**回环 HTTP**（同一台设备，`127.0.0.1` 可达）
+    private func post(_ data: Data, seq: Int) {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/frame?seq=\(seq)") else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        req.httpBody = data
+        req.timeoutInterval = 2
+        if session == nil {
+            let cfg = URLSessionConfiguration.ephemeral
+            cfg.timeoutIntervalForRequest = 2
+            cfg.timeoutIntervalForResource = 2
+            cfg.waitsForConnectivity = false
+            // ⛔ 不要走系统代理（会卡死；`_note_2090` 踩过）
+            cfg.connectionProxyDictionary = [:]
+            session = URLSession(configuration: cfg)
+        }
+        session?.dataTask(with: req) { _, _, err in
+            if let err = err {
+                // 主 App 不在前台时会失败，属正常（帧已本地留档）
+                NSLog("PGShot frame post: %@", String(describing: err))
+            }
+        }.resume()
+    }
 
     /// ⭐ 正常结束广播（⛔ 不报错）。
     ///
