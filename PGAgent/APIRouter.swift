@@ -68,10 +68,11 @@ final class APIRouter {
 
         case ("GET", "/"):
             return .json([
-                "app": "PGAgent", "version": "0.5.0",
+                "app": "PGAgent", "version": "0.6.0",
                 "endpoints": ["/status", "/probe", "/reload", "/config", "/elements",
                               "/page", "/nav", "/ocr", "/see", "/grab", "/grabinfo",
                               "/shoot", "/shortcut", "/run", "/runstop", "/runstate",
+                              "/dl", "/openurl", "/install-shortcut",
                               "/files", "/file", "/write", "/mkdir", "/ble/scan",
                               "/ble/connect", "/ble/send", "/click", "/log"],
             ])
@@ -148,7 +149,7 @@ final class APIRouter {
         case ("GET", "/status"):
             let cfgOK = cfgStore.cfg != nil
             return .json([
-                "app": "PGAgent", "version": "0.5.0",
+                "app": "PGAgent", "version": "0.6.0",
                 "ios": UIDevice.current.systemVersion,
                 "httpPort": Int(httpPort),
                 "documents": docsURL().path,
@@ -298,6 +299,66 @@ final class APIRouter {
         // ── 文件 ──
         case ("GET", "/files"):
             return .json(["documents": docsURL().path, "files": listFiles()])
+
+        // ⭐⭐⭐ `GET /dl?name=X` —— **App 自己吐出文件给 Safari 下载**
+        //    手机 Safari 访问 `http://127.0.0.1:8899/dl?name=PGshot.shortcut`
+        //    ⇒ 走**本机回环**，⛔ 不依赖 Wi-Fi / VPN / 同网段！
+        //    ⇒ 带 `Content-Disposition: attachment` ⇒ Safari 走下载管理器
+        //      然后「点开下载」就出「添加快捷指令」导入框（`_note_1938` 的路 A）
+        case ("GET", "/dl"):
+            guard let name = r.query["name"], !name.isEmpty, !name.contains("..") else {
+                return .text("need ?name=", status: 400)
+            }
+            let u = docsURL().appendingPathComponent(name)
+            guard let d = try? Data(contentsOf: u) else {
+                return .text("not found: \(name)", status: 404)
+            }
+            return .data(d, contentType: "application/octet-stream",
+                         extraHeaders: ["Content-Disposition":
+                                        "attachment; filename=\"\(u.lastPathComponent)\""])
+
+        // ⭐⭐⭐ `POST /openurl?u=<url>` —— **App 自己用 Safari 打开一个网址**
+        //    ⇒ 我把 `/dl` 的地址交给它，它自己开 Safari
+        //    ⇒ ⛔ 不需要我在外面用 OCR + ESP32 一个字一个字敲地址
+        case ("POST", "/openurl"):
+            guard let s = r.query["u"], let url = URL(string: s) else {
+                return .text("need ?u=<url>", status: 400)
+            }
+            let sem = DispatchSemaphore(value: 0)
+            var ok = false
+            DispatchQueue.main.async {
+                UIApplication.shared.open(url, options: [:]) { r in ok = r; sem.signal() }
+            }
+            _ = sem.wait(timeout: .now() + 6)
+            log.log("openurl \(s) -> \(ok)")
+            return .json(["ok": ok, "url": s])
+
+        // ⭐⭐⭐ `POST /install-shortcut` —— **一站式：把 PGshot 推给 Safari 下载**
+        //    ① App 自己确认 Documents 里有 PGshot.shortcut
+        //    ② App 自己开 Safari 到 `http://127.0.0.1:<port>/dl?name=PGshot.shortcut`
+        //    ③ Safari 下载 ⇒ 用户点开 ⇒ 导入框
+        case ("POST", "/install-shortcut"):
+            let nm = r.query["name"] ?? "PGshot.shortcut"
+            let u = docsURL().appendingPathComponent(nm)
+            guard FileManager.default.fileExists(atPath: u.path) else {
+                return .json(["ok": false, "stage": "file",
+                              "error": "Documents 里没有 \(nm)（先推文件）",
+                              "documents": docsURL().path], status: 404)
+            }
+            let port = Int(httpPort)
+            let s = "http://127.0.0.1:\(port)/dl?name=\(nm.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? nm)"
+            guard let url = URL(string: s) else {
+                return .json(["ok": false, "stage": "url", "error": s], status: 500)
+            }
+            let sem = DispatchSemaphore(value: 0)
+            var ok = false
+            DispatchQueue.main.async {
+                UIApplication.shared.open(url, options: [:]) { r in ok = r; sem.signal() }
+            }
+            _ = sem.wait(timeout: .now() + 6)
+            log.log("install-shortcut \(nm) -> open \(ok) \(s)")
+            return .json(["ok": ok, "opened": s, "file": nm,
+                          "next": "Safari 会下载 ⇒ 点右下 ↓ 打开下载 ⇒ 点文件 ⇒ 点「添加」"])
 
         case ("GET", "/file"):
             guard let name = r.query["name"], !name.isEmpty else {

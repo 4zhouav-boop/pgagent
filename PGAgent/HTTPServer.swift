@@ -23,6 +23,8 @@ final class HTTPServer {
         var status = 200
         var contentType = "application/json; charset=utf-8"
         var body = Data()
+        /// ⭐ 额外的响应头（如 `Content-Disposition` —— Safari 下载要用）
+        var extraHeaders: [String: String] = [:]
 
         static func json(_ obj: Any, status: Int = 200) -> Response {
             var r = Response()
@@ -44,10 +46,12 @@ final class HTTPServer {
             return r
         }
 
-        static func data(_ d: Data, type: String = "application/octet-stream") -> Response {
+        static func data(_ d: Data, type: String = "application/octet-stream",
+                         extraHeaders: [String: String] = [:]) -> Response {
             var r = Response()
             r.contentType = type
             r.body = d
+            r.extraHeaders = extraHeaders
             return r
         }
     }
@@ -199,6 +203,10 @@ final class HTTPServer {
         head += "Content-Length: \(r.body.count)\r\n"
         head += "Connection: close\r\n"
         head += "Access-Control-Allow-Origin: *\r\n"
+        // ⭐ 额外响应头（如 Content-Disposition —— Safari 下载要用）
+        for (k, v) in r.extraHeaders {
+            head += "\(k): \(v)\r\n"
+        }
         head += "\r\n"
         var out = Data(head.utf8)
         out.append(r.body)
