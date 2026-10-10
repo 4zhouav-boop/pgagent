@@ -161,20 +161,54 @@ final class PiPManager: NSObject, ObservableObject {
     }
 
     /// UIImage → CMSampleBuffer（PiP 要的格式）
+    ///
+    /// ⚠️ `CMVideoFormatDescriptionCreateForImageBuffer` **只接受 `CVImageBuffer`**
+    ///    （⛔ 不是 `CGImage`）⇒ 必须先把 CGImage 画进 `CVPixelBuffer`。
     private func sampleBuffer(from img: UIImage) -> CMSampleBuffer? {
         guard let cg = img.cgImage else { return nil }
-        var sb: CMSampleBuffer?
+
+        // ① 建 CVPixelBuffer
+        var pb: CVPixelBuffer?
+        let attrs: [String: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey as String: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey as String: true,
+        ]
+        let st = CVPixelBufferCreate(kCFAllocatorDefault, W, H,
+                                     kCVPixelFormatType_32BGRA,
+                                     attrs as CFDictionary, &pb)
+        guard st == kCVReturnSuccess, let pixelBuffer = pb else { return nil }
+
+        // ② 把 CGImage 画进去
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, []) }
+        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return nil }
+        let cs = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(data: base,
+                                  width: W, height: H,
+                                  bitsPerComponent: 8,
+                                  bytesPerRow: CVPixelBufferGetBytesPerRow(pixelBuffer),
+                                  space: cs,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                              | CGBitmapInfo.byteOrder32Little.rawValue) else {
+            return nil
+        }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: W, height: H))
+
+        // ③ 格式描述
         var fmt: CMVideoFormatDescription?
         CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault,
-                                                     imageBuffer: cg,
+                                                     imageBuffer: pixelBuffer,
                                                      formatDescriptionOut: &fmt)
         guard let f = fmt else { return nil }
+
+        // ④ SampleBuffer
+        var sb: CMSampleBuffer?
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: 1),
             presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
             decodeTimeStamp: .invalid)
         CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault,
-                                                 imageBuffer: cg,
+                                                 imageBuffer: pixelBuffer,
                                                  formatDescription: f,
                                                  sampleTiming: &timing,
                                                  sampleBufferOut: &sb)
