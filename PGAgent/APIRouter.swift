@@ -83,7 +83,7 @@ final class APIRouter {
                               "/keepalive/start", "/keepalive/stop", "/keepalive/state",
                               "/runlog", "/recogdiag",
                               "/files", "/file", "/write", "/mkdir", "/ble/scan",
-                              "/ble/connect", "/ble/connect-paired", "/ble/send", "/click", "/log"],
+                              "/ble/connect", "/ble/connect-paired", "/blediag", "/ble/send", "/click", "/log"],
             ])
 
         // ⭐ 极简探活（⛔ 不碰文件系统、不做识别）—— 用来区分「App 挂了」和「handler 慢」
@@ -609,6 +609,22 @@ final class APIRouter {
             let n = ble.connectPaired(hint: r.query["name"])
             return .json(["ok": n > 0, "tried": n, "state": ble.state,
                           "error": ble.lastError])
+
+        // ⭐⭐⭐ `/blediag` —— **BLE 命令通道专项诊断**（§2252）
+        //   「手机能不能给板子发命令」是移植的**最后一环** ⇒ 必须有专用诊断。
+        //   一条请求看清：认到 NUS 没、服务/特征发现过程、板子回执内容。
+        case ("GET", "/blediag"):
+            return .json([
+                "ok": true,
+                "state": ble.state,
+                "error": ble.lastError,
+                "nusRxFound": ble.nusRxFound,      // ⭐ 认到 NUS 命令特征没
+                "lastAck": ble.lastAck,            // ⭐ 板子回执（双向通的证据）
+                "threadAck": ble.lastAck.isEmpty
+                    ? "（还没收到回执）" : ble.lastAck,
+                "probe": ble.probeStore,           // 服务/特征发现过程
+                "devices": ble.devices,
+            ])
 
         case ("POST", "/ble/send"):
             guard let c = r.query["cmd"] else { return .text("need ?cmd=", status: 400) }

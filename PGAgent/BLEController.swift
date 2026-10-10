@@ -19,6 +19,16 @@ final class BLEController: NSObject, ObservableObject {
     private var writeChar: CBCharacteristic?
     private var scanStore: ((String) -> Void)?
 
+    // ⭐⭐ §2252 NUS 命令通道 + 诊断
+    /// 认到 NUS 的 RX 特征（`6E400002-…`）—— 手机往这写命令
+    private(set) var nusRxFound = false
+    /// NUS 的 TX 特征（`6E400003-…`）—— 板子回执走这
+    private var notifyChar: CBCharacteristic?
+    /// ⭐ 板子最近一条回执（`ok:<命令>`）⇒ 双向通的**直接证据**
+    private(set) var lastAck = ""
+    /// ⭐ 服务/特征发现过程（`/blediag` 回显，排查用）
+    private(set) var probeStore: [String] = []
+
     /// ESP32 常见的 HID/透传服务 UUID（PG 板子用的是 Nordic UART 风格的透传）
     /// ⚠️ 真机实测后按需调整；也支持不过滤扫描（nil）
     static let candidateServiceUUIDs: [CBUUID] = [
@@ -257,21 +267,59 @@ extension BLEController: CBCentralManagerDelegate {
 
 extension BLEController: CBPeripheralDelegate {
     func peripheral(_ p: CBPeripheral, didDiscoverServices error: Error?) {
+        // ⭐ 诊断：把发现的服务打出来（排查「找不到可写特征」）
         for s in p.services ?? [] {
+            NSLog("PGAgent BLE: 发现服务 %@", s.uuid.uuidString)
+            probeStore.append("服务 \(s.uuid.uuidString)")
             p.discoverCharacteristics(nil, for: s)
+        }
+        if (p.services ?? []).isEmpty {
+            lastError = "外设没暴露任何服务"
+            NSLog("PGAgent BLE: %@", lastError)
         }
     }
 
     func peripheral(_ p: CBPeripheral, didDiscoverCharacteristicsFor s: CBService, error: Error?) {
         for ch in s.characteristics ?? [] {
-            if ch.properties.contains(.write) || ch.properties.contains(.writeWithoutResponse) {
-                if writeChar == nil { writeChar = ch }   // 取第一个可写的
+            let w = ch.properties.contains(.write) || ch.properties.contains(.writeWithoutResponse)
+            let n = ch.properties.contains(.notify) || ch.properties.contains(.indicate)
+            probeStore.append("  特征 \(ch.uuid.uuidString) write=\(w) notify=\(n)")
+            NSLog("PGAgent BLE: 特征 %@ (%@) write=%d notify=%d",
+                  ch.uuid.uuidString, s.uuid.uuidString, w ? 1 : 0, n ? 1 : 0)
+
+            // ⭐⭐ **优先认 NUS 的 RX 特征**（`6E400002-…`）——
+            //    那是固件里我们**专门给手机发命令**加的可写特征。
+            //    ⛔ 不能"取第一个可写的"：HID 服务里也有可写特征
+            //       （如 HID Control Point `0x2A4C`），写它**不是**我们的命令协议。
+            if ch.uuid == CBUUID(string: "6E400002-B5A3-F393-E0A9-E50E24DCCA9E") {
+                writeChar = ch
+                nusRxFound = true
+                NSLog("PGAgent BLE: ⭐ 认到 NUS 命令特征")
+            } else if ch.uuid == CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E") {
+                notifyChar = ch
+                p.setNotifyValue(true, for: ch)
+                NSLog("PGAgent BLE: ⭐ 订阅 NUS 回执特征")
+            } else if writeChar == nil && w {
+                // 兜底：没找到 NUS 时的兼容路径（老固件）
+                writeChar = ch
             }
         }
-        if writeChar != nil {
+        if nusRxFound {
             state = "ready:\(p.name ?? "?")"
+            lastError = ""
+        } else if writeChar != nil {
+            state = "ready(非NUS):\(p.name ?? "?")"
+            lastError = "板子没有 NUS 命令特征（固件要烧 v2251 双向版）"
         } else {
             lastError = "外设没找到可写 characteristic"
+        }
+    }
+
+    func peripheral(_ p: CBPeripheral, didUpdateValueFor ch: CBCharacteristic, error: Error?) {
+        // ⭐ 收到板子的回执（`ok:<命令>`）⇒ 证明**双向通了**
+        if let d = ch.value, let s = String(data: d, encoding: .utf8) {
+            lastAck = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            NSLog("PGAgent BLE: 板子回执 %@", lastAck)
         }
     }
 }
