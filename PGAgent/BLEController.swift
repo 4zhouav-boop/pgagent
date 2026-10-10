@@ -79,11 +79,20 @@ final class BLEController: NSObject, ObservableObject {
     ///    所以**必须是这台手机自己配过的板子**（也正是我们要的语义）。
     @discardableResult
     func connectPaired(hint: String? = nil) -> Int {
-        // ⚠️ `retrievePeripherals(withIdentifiers:)` 传**空数组会返回空**
-        //    （它要的是「你确实知道的那几个 UUID」）⇒ 所以只能：
-        //      ① `retrieveConnectedPeripherals` —— 系统里**当前已连接**的
-        //      ② 记住我们**上次连过**的 UUID（`lastKnownID`）→ 下次直接 retrieve
-        var cands: [CBPeripheral] = central.retrieveConnectedPeripherals(withServices: [])
+        // ⛔⛔ **不能传空数组**（§2252 我踩的坑）：
+        //    Apple 文档：`retrieveConnectedPeripherals(withServices:)` 的 `services`
+        //    **必须非空**，传 `[]` **直接返回空数组** ⇒ 什么都拿不到。
+        //    我原来就是传 `[]` ⇒ 恒返回 0 个 ⇒ "没有已配对的外设"。
+        //
+        // ✅ 正确：传我们关心的**具体服务 UUID**。
+        //    板子是 **BLE HID 键盘/鼠标**（服务 `0x1812`）+ 我们新加的 **NUS**。
+        var svcs: [CBUUID] = [
+            CBUUID(string: "00001812-0000-1000-8000-00805F9B34FB"),  // ⭐ HID（板子主服务）
+            CBUUID(string: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"),  // ⭐ 我们新加的 NUS
+        ]
+        svcs += Self.candidateServiceUUIDs
+        var cands: [CBPeripheral] = central.retrieveConnectedPeripherals(withServices: svcs)
+        // ② 再用「上次连过的 UUID」retrieve 一次（跨次开机也能连）
         if let id = lastKnownID,
            let p = central.retrievePeripherals(withIdentifiers: [id]).first {
             if !cands.contains(where: { $0.identifier == p.identifier }) {
@@ -103,7 +112,7 @@ final class BLEController: NSObject, ObservableObject {
             if hint == nil { break }     // 没指定名字 ⇒ 先连一个试试
         }
         if n == 0 {
-            lastError = "没有已配对的外设（先去「扫 BLE」连一次）"
+            lastError = "没有已配对的外设（已连的 HID/NUS 里没找到；可先「扫 BLE」一次）"
         }
         return n
     }
