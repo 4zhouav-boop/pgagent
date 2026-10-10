@@ -3,35 +3,38 @@ import UIKit
 
 /// ⭐⭐⭐⭐⭐ 「眼」—— **录屏广播扩展**（荔枝/所有 RPA App 的真正做法）。
 ///
-/// ## 架构（v0.9.0 改：写文件，⛔ 不发 HTTP）
+/// ## 架构（v0.10.0：写 **App Group 共享容器**）
 /// ```
 /// 主 App: RPSystemBroadcastPickerView().triggerPicker()   ← 程序化启动
 ///   ↓
 /// iOS 启动本扩展
 ///   ↓
-/// processSampleBuffer(每帧) ⇒ JPEG ⇒ 写进**自己的 Documents**
+/// processSampleBuffer(每帧) ⇒ JPEG ⇒ 写 <group>/Documents/frames/lastframe.jpg
 ///   ↓
-/// PC: AFC 通道 house_arrest 读 Documents/lastframe.jpg
-///   ↓
-/// ⛔ 不需要 App 在前台、⛔ 不需要网络、⛔ 不需要同网段
+/// 主 App: 读**同一个**目录 ⇒ 拿到帧（⛔ 不依赖前台 / HTTP / 网络）
+/// PC    : `ios file ls --app-group=<gid> --path=/Documents/frames`
 /// ```
 ///
-/// ## 为什么改（§2020 实测对比）
-/// | 方式 | 需 App 前台 | 需网络 | 需同网段 |
-/// |---|---|---|---|
-/// | HTTP POST（v0.7/0.8）| ⛔ **需要** | ✅ | ✅ |
-/// | **写 Documents + AFC 读** | ⛔ **不需要** | ⛔ **不需要** | ⛔ **不需要** |
+/// ## ⛔⛔ 曾经的错误认知（§2200 真机实测推翻）
+/// 老注释写「扩展与主 App **共享同一个** Documents」—— **错的**。实测：
+/// ```
+/// 主 App 容器 : .../run.pgagent.PGAgent.8W9ZSMW4UW/Documents        ⇒ 只有 pgconfig
+/// 扩展容器    : .../run.pgagent.PGAgent.8W9ZSMW4UW.PGShot/Documents ⇒ 128 个帧
+/// ```
+/// ⇒ 扩展写自己的 Documents，主 App **永远读不到**（这正是「眼瞎」的根因）。
 ///
-/// **⭐ 关键实测**：`HouseArrestService(bundle_id:..., documents_only=True)`
-/// 能直接读扩展/主 App 的 Documents ⇒ **这是最稳的「眼」。**
-///
-/// ## ⚠️ 扩展与主 App 的 Documents 是**同一个**吗？
-/// **是** —— 主 App 和它的 appex **共享同一个容器**（同一个 bundle id 前缀）。
-/// ⇒ 扩展写 `Documents/lastframe.jpg` ⇒ 主 App 和 PC(AFC) 都能读到。
+/// ## 三条路的实测结论
+/// | 路 | 结论 |
+/// |---|---|
+/// | 各写各的 Documents | ⛔ 两个容器，读不到 |
+/// | HTTP POST 回主 App | ⚠️ 能用，但要求主 App 活着且在听 |
+/// | **⭐ App Group 共享容器** | ✅ **两边同目录**（本版采用，HTTP 作兜底）|
 ///
 /// ## 免费账号约束（`_note_1798`）
-/// ⛔ 没有 App Group entitlement ⇒ 不能用共享组目录
-/// ✅ 但用**自己的 Documents** 就够了（同容器）
+/// 免费 Apple ID 的**描述文件**里没有 app group entitlement，
+/// 但**签名后实测** App 的 entitlements 里**确实有**
+/// `group.run.pgagent.PGAgent.8W9ZSMW4UW`，且该容器**可读写**（§2210）。
+/// ⇒ 所以走共享容器，并用「真写一个字节」验证可用性，不可用自动退回本容器。
 class SampleHandler: RPBroadcastSampleHandler {
 
     private var seq = 0
@@ -49,14 +52,82 @@ class SampleHandler: RPBroadcastSampleHandler {
     /// ⭐ 复用 URLSession（扩展存活期内一直用）
     private var session: URLSession?
 
-    private var dir: URL {
+    /// ⭐⭐⭐ 本扩展**自己的** Documents（仅在 App Group 不可用时兜底）
+    private var ownDir: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
 
+    /// ⭐⭐⭐ 探测结果缓存（⛔ **必须缓存**：`dir` 每帧都要用，
+    ///    若每帧都「建目录 + 写探针」会白烧 IO 并拖慢取帧）
+    private var cachedDir: URL?
+
+    /// ⭐⭐⭐⭐ 「眼」的落盘目录 —— **优先 App Group 共享容器**。
+    ///
+    /// **为什么必须优先共享容器**（§2210 真机实测）：
+    /// ```
+    /// 主 App 容器 : .../run.pgagent.PGAgent.8W9ZSMW4UW/Documents        ⇒ 只有 pgconfig
+    /// 扩展容器    : .../run.pgagent.PGAgent.8W9ZSMW4UW.PGShot/Documents ⇒ 128 个帧 ✅
+    /// ```
+    /// ⇒ 扩展**写得到**，主 App **读不到**（两个不同容器）。
+    /// ⇒ 共享容器一上，**两边同目录** ⇒ 主 App 直接读，⛔ 不依赖 HTTP / 前台。
+    ///
+    /// 探测方式与主 App 一致（两边**同一份逻辑**，避免不一致）：
+    /// 「containerURL 拿得到 + 建目录 + 真写一个字节」都过才算可用。
+    private var dir: URL {
+        if let d = cachedDir { return d }
+        let d = sharedFramesDir() ?? ownDir
+        cachedDir = d
+        return d
+    }
+
+    /// 共享帧目录（`<group>/Documents/frames`）；不可用 ⇒ nil
+    private func sharedFramesDir() -> URL? {
+        let fm = FileManager.default
+        // ⚠️ group id **不能写死**：iloader 签名会插 team 后缀
+        //    （构建时 group.run.pgagent.PGAgent ⇒ 签名后 group.run.pgagent.PGAgent.8W9ZSMW4UW）
+        for g in ["group.run.pgagent.PGAgent.8W9ZSMW4UW",
+                  "group.run.pgagent.PGAgent",
+                  "group.pgagent"] {
+            guard let root = fm.containerURL(
+                forSecurityApplicationGroupIdentifier: g) else { continue }
+            let d = root.appendingPathComponent("Documents/frames", isDirectory: true)
+            do {
+                try fm.createDirectory(at: d, withIntermediateDirectories: true)
+                let probe = d.appendingPathComponent(".pgshotprobe")
+                try Data([0x50]).write(to: probe, options: .atomic)
+                try? fm.removeItem(at: probe)
+                NSLog("PGShot: 共享容器可用 ⇒ %@ (group=%@)", d.path, g)
+                return d
+            } catch {
+                continue
+            }
+        }
+        NSLog("PGShot: ⛔ 无共享容器 ⇒ 退回本扩展 Documents（主 App 读不到）")
+        return nil
+    }
+
+    /// ⭐ 停止标志可能出现在**两个**位置（主 App 写自己的 Documents；
+    ///    共享容器可用时也会写到共享目录）⇒ 两处都查，谁先出现算谁。
+    private var stopFlagSeen: Bool {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: dir.appendingPathComponent(stopFlag).path) { return true }
+        if fm.fileExists(atPath: ownDir.appendingPathComponent(stopFlag).path) { return true }
+        return false
+    }
+
+    /// 清掉两个位置的停止标志（开机时双保险）
+    private func clearStopFlags() {
+        let fm = FileManager.default
+        try? fm.removeItem(at: dir.appendingPathComponent(stopFlag))
+        try? fm.removeItem(at: ownDir.appendingPathComponent(stopFlag))
+    }
+
     override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
-        NSLog("PGShot broadcastStarted dir=%@", dir.path)
+        NSLog("PGShot broadcastStarted dir=%@ (共享容器=%@)",
+              dir.path, sharedFramesDir() != nil ? "是" : "否")
         // ⭐ 启动时清掉停止标志（主 App 也会清一次，双保险）
-        try? FileManager.default.removeItem(at: dir.appendingPathComponent(stopFlag))
+        //    两个位置都清 —— 主 App 可能写在它自己的 Documents 里
+        clearStopFlags()
     }
 
     override func broadcastPaused() { NSLog("PGShot broadcastPaused") }
@@ -75,8 +146,8 @@ class SampleHandler: RPBroadcastSampleHandler {
         guard now.timeIntervalSince(lastWrite) >= (1.0 / fps) else { return }
         lastWrite = now
 
-        // ② 停止标志（荔枝用文件当控制信号）
-        if FileManager.default.fileExists(atPath: dir.appendingPathComponent(stopFlag).path) {
+        // ② 停止标志（荔枝用文件当控制信号）—— 两个位置都查
+        if stopFlagSeen {
             NSLog("PGShot 收到停止标志 ⇒ 结束广播")
             endBroadcastCleanly()
             return
@@ -95,32 +166,46 @@ class SampleHandler: RPBroadcastSampleHandler {
 
         seq += 1
 
-        // ⑤ ⭐⭐ 两条路都发（实测扩充）：
+        // ⑤ ⭐⭐⭐ 帧落到**两边都能看见的地方**（按可靠性排序）：
         //
         // ⚠️⚠️ **关键实测（§2200）**：扩展的 Documents **不是主 App 的 Documents**！
         //   · 扩展容器: run.pgagent.PGAgent.8W9ZSMW4UW.PGShot/Documents  ⇒ 实测 128 个帧文件
         //   · 主 App 容器: run.pgagent.PGAgent.8W9ZSMW4UW/Documents        ⇒ 只有 pgconfig
-        //   ⇒ 免费 Apple ID **没有 App Group** ⇒ 两者**不能共享目录**
         //
-        // ⇒ 所以必须把帧**推给主 App**：
-        //   ① ⭐ **HTTP POST** 到主 App 的 `127.0.0.1:8899/frame`（同一台设备，回环可达）
-        //   ② 同时**留一份本地**（调试用；PC 可用 `ios file ls --app=<ext-id>` 读）
-        write(jpg, name: "lastframe.jpg")
-        if seq % 10 == 0 {
-            write(jpg, name: "frame_\(seq).jpg")
-        }
+        // ⇒ ① ⭐⭐⭐ **App Group 共享容器** `<group>/Documents/frames/`（§2210 新增）
+        //       ⇒ 主 App 直接读，⛔ 不依赖前台、⛔ 不依赖 HTTP、⛔ 不依赖本扩展存活
+        //    ② ⭐ HTTP POST 到主 App `127.0.0.1:8899/frame`（主 App 活着时最快）
+        //    （共享容器不可用时 `dir` 自动退回本扩展 Documents —— 仅调试用）
+        writeShared(jpg)
         post(jpg, seq: seq)
     }
 
     // MARK: - 工具
 
-    /// ⭐⭐ 把帧 **POST 给主 App**（`http://127.0.0.1:8899/frame`）。
+    /// ⭐⭐⭐ 写进「眼」的落盘目录（**优先 App Group 共享容器**）。
     ///
-    /// **为什么必须这样**（§2200 实测）：
-    ///   · 扩展与主 App 的 Documents **是两个不同容器**
-    ///     （扩展 `...PGShot/Documents` 有 128 个帧；主 App `/Documents` 只有 pgconfig）
-    ///   · 免费 Apple ID **没有 App Group** ⇒ 不能共享目录
-    ///   ⇒ 只能走**回环 HTTP**（同一台设备，`127.0.0.1` 可达）
+    /// 目录由 `dir` 决定（共享可用即共享，否则本容器）。
+    /// 同时更新 `lastframe.jpg`（主 App 轮询它）并按序号留档。
+    private func writeShared(_ data: Data) {
+        write(data, name: "lastframe.jpg")
+        if seq % 10 == 0 {
+            write(data, name: "frame_\(seq).jpg")
+        }
+    }
+
+    /// ⭐⭐ 把帧 **POST 给主 App**（`http://127.0.0.1:8899/frame`）—— **兜底路**。
+    ///
+    /// ## 为什么还要留着它（§2210）
+    /// 主路已经是 **App Group 共享容器**（`writeShared` ⇒ 两边同目录）。
+    /// 但万一某次签名后**扩展拿不到 app group**，这条 HTTP 路还能救：
+    ///   · 同一台设备，`127.0.0.1` 回环可达
+    ///   · ⚠️ 前提：主 App **活着**且 HTTP（8899）在听
+    ///
+    /// ## ⛔ 曾经的错误结论（已更正）
+    /// 老注释写「免费 Apple ID **没有 App Group**」—— **不对**。
+    /// 真机实测：装上后主 App 的 entitlements **确实有**
+    /// `group.run.pgagent.PGAgent.8W9ZSMW4UW`，且该容器**可读写**。
+    /// ⇒ 共享容器才是正路，HTTP 只是保险。
     private func post(_ data: Data, seq: Int) {
         guard let url = URL(string: "http://127.0.0.1:\(port)/frame?seq=\(seq)") else { return }
         var req = URLRequest(url: url)

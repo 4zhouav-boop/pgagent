@@ -73,11 +73,12 @@ final class APIRouter {
 
         case ("GET", "/"):
             return .json([
-                "app": "PGAgent", "version": "0.9.1",
+                "app": "PGAgent", "version": "0.10.0",
                 "endpoints": ["/status", "/probe", "/reload", "/config", "/elements",
                               "/page", "/nav", "/ocr", "/see", "/grab", "/grabinfo",
                               "/shoot", "/shortcut", "/run", "/runstop", "/runstate",
-                              "/dl", "/openurl", "/install-shortcut", "/rec/start", "/rec/state", "/frame", "/frame.jpg", "/rec/save",
+                              "/dl", "/openurl", "/install-shortcut", "/rec/start", "/rec/state",
+                              "/frame", "/frame.jpg", "/rec/save", "/framediag", "/framepoll",
                               "/pip/start", "/pip/stop", "/pip/state", "/pip/text",
                               "/files", "/file", "/write", "/mkdir", "/ble/scan",
                               "/ble/connect", "/ble/send", "/click", "/log"],
@@ -313,6 +314,21 @@ final class APIRouter {
         case ("GET", "/rec/state"):
             return .json(["ok": true, "state": broadcaster.snapshot()])
 
+        // ⭐⭐⭐⭐ `/framediag` —— **「眼」的专项诊断**（§2210 新增）
+        //   一条请求看清：共享容器有没有生效、帧文件在哪、多大、多新。
+        //   ⛔ 不依赖任何识别/网络，纯本地文件系统 ⇒ 必然秒回。
+        case ("GET", "/framediag"):
+            return .json([
+                "appGroup": AppGroup.snapshot(),
+                "broadcaster": broadcaster.snapshot(),
+                "recStateSync": broadcaster.snapshot()["frames"] ?? -1,
+            ])
+
+        // ⭐ 手动**同步读一次**帧文件（⛔ 不等 timer；排查用）
+        case ("POST", "/framepoll"):
+            let got = broadcaster.pollFrame()
+            return .json(["ok": got, "state": broadcaster.snapshot()])
+
         // ⭐⭐⭐⭐ 画中画保活（照荔枝的做法，`_note_2011` §7）
         case ("POST", "/pip/start"):
             let ok = pip.start()
@@ -333,8 +349,10 @@ final class APIRouter {
         case ("POST", "/frame"):
             let seq = Int(r.query["seq"] ?? "-1") ?? -1
             let ok = broadcaster.onFrame(r.body, seq: seq)
-            return .json(["ok": ok, "seq": seq, "bytes": r.body.count,
-                          "frames": broadcaster.frames])
+            // ⛔ 不要在这里读 `broadcaster.frames`（@Published，后台线程读是数据竞争）
+            //    ⇒ 用 snapshot() 里的值
+            let f = (broadcaster.snapshot()["frames"] as? Int) ?? -1
+            return .json(["ok": ok, "seq": seq, "bytes": r.body.count, "frames": f])
 
         // ⭐ 取最近一帧（=「眼」）—— 存成 PNG 供 /ocr /page /elements 用
         case ("GET", "/frame.jpg"):

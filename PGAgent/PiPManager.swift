@@ -49,8 +49,25 @@ final class PiPManager: NSObject, ObservableObject {
     }
 
     /// ⭐ 启动 PiP：建一个隐藏的 host view + display layer，然后起 PiP
+    ///
+    /// ⛔⛔ **本方法会碰 UIKit（UIView / CALayer / UIWindow）⇒ 必须跑在主线程。**
+    /// 但它被 HTTP handler 调用（handler 在 `global(qos:.userInitiated)`），
+    /// ⇒ 所以这里**统一走 `MainThread.run`** 切回主线程，
+    ///   否则会复现 §2212 的 `_dispatch_assert_queue_fail` 崩溃。
     @discardableResult
     func start() -> Bool {
+        if Thread.isMainThread { return startOnMain() }
+        let r = MainThread.run { self.startOnMain() }
+        guard r != nil else {
+            // ⛔ `lastError` 是 @Published ⇒ 只能在主线程改
+            DispatchQueue.main.async { self.lastError = "等主线程超时（PiP 启动失败）" }
+            return false
+        }
+        return r ?? false
+    }
+
+    /// ⭐ **只在主线程**执行的 PiP 启动（由 `start()` 负责线程切换）
+    private func startOnMain() -> Bool {
         guard Self.supported() else {
             lastError = "本机不支持画中画"
             return false
@@ -110,6 +127,15 @@ final class PiPManager: NSObject, ObservableObject {
     }
 
     func stop() {
+        // ⛔ 同样碰 UIKit（removeFromSuperlayer / removeFromSuperview）⇒ 必须主线程
+        if !Thread.isMainThread {
+            MainThread.run { self.stopOnMain() }
+            return
+        }
+        stopOnMain()
+    }
+
+    private func stopOnMain() {
         timer?.invalidate(); timer = nil
         if let c = pip, c.isPictureInPictureActive {
             c.stopPictureInPicture()

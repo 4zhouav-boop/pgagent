@@ -22,23 +22,112 @@ struct PGAgentApp: App {
 }
 
 /// 全局日志：内存环形 + NSLog（主机 `dvt launch --stream` 能看）
+///
+/// ## ⛔⛔ 血泪教训（§2212 崩溃日志实证）
+/// 曾经的写法是**每条日志**都 `DispatchQueue.main.async { objectWillChange.send() }`。
+/// 后果：Runner / HTTP handler 在后台线程高速打日志时，
+/// 主线程被**重绘风暴**淹没 —— 每次重绘都要重建整个 `NavigationView` + `ScrollView`，
+/// 而 SwiftUI 体里又调用 `store.snapshot()`（**加锁 + 全量拷贝**）。
+///
+/// 真机崩溃日志（`PGAgent-2026-10-10-161338.ips`）：
+/// ```
+/// EXC_CRASH (SIGKILL)
+/// FRONTBOARD code 0x8BADF00D
+///   "scene-update watchdog transgression: app is stuck (deadlock)"
+/// faultingThread 0:
+///   __psynch_mutexwait ← _pthread_mutex_firstfit_lock_wait
+///   ← ScrollView.init(_:showsIndicators:content:)
+///   ← NavigationView.init(content:)
+///   ← ViewBodyAccessor.updateBody(of:changed:)
+/// ```
+/// ⇒ **主线程卡在锁上 + 重建 SwiftUI 视图** ⇒ 看门狗**直接 SIGKILL**。
+/// ⇒ 用户看到的「**卡死界面上**」「突然停止」就是它。
+///
+/// ## ✅ 修法（三条一起上）
+/// ① **节流通知**：日志照收，但给 UI 的赋值最多 ~4 次/秒
+/// ② **不再 `objectWillChange.send()`**：改用 `@Published recentLines`（定长尾部窗口）
+/// ③ 视图体只读 `recentLines`（**无锁、定长**），⛔ 不再每帧加锁+全量拷贝
 final class LogStore: ObservableObject {
-    @Published private(set) var lines: [String] = []
+    /// ⭐ 只给 UI 看最近 N 行（⛔ 不要全量拷给 SwiftUI）
+    static let uiLimit = 200
+    /// ⭐ 内存里最多留这么多行
+    private static let memLimit = 2000
+
+    /// ⚠️ `@Published` 会让**每次赋值**都触发重绘
+    /// ⇒ 只把「给 UI 看的尾部窗口」放进来，并用节流控制赋值频率
+    @Published private(set) var recentLines: [String] = []
+
+    private var lines: [String] = []
     private let fmt: DateFormatter = {
         let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f
     }()
+    /// 保护 `lines`
     private let lock = NSLock()
+    /// 保护节流状态（**独立锁**：⛔ 不能与 `lock` 混用，
+    /// 否则 `schedulePush` → `recent()` 会**自死锁**）
+    private let pushLock = NSLock()
+    private var lastPush = Date.distantPast
+    private var pushScheduled = false
 
     func log(_ s: String) {
-        let line = "[\(fmt.string(from: Date()))] \(s)"
-        NSLog("PGAgent %@", line)
+        // ⚠️ DateFormatter 不是线程安全的，但这里只在**同一个** log 调用内用；
+        //    为避免并发调用时共用 formatter 出错，格式化的这一句放在锁内。
         lock.lock()
+        let line = "[\(fmt.string(from: Date()))] \(s)"
         lines.append(line)
-        if lines.count > 800 { lines.removeFirst(lines.count - 800) }
+        if lines.count > Self.memLimit { lines.removeFirst(lines.count - Self.memLimit) }
         lock.unlock()
-        DispatchQueue.main.async { self.objectWillChange.send() }
+        NSLog("PGAgent %@", line)   // ⛔ NSLog 放到锁外（它本身较慢）
+        schedulePush()
     }
 
+    /// ⭐ 节流推送：最快 ~4 次/秒把尾部窗口同步给 UI（合并突发日志）。
+    ///
+    /// · 节流状态用**独立的** `pushLock`，`recent()` 用 `lock` ⇒ 不会自死锁
+    /// · `recentLines` 只在**主线程**赋值（`@Published` + SwiftUI 的要求）
+    private func schedulePush() {
+        let now = Date()
+        pushLock.lock()
+        let since = now.timeIntervalSince(lastPush)
+        if since >= 0.25 {
+            lastPush = now
+            pushLock.unlock()
+            pushToUI()
+            return
+        }
+        // 冷却期内 ⇒ 只安排**一次**尾部补推
+        if pushScheduled { pushLock.unlock(); return }
+        pushScheduled = true
+        pushLock.unlock()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + (0.25 - since)) { [weak self] in
+            guard let self = self else { return }
+            self.pushLock.lock()
+            self.pushScheduled = false
+            self.lastPush = Date()
+            self.pushLock.unlock()
+            self.pushToUI()
+        }
+    }
+
+    /// 把尾部窗口送到主线程的 `@Published`
+    private func pushToUI() {
+        let tail = recent(Self.uiLimit)
+        if Thread.isMainThread {
+            recentLines = tail
+        } else {
+            DispatchQueue.main.async { self.recentLines = tail }
+        }
+    }
+
+    /// 取尾部 n 行（**加锁 + 只拷 n 个**，⛔ 不全量）
+    func recent(_ n: Int = uiLimit) -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        if lines.count <= n { return lines }
+        return Array(lines.suffix(n))
+    }
+
+    /// 诊断接口（`/log` 用）—— 返回全部
     func snapshot() -> [String] {
         lock.lock(); defer { lock.unlock() }
         return lines
@@ -46,7 +135,11 @@ final class LogStore: ObservableObject {
 
     func clear() {
         lock.lock(); lines.removeAll(); lock.unlock()
-        DispatchQueue.main.async { self.objectWillChange.send() }
+        if Thread.isMainThread {
+            recentLines = []
+        } else {
+            DispatchQueue.main.async { self.recentLines = [] }
+        }
     }
 }
 
@@ -155,9 +248,13 @@ struct ContentView: View {
                 .padding(.horizontal, 8)
                 .padding(.top, 4)
 
+                // ⛔⛔ **不要**在这里调 `store.snapshot()`：
+                //   它会**加锁 + 全量拷贝**，而本 body 每次重绘都会执行
+                //   ⇒ 主线程卡在锁上 ⇒ 看门狗 SIGKILL（§2212 崩溃日志实证）
+                //   ✅ 改为读 `store.recentLines` —— 由 LogStore 节流推送（无锁、定长）
                 ScrollView {
                     VStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(store.snapshot().enumerated()), id: \.offset) { _, l in
+                        ForEach(Array(store.recentLines.enumerated()), id: \.offset) { _, l in
                             Text(l).font(.system(size: 10, design: .monospaced))
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
@@ -165,7 +262,7 @@ struct ContentView: View {
                     .padding(6)
                 }
             }
-            .navigationTitle("PGAgent v0.9.1")
+            .navigationTitle("PGAgent v0.10.0")
             .onAppear(perform: boot)
         }
         .navigationViewStyle(.stack)
@@ -175,8 +272,10 @@ struct ContentView: View {
         guard !started else { return }
         started = true
 
-        store.log("=== PGAgent v0.9.1 启动 ===")
+        store.log("=== PGAgent v0.10.0 启动 ===")
         store.log("Documents = \(DocsScanner.docPath())")
+        // ⭐ 「眼」的关键诊断：共享容器可用 ⇒ 帧能读到
+        store.log("共享帧目录 = \(AppGroup.framesDir()?.path ?? "⛔ 无（帧读不到！）")")
 
         // ⭐ 自主循环（App 自己在手机上跑，⛔ 不需要 PC）
         let runner = Runner(cfgStore: cfgStore, grabber: grabber, ble: ble,

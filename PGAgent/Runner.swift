@@ -96,6 +96,18 @@ final class Runner: ObservableObject {
     // MARK: - 控制
 
     func start(dest: String?) {
+        // ⛔⛔ 本方法会被 HTTP handler（后台队列）和 UI 按钮（主线程）**两条路**调用。
+        // 所有 `@Published` 字段**只能在主线程改**（§2212：后台改 @Published
+        // ⇒ SwiftUI 在后台线程收到通知 ⇒ 崩 / 或被看门狗判死锁）。
+        // ⚠️ 已在主线程时必须**直接执行**（⛔ 不能 async 后干等 ⇒ 自死锁）。
+        if Thread.isMainThread {
+            startOnMain(dest: dest)
+        } else {
+            DispatchQueue.main.async { self.startOnMain(dest: dest) }
+        }
+    }
+
+    private func startOnMain(dest: String?) {
         guard !running else { log("§run ⚠️ 已在跑，忽略"); return }
         cancelFlag = false
         running = true
@@ -108,6 +120,7 @@ final class Runner: ObservableObject {
     }
 
     func stop() {
+        // `cancelFlag` 是普通 Bool（非 @Published）⇒ 任意线程可写，循环里每步都会读
         cancelFlag = true
         log("§run ⛔ 收到停止请求")
     }
