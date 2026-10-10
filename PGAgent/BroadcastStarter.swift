@@ -176,7 +176,9 @@ final class BroadcastStarter: ObservableObject {
 
     @discardableResult
     func start() -> Bool {
-        lastError = ""
+        // ⛔ `lastError` 是 @Published ⇒ 只能在主线程改（本方法会被后台 handler 调）
+        if Thread.isMainThread { lastError = "" }
+        else { DispatchQueue.main.async { self.lastError = "" } }
         NSLog("PGAgent BroadcastStarter: start() 进入")
         // ① 清掉停止标志（荔枝的做法：`startBroadcast() - 已删除停止录屏标志文件`）
         //    两个位置都清（纯文件操作，⛔ 不碰 UIKit，任何线程都安全）
@@ -205,12 +207,19 @@ final class BroadcastStarter: ObservableObject {
                                      : (MainThread.run { self.startOnMain() } ?? false)
         guard ok else { return false }
 
-        started = true
+        // ⛔ `started` 也是 @Published ⇒ 主线程改
+        setStarted(true)
         NSLog("PGAgent BroadcastStarter: 已触发 %@", Self.extensionBundleID)
 
         // ④ 开始盯文件（扩展每写一帧，我们就更新一次）
         startWatching()
         return true
+    }
+
+    /// ⭐ 安全地改 `started`（`@Published` ⇒ 只能在主线程）
+    private func setStarted(_ v: Bool) {
+        if Thread.isMainThread { started = v }
+        else { DispatchQueue.main.async { self.started = v } }
     }
 
     /// ⭐ **只在主线程**执行的 UIKit 部分（由 `start()` 用信号量同步调用）。
@@ -276,8 +285,7 @@ final class BroadcastStarter: ObservableObject {
             try? Data("stop".utf8).write(to: u)
             NSLog("PGAgent BroadcastStarter: 已放停止标志 %@", u.path)
         }
-        if Thread.isMainThread { started = false }
-        else { DispatchQueue.main.async { self.started = false } }
+        setStarted(false)
     }
 
     // MARK: - ⭐ 盯帧文件（**共享容器优先**，⛔ 不需要网络）
