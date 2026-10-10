@@ -73,9 +73,7 @@ class SampleHandler: RPBroadcastSampleHandler {
         // ② 停止标志（荔枝用文件当控制信号）
         if FileManager.default.fileExists(atPath: dir.appendingPathComponent(stopFlag).path) {
             NSLog("PGShot 收到停止标志 ⇒ 结束广播")
-            // ⚠️ `finishBroadcastWithoutError()` 才是「正常结束」
-            //    （`finishBroadcastWithError(_:)` 要求非 nil 的 Error）
-            finishBroadcastWithoutError()
+            endBroadcastCleanly()
             return
         }
 
@@ -100,6 +98,24 @@ class SampleHandler: RPBroadcastSampleHandler {
     }
 
     // MARK: - 工具
+
+    /// ⭐ 正常结束广播（⛔ 不报错）。
+    ///
+    /// ⚠️ `finishBroadcastWithoutError()` **在 Swift 里不可见**（它是 RPBroadcastSampleHandler
+    ///    的私有/ObjC 方法，`livekit` 也是靠一个 ObjC helper `LKObjCHelpers` 调的）。
+    /// ⇒ 这里用 **selector 动态调用** 达到同样效果；
+    ///    若将来 iOS 改了名字，就退回「带一个无害错误」结束（体验略差但不会崩）。
+    private func endBroadcastCleanly() {
+        let sel = NSSelectorFromString("finishBroadcastWithoutError")
+        if responds(to: sel) {
+            perform(sel)
+            return
+        }
+        // 兜底：带一个自定义错误结束（系统会显示「录制已停止」而不是崩溃）
+        let e = NSError(domain: "PGShot", code: 0,
+                        userInfo: [NSLocalizedDescriptionKey: "已停止录屏"])
+        finishBroadcastWithError(e)
+    }
 
     private func downscale(_ img: UIImage, toWidth w: CGFloat) -> UIImage {
         guard img.size.width > w else { return img }
