@@ -10,6 +10,21 @@ import UIKit
 ///   · ⚠️ Vision 的 `boundingBox` **原点在左下角** ⇒ 转 UIKit 要 `y = (1 - maxY) * H`
 ///
 /// ⛔ 本类只做"找到没找到 + 在哪"，不做任何页面决策。
+///
+/// ═══════════════════════════════════════════════════════════════════════
+/// ⭐⭐⭐⭐⭐ §2241 **本类内部统一做帧归一化**（这是「全部认成 unknown」的修复）
+/// ═══════════════════════════════════════════════════════════════════════
+/// ## 病根
+/// 帧是 **1353×2925**，而所有 ROI / 模板 / 坐标都是按**基准 451×977** 量的 ⇒
+/// ① OCR 的 px 落在 0~2925，与 ROI(62~140) **永不相交** ⇒ 全被 `continue` 丢掉
+/// ② 模板尺度差 **3.0×** ⇒ NCC 永远匹配不上
+/// ⇒ `pageHere` 全不命中 ⇒ **unknown ⇒ 退出**。
+///
+/// ## 为什么**在识别层**归一（而不是每个调用点）
+/// 识别层是**唯一**同时用到「ROI」和「模板尺度」的地方 ⇒
+/// 在这里归一，**所有**调用者（Navigator / Runner / APIRouter / FeatureEngine）
+/// 自动都对了，⛔ 不用逐个改（也不怕将来漏一个）。
+/// ✅ 与 PC 的 `normalize_frame`（§1627）**同一策略**：只改"看"的坐标系。
 final class Recognizer {
 
     struct Hit {
@@ -23,8 +38,26 @@ final class Recognizer {
     private var tplCache: [String: UIImage] = [:]
     private let tplDir: URL
 
+    /// ⭐ 诊断：最近一次识别用的帧尺寸（`/recogdiag` 回显，排查"尺度对不对"）
+    private(set) var lastRawSize = CGSize.zero
+    private(set) var lastNormSize = CGSize.zero
+    /// ⭐ 把归一化日志转给上层（Runner 的日志窗）
+    var onLog: ((String) -> Void)?
+
     init(templatesDir: URL) {
         self.tplDir = templatesDir
+    }
+
+    /// ⭐⭐ **所有识别入口都要先过这里**：把帧归一到基准 451×977
+    ///
+    /// ⚠️ 幂等：已经是基准 ⇒ 原样返回（`normalize` 内部判等，⛔ 不重绘）
+    private func norm(_ img: UIImage) -> UIImage {
+        lastRawSize = img.size
+        let out = FrameNormalizer.normalizeOnce(img) { [weak self] s in
+            self?.onLog?(s)
+        }
+        lastNormSize = out.size
+        return out
     }
 
     // MARK: - OCR
@@ -32,6 +65,8 @@ final class Recognizer {
     /// 对整帧做一次 OCR ⇒ 返回 (文字, 归一化 bbox, 置信度)
     /// ⚠️ Vision 的 bbox 原点在**左下**，这里**转成左上原点**的归一化坐标。
     func ocr(_ img: UIImage, minConfidence: Double = 0.5) -> [(String, CGRect, Double)] {
+        // ⭐⭐ 先归一到基准（否则后面所有 ROI 都不相交）
+        let img = norm(img)
         guard let cg = img.cgImage else { return [] }
         let req = VNRecognizeTextRequest()
         req.recognitionLevel = .accurate
@@ -70,11 +105,13 @@ final class Recognizer {
     ///   ⇒ 精确 `contains` 会漏检 ⇒ 用**编辑距离 + 字符重合率**兜底
     func findWords(_ img: UIImage, words: [String], roi: CGRect?,
                    minHits: Int = 1, minConfidence: Double = 0.5) -> Hit? {
-        let size = img.size
-        let all = ocr(img, minConfidence: minConfidence)
+        // ⭐ 归一化后，`size` **就是** 451×977 ⇒ 下面的 px 换算自动落在基准尺度
+        let norm = self.norm(img)
+        let size = norm.size
+        let all = ocr(norm, minConfidence: minConfidence)
         var matched: [(String, CGRect)] = []
         for (txt, nb, _c) in all {
-            // 转成基准像素
+            // 转成基准像素（⚠️ 必须用**归一化后**的 size，见 §2241）
             let px = CGRect(x: nb.minX * size.width, y: nb.minY * size.height,
                             width: nb.width * size.width, height: nb.height * size.height)
             if let r = roi, !r.intersects(px) { continue }
@@ -144,6 +181,9 @@ final class Recognizer {
     func matchTemplate(_ img: UIImage, tplName: String, roi: CGRect?,
                        threshold: Double, mask: String?) -> (CGRect, Double)? {
         guard let t = tpl(tplName) else { return nil }
+        // ⭐⭐ 归一到基准（§2241）—— 否则模板(基准尺度)与帧(1353宽)尺度差 3×，
+        //    且 ROI 会按基准值裁在原始帧的最左边 ⇒ **永远匹配不上**
+        let img = norm(img)
         guard let g = gray(img), let tg = gray(t) else { return nil }
 
         let W = g.w, H = g.h, TW = tg.w, TH = tg.h

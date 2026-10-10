@@ -81,7 +81,7 @@ final class APIRouter {
                               "/frame", "/frame.jpg", "/rec/save", "/framediag", "/framepoll",
                               "/pip/start", "/pip/stop", "/pip/state", "/pip/text",
                               "/keepalive/start", "/keepalive/stop", "/keepalive/state",
-                              "/runlog",
+                              "/runlog", "/recogdiag",
                               "/files", "/file", "/write", "/mkdir", "/ble/scan",
                               "/ble/connect", "/ble/send", "/click", "/log"],
             ])
@@ -207,6 +207,52 @@ final class APIRouter {
                  "x": r.minX, "y": r.minY, "w": r.width, "h": r.height]
             }
             return .json(["ok": true, "count": list.count, "items": list])
+
+        // ⭐⭐⭐⭐ `/recogdiag` —— **识别专项诊断**（§2241）
+        //
+        // 为什么必须有：移植后最典型的故障就是「全部认成 unknown 然后退出」，
+        // 而根因往往是**尺度对不上**（帧 1353 宽 vs 标定 451 宽）。
+        // 一条请求看清：帧多大、归一到多少、ROI 落在哪、元素命中没命中。
+        case ("GET", "/recogdiag"):
+            let (im, err) = loadImage(r.query)
+            guard let img = im else {
+                return .json(["ok": false, "error": err,
+                              "hint": "先 ?img=<Documents 里的文件名>"], status: 400)
+            }
+            guard let c = cfgStore.cfg else {
+                return .json(["ok": false, "error": "配置未加载"], status: 500)
+            }
+            let rec = makeRecognizer()
+            // ⭐ 触发一次识别（内部会归一化，并记下 raw/norm 尺寸）
+            _ = rec.ocr(img, minConfidence: 0.3)
+            let nav = Navigator(cfg: c, rec: rec, ble: ble) { _ in }
+            var hits: [String: Any] = [:]
+            for name in c.elements.keys.sorted() {
+                if let h = nav.detect(name, img: img) {
+                    hits[name] = ["hit": true,
+                                  "score": Double(round(h.score * 1000) / 1000),
+                                  "x": Int(h.rect.minX), "y": Int(h.rect.minY),
+                                  "ev": h.evidence]
+                } else {
+                    hits[name] = ["hit": false]
+                }
+            }
+            let baseW = c.settings?.base_w ?? 451
+            let baseH = c.settings?.base_h ?? 977
+            return .json([
+                "ok": true,
+                "frameRawSize": "\(Int(rec.lastRawSize.width))x\(Int(rec.lastRawSize.height))",
+                "frameNormSize": "\(Int(rec.lastNormSize.width))x\(Int(rec.lastNormSize.height))",
+                "baseWH": "\(Int(baseW))x\(Int(baseH))",
+                // ⭐ 尺度是否已对齐（= 归一化有没有生效）
+                "scaleAligned": abs(rec.lastNormSize.width - baseW) < 1
+                                && abs(rec.lastNormSize.height - baseH) < 1,
+                "page": nav.pageHere(img) ?? "(unknown)",
+                "elements": hits,
+                "templatesDir": ConfigStore.templatesDir().path,
+                "templateCount": (try? FileManager.default
+                    .contentsOfDirectory(atPath: ConfigStore.templatesDir().path).count) ?? -1,
+            ])
 
         case ("GET", "/elements"):
             let (im, err) = loadImage(r.query)

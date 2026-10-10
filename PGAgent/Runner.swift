@@ -173,6 +173,10 @@ final class Runner: ObservableObject {
         guard let cfg = cfgStore.cfg else { finish("配置未加载"); return }
 
         let rec = Recognizer(templatesDir: ConfigStore.templatesDir())
+        // ⭐⭐ 把归一化日志接到本循环的日志窗（§2241）
+        //    ⇒ 「帧 1353x2925 ⇒ 归一化到 451x977」这行会直接出现在手机上，
+        //      以后一眼就能看出「尺度对不对」，⛔ 不用再猜为什么全 unknown
+        rec.onLog = { [weak self] s in self?.append(s) }
         let nav = Navigator(cfg: cfg, rec: rec, ble: ble) { [weak self] s in
             self?.append(s)
         }

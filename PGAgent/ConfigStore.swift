@@ -118,8 +118,65 @@ struct PGConfig: Codable {
         var swipe_y_top_pct: Double?
         /// 滑动的下边界（比例 0..1）—— 荔枝避让区 1789/2556 ≈ 0.70
         var swipe_y_bot_pct: Double?
-        /// OCR 找不到时的模板兜底阈值（替代荔枝的 YOLO）
+        /// ⭐ OCR 找不到时的模板兜底阈值（替代荔枝的 YOLO）
         var fallback_template_threshold: Double?
+
+        // ══════════════════════════════════════════════════════════════
+        // ⭐⭐⭐⭐ §2240 **4 个功能模块的参数**（照 PC `_1377_ad_loop.py` 抄）
+        //
+        // PC 侧这些是环境变量（`AISJ_*`），手机上没有 env ⇒ 搬进 config.json。
+        // 顺序契约（PC L9357 铁证）：["adbox","feed","tag","search"]
+        // ══════════════════════════════════════════════════════════════
+
+        /// ⭐ 本轮**要跑哪些功能**（⛔ 不填 = 只跑 adbox，与 PC 旧行为一致）
+        ///    写入顺序**不重要** ⇒ 执行时一律按 `FeatureEngine.order` 排
+        var features: [String]?
+
+        /// ⭐ 要跑哪些 App：`ks` / `kslite`；
+        ///    **两个都填 ⇒ 交替循环**（用户令：「跑完快手 4 个功能跑快手极速版 4 个功能再跑快手」）
+        var apps: [String]?
+
+        /// ⭐ 广告**条数**（PC 控制台「条数」）
+        var ad_count: Int?
+
+        /// ⭐ 入口：`auto` / `fuli`（福利页）/ `chest`（宝箱）
+        var entry: String?
+
+        /// ⭐ 尾部：`continue`（继续跑下一条）/ `center`（回任务中心）
+        var tail: String?
+
+        /// ⭐ 广告停留秒（PC 控制台「广告停留秒」，默认 30）
+        var ad_dwell: Double?
+
+        // ── feed（刷视频，PC `run_feed`）──────────────
+        /// 高价值 ⇒ **完播停留**秒（PC `STAY_HV`）
+        var feed_stay_hv: Double?
+        /// 低价值/未命中 ⇒ **直接划走**（PC `STAY_LV`）
+        var feed_stay_lv: Double?
+        /// 滑动后的间隔下限/上限（PC `GAP_HV` / `GAP_LV`）
+        var feed_gap_min: Double?
+        var feed_gap_max: Double?
+
+        // ── tag（搜索打标签，PC `run_tag`）─────────────
+        /// ⭐ **每轮时间预算**（PC `TAG_ROUND_MIN`；0 = 总时长/3）
+        ///    ⛔ 没有它 ⇒ 第 1 个词就把全部时间吃光（PC 真机踩过）
+        var tag_round_min: Double?
+        /// ⭐ 搜索词池（PC `DL_WORDS`：只搜 APP下载/游戏下载）
+        var tag_words: [String]?
+
+        // ── search（商城逛小店，PC `run_mall`）─────────
+        /// ⭐ 每轮预算（PC `MALL_ROUND_MIN`）
+        var mall_round_min: Double?
+        /// ⭐ 浏览**时间下限**（PC `MALL_BROWSE_MIN`）
+        ///    「进商城→打字→落中文→搜索」本身就要 ~0.7 分钟 ⇒ 不够就**不再开新轮**
+        var mall_browse_min: Double?
+        /// ⭐ **只点 ≥ 这个价**的商品（PC `MALL_MIN_PRICE` 默认 500）
+        var mall_min_price: Double?
+        /// 高价值**商品**词池（PC `HV_SHOP_WORDS`）
+        var mall_words: [String]?
+
+        /// ⭐ 各功能的**默认分钟数**（PC 控制台 `FEATURE_OPTS` 的第三列）
+        var feat_min: [String: Double]?
 
         /// 转化关键词数组
         var conversionKeywords: [String] {
