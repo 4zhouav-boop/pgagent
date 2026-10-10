@@ -51,10 +51,10 @@ targets:
         CODE_SIGNING_REQUIRED: "NO"
         CODE_SIGNING_ALLOWED: "NO"
         DEVELOPMENT_TEAM: ""
-      dependencies:
-        - target: PGShot
-        - sdk: ReplayKit.framework
-        - sdk: CoreImage.framework
+    dependencies:
+      - target: PGShot
+      - sdk: ReplayKit.framework
+      - sdk: CoreImage.framework
 
   # ⭐⭐⭐ 「眼」—— ReplayKit 广播扩展（荔枝/所有 RPA App 的真正做法）
   #   主 App 用 RPSystemBroadcastPickerView().triggerPicker() **程序化启动**它，
