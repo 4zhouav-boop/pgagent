@@ -90,6 +90,37 @@ struct PGConfig: Codable {
         var loop_grab_timeout: Double?
         /// 画面连续 N 次不变就判卡死
         var loop_stall_limit: Int?
+
+        // ⭐⭐ 照 **荔枝RPA** 实测值（_note_2010/2011/2012）
+        /// 广告页最短停留（秒）—— 荔枝 settingsAdTimeMin = 40
+        var ad_stay_min: Double?
+        /// 广告页最长停留（秒）—— 荔枝 settingsAdTimeMax = 60
+        var ad_stay_max: Double?
+        /// 转化关键词（`-` 分隔）—— 荔枝 settingsConversionKeyword
+        var conversion_keyword: String?
+        /// 转化时滑动次数 —— 荔枝 settingsConversionSwipe = 3
+        var conversion_swipe: Int?
+        /// 直播间停留（秒）—— 荔枝 settingsLiveStay = 66
+        var live_stay: Double?
+        /// OCR 等待超时（秒）—— 荔枝实测 10.1s
+        var ocr_timeout_s: Double?
+        /// OCR 最大尝试次数 —— 荔枝实测 99 次
+        var ocr_max_tries: Int?
+        /// 刷视频滑动档位：fast / mid / slow
+        var swipe_video_speed: String?
+        /// 滑动的上边界（比例 0..1）—— 荔枝避让区 766/2556 ≈ 0.30
+        var swipe_y_top_pct: Double?
+        /// 滑动的下边界（比例 0..1）—— 荔枝避让区 1789/2556 ≈ 0.70
+        var swipe_y_bot_pct: Double?
+        /// OCR 找不到时的模板兜底阈值（替代荔枝的 YOLO）
+        var fallback_template_threshold: Double?
+
+        /// 转化关键词数组
+        var conversionKeywords: [String] {
+            guard let s = conversion_keyword, !s.isEmpty else { return [] }
+            return s.split(separator: "-").map { String($0).trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+        }
     }
 
     struct Element: Codable {

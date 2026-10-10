@@ -65,6 +65,7 @@ struct ContentView: View {
     @StateObject private var cfgStore = ConfigStore()
     @StateObject private var grabber = ScreenGrabber()
     @StateObject private var broadcaster = BroadcastStarter()
+    @StateObject private var pip = PiPManager()
     @State private var router: APIRouter?
     @State private var started = false
     @State private var port: UInt16 = 0
@@ -127,6 +128,19 @@ struct ContentView: View {
                 .padding(.horizontal, 8)
                 .padding(.top, 4)
 
+                // ⭐⭐⭐⭐ 「活」—— 画中画保活（照荔枝的做法）
+                HStack(spacing: 6) {
+                    Button("🖼 开画中画") {
+                        let ok = pip.start()
+                        store.log("▶️ 启动画中画保活: \(ok ? "✅ 已发起" : "⛔ \(pip.lastError)")")
+                    }
+                    Button("关") { pip.stop() }
+                    Text(pip.active ? "PiP 活" : "PiP 停")
+                        .font(.system(size: 10, design: .monospaced))
+                }
+                .padding(.horizontal, 8)
+                .padding(.top, 4)
+
                 // ⭐⭐⭐ 自主循环 —— App 自己在手机上跑（⛔ 不需要 PC / USB / 开发者模式）
                 HStack(spacing: 6) {
                     Button("▶️ 开始跑") {
@@ -151,7 +165,7 @@ struct ContentView: View {
                     .padding(6)
                 }
             }
-            .navigationTitle("PGAgent v0.7.0")
+            .navigationTitle("PGAgent v0.8.0")
             .onAppear(perform: boot)
         }
         .navigationViewStyle(.stack)
@@ -161,7 +175,7 @@ struct ContentView: View {
         guard !started else { return }
         started = true
 
-        store.log("=== PGAgent v0.7.0 启动 ===")
+        store.log("=== PGAgent v0.8.0 启动 ===")
         store.log("Documents = \(DocsScanner.docPath())")
 
         // ⭐ 自主循环（App 自己在手机上跑，⛔ 不需要 PC）
@@ -177,12 +191,14 @@ struct ContentView: View {
             let page = (s["page"] as? String) ?? "-"
             let reason = (s["stopReason"] as? String) ?? "-"
             runState = running ? "跑中 步\(step) \(page)" : "停 \(reason)"
+            // ⭐ 把状态同步到画中画（荔枝的做法：PiP 里显示进度）
+            if pip.active { pip.text = runner.pipLine() }
         }
 
         // ⭐ 起 HTTP 服务
         let rt = APIRouter(log: store, ble: ble, cfgStore: cfgStore,
                            grabber: grabber, runner: runner,
-                           broadcaster: broadcaster)
+                           broadcaster: broadcaster, pip: pip)
         router = rt
         http.server.onRequest = { [weak rt] req in
             rt?.handle(req) ?? HTTPServer.Response.text("no router", status: 500)

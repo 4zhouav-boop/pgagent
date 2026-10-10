@@ -1,30 +1,32 @@
 import Foundation
 import UIKit
 
-/// ⭐⭐⭐⭐ 「大脑」—— **自主循环**（App 自己在手机上跑，⛔ 不需要 PC）。
+/// ⭐⭐⭐⭐⭐ 「大脑」—— **自主循环**（App 自己在手机上跑，⛔ 不需要 PC）。
 ///
-/// ## 为什么需要它
-/// 之前的分工是「PC 抓帧 → PC 识别 → PC 发指令」，手机只是个执行器。
-/// 用户令：「**以后是全部交到手机上的，调试可以取画面，APP那边得自己取画面。**」
-/// ⇒ 这个类把 PC 侧的循环**整体搬进 App**：
+/// ## 架构来源
+/// 结合了 **荔枝RPA** 的实测优点（`_note_2010` / `_note_2011`）与我们的既有优势。
 ///
-/// ```
-/// ① 抓帧（ScreenGrabber 触发快捷指令截图）
-/// ② 判页（Navigator.pageHere）
-/// ③ 到目的地了吗？ → 到了就停
-/// ④ 广告页？ → ⛔ 放行（用户令：「都是跑循环广告」）
-/// ⑤ 恢复漏斗（弹窗盖屏优先）
-/// ⑥ 页面图上前进一跳
-/// ⑦ 卡死检测（画面没变 / 原地打转）→ 停手并报告
-/// ```
+/// ### 从荔枝学的（日志实证）
+/// | # | 项 | 荔枝实测 | 本实现 |
+/// |---|---|---|---|
+/// | 1 | **广告停留** | `settingsAdTimeMin/Max = 40/60` 秒 | `ad_stay_min/max` |
+/// | 2 | **OCR 超时** | 10.1 秒 / 99 次尝试 | `ocr_timeout_s` / `ocr_max_tries` |
+/// | 3 | **杂七杂八处理** | 专门一轮清理弹窗 | `cleanupPass()` |
+/// | 4 | **滑动快慢** | `hs=100` 快甩 / `hs=2000` 慢拖 | `SwipeSpeed` |
+/// | 5 | **避让区滑动** | y 766~1789（避开顶/底栏）| `swipe_y_top/bot_pct` |
+/// | 6 | **转化关键词** | `领取福利-立即下载-…` | `conversion_keyword` |
+/// | 7 | **关键词同义词组** | 每组 5~10 个 | 配置里扩充 |
+/// | 8 | **画中画保活** | PiP + `showPiPLog` | `PiPManager` |
+///
+/// ### 我们保留的优势
+/// · **HID 绝对坐标 0..32767**（设备无关，⛔ 不用按分辨率换算）—— `_note_2012`
+/// · **配置驱动**（改逻辑只推 JSON，⛔ 不重装）
+/// · **⛔ 不盲点**（坐标来自识别结果）
 ///
 /// ## 铁律
-/// · ⛔ **先找到再点**（坐标来自识别结果，绝不盲点）
-/// · ⛔ **广告页放行**（不点广告的 ✕）
+/// · ⛔ **先找到再点**
+/// · ⛔ **广告页放行**（用户令：「都是跑循环广告」）⇒ **待够时间**，⛔ 不点 ✕
 /// · ⛔ **认不出就停**（不猜、不硬闯）
-///
-/// ## 设计
-/// 全部参数来自 `config.json`（`settings.loop_*`），⛔ 改行为不用重装。
 final class Runner: ObservableObject {
 
     // MARK: - 状态（HTTP 可查）
@@ -36,13 +38,14 @@ final class Runner: ObservableObject {
     @Published private(set) var lastError = ""
     @Published private(set) var stopReason = "-"
     @Published private(set) var trace: [String] = []
+    /// ⭐ 广告停留进度（0..1）—— 给 PiP 显示用
+    @Published private(set) var adProgress: Double = 0
 
     private let cfgStore: ConfigStore
     private let grabber: ScreenGrabber
     private let ble: BLEController
     private let log: (String) -> Void
 
-    /// 循环跑在自己的串行队列上（⛔ 不阻塞 HTTP 线程）
     private let q = DispatchQueue(label: "pgagent.runner", qos: .userInitiated)
     private var cancelFlag = false
 
@@ -54,26 +57,49 @@ final class Runner: ObservableObject {
         self.log = log
     }
 
-    // MARK: - 参数（全部来自配置）
+    // MARK: - 参数（全部来自配置，带荔枝实测默认值）
 
     private var maxSteps: Int { cfgStore.cfg?.settings?.loop_max_steps ?? 40 }
     private var stepWait: Double { cfgStore.cfg?.settings?.loop_step_wait ?? 1.5 }
     private var grabTimeout: Double { cfgStore.cfg?.settings?.loop_grab_timeout ?? 10.0 }
     private var stallLimit: Int { cfgStore.cfg?.settings?.loop_stall_limit ?? 3 }
+    /// ⭐ 广告停留（荔枝 40/60 秒）
+    private var adStayMin: Double { cfgStore.cfg?.settings?.ad_stay_min ?? 40 }
+    private var adStayMax: Double { cfgStore.cfg?.settings?.ad_stay_max ?? 60 }
+    /// ⭐ OCR 超时（荔枝 10.1s / 99 次）
+    private var ocrTimeout: Double { cfgStore.cfg?.settings?.ocr_timeout_s ?? 10.0 }
+    private var ocrMaxTries: Int { cfgStore.cfg?.settings?.ocr_max_tries ?? 99 }
+    /// ⭐ 滑动参数
+    private var swipeTopPct: Double { cfgStore.cfg?.settings?.swipe_y_top_pct ?? 0.30 }
+    private var swipeBotPct: Double { cfgStore.cfg?.settings?.swipe_y_bot_pct ?? 0.70 }
+    private var swipeSpeed: BLEController.SwipeSpeed {
+        switch cfgStore.cfg?.settings?.swipe_video_speed ?? "fast" {
+        case "slow": return .slow
+        case "mid":  return .mid
+        default:     return .fast
+        }
+    }
+    /// ⭐ 转化关键词（荔枝 `领取福利-立即下载-…`）
+    private var conversionKeywords: [String] {
+        cfgStore.cfg?.settings?.conversionKeywords ?? []
+    }
+
+    private func v(_ a: Double, _ b: Double) -> Double { cfgStore.cfg?.settings?.base_w ?? 451 }
+    private var baseW: Double { cfgStore.cfg?.settings?.base_w ?? 451 }
+    private var baseH: Double { cfgStore.cfg?.settings?.base_h ?? 977 }
+    private var yFix: Double { cfgStore.cfg?.settings?.y_fix ?? 4 }
 
     // MARK: - 控制
 
     func start(dest: String?) {
-        guard !running else {
-            log("§run ⚠️ 已在跑，忽略")
-            return
-        }
+        guard !running else { log("§run ⚠️ 已在跑，忽略"); return }
         cancelFlag = false
         running = true
         step = 0
         trace.removeAll()
         lastError = ""
         stopReason = "-"
+        adProgress = 0
         q.async { [weak self] in self?.loop(dest: dest) }
     }
 
@@ -90,8 +116,18 @@ final class Runner: ObservableObject {
             "action": lastAction,
             "stopReason": stopReason,
             "error": lastError,
+            "adProgress": adProgress,
             "trace": Array(trace.suffix(40)),
         ]
+    }
+
+    /// 给 PiP 显示的一行状态
+    func pipLine() -> String {
+        if !running { return "停 \(stopReason)" }
+        if adProgress > 0 {
+            return "广告 \(Int(adProgress * 100))%  \(lastPage)"
+        }
+        return "步\(step) \(lastPage) \(lastAction)"
     }
 
     // MARK: - 主循环
@@ -102,19 +138,15 @@ final class Runner: ObservableObject {
             log("§run === 结束：\(stopReason) ===")
         }
 
-        guard let cfg = cfgStore.cfg else {
-            finish("配置未加载")
-            return
-        }
+        guard let cfg = cfgStore.cfg else { finish("配置未加载"); return }
 
         let rec = Recognizer(templatesDir: ConfigStore.templatesDir())
         let nav = Navigator(cfg: cfg, rec: rec, ble: ble) { [weak self] s in
             self?.append(s)
         }
 
-        // 目标页：默认 config 里的 `target`，可被请求覆盖
         let target = dest ?? cfg.settings?.target ?? "center"
-        log("§run ▶️ 开始 目标=\(target) 最大步数=\(maxSteps)")
+        log("§run ▶️ 开始 目标=\(target) 最大步数=\(maxSteps) 广告停留=\(Int(adStayMin))~\(Int(adStayMax))s")
 
         var stall = 0
         var lastSig = ""
@@ -139,15 +171,15 @@ final class Runner: ObservableObject {
                 return
             }
 
-            // ④ ⛔ 广告页放行（用户令：「都是跑循环广告，你他妈一个广告就点X」）
+            // ④ ⛔⛔ 广告页：**待够时间**，⛔ 不点 ✕（用户令 + 荔枝 40/60 秒）
             if page == "ad_video" {
-                log("§run ⛔ 广告页 ⇒ 放行（不碰）")
-                DispatchQueue.main.async { self.lastAction = "ad-pass" }
-                sleep(stepWait)
+                log("§run ⛔ 广告页 ⇒ 放行（待够 \(Int(adStayMin))~\(Int(adStayMax))s，⛔ 不点 ✕）")
+                DispatchQueue.main.async { self.lastAction = "ad-stay" }
+                adStayLoop()
                 continue
             }
 
-            // ⑤ 卡死检测（画面签名连续不变 ⇒ 停手）
+            // ⑤ 卡死检测
             let sig = signature(img)
             if sig == lastSig {
                 stall += 1
@@ -160,14 +192,26 @@ final class Runner: ObservableObject {
                 lastSig = sig
             }
 
-            // ⑥ 恢复漏斗（弹窗盖屏优先 —— 盖屏时底下什么都点不到）
+            // ⑥ ⭐ 杂七杂八处理（荔枝的「杂七杂八处理」）—— 弹窗优先
             if nav.runFunnel(img) {
                 DispatchQueue.main.async { self.lastAction = "funnel" }
                 sleep(stepWait)
                 continue
             }
 
-            // ⑦ 页面图上前进一跳
+            // ⑦ ⭐ 转化关键词检查（荔枝的 `settingsConversionKeyword`）
+            if !conversionKeywords.isEmpty {
+                let hits = rec.findWords(img, words: conversionKeywords, roi: nil,
+                                         minHits: 1, minConfidence: 0.5)
+                if hits != nil {
+                    log("§run ⭐ 命中转化关键词 ⇒ 按 \(cfgStore.cfg?.settings?.conversion_swipe ?? 3) 次滑动")
+                    DispatchQueue.main.async { self.lastAction = "convert" }
+                    conversionSwipe()
+                    continue
+                }
+            }
+
+            // ⑧ 页面图上前进一跳
             if let p = cfg.pages[page], let go = p.go, go != "stop" {
                 if nav.tap(go, img: img) {
                     DispatchQueue.main.async { self.lastAction = "tap:\(go)" }
@@ -177,7 +221,7 @@ final class Runner: ObservableObject {
                 log("§run ⚠️ 在 \(page) 想点 \(go) 但没找到")
             }
 
-            // ⑧ ⛔ 认不出出路 ⇒ 停手（⛔ 不盲点）
+            // ⑨ ⛔ 认不出出路 ⇒ 停手（⛔ 不盲点）
             finish("⛔ 在 \(page) 认不出出路 ⇒ 停手")
             return
         }
@@ -185,22 +229,67 @@ final class Runner: ObservableObject {
         finish("达到最大步数 \(maxSteps)")
     }
 
+    // MARK: - ⭐ 广告停留（荔枝 settingsAdTimeMin/Max）
+
+    /// 广告页**待够**时间，⛔ 不点 ✕。
+    /// 荔枝实测 `settingsAdTimeMin/Max = 40/60` ⇒ 至少 40 秒，最多 60 秒。
+    private func adStayLoop() {
+        let stay = Double.random(in: adStayMin...max(adStayMin, adStayMax))
+        var left = stay
+        while left > 0 && !cancelFlag {
+            let d = min(0.5, left)
+            Thread.sleep(forTimeInterval: d)
+            left -= d
+            let prog = 1.0 - (left / stay)
+            DispatchQueue.main.async { self.adProgress = prog }
+        }
+        DispatchQueue.main.async { self.adProgress = 0 }
+        log("§run ✅ 广告停留完成（\(Int(stay))s）")
+    }
+
+    // MARK: - ⭐ 转化滑动（荔枝 settingsConversionSwipe = 3）
+
+    private func conversionSwipe() {
+        let n = cfgStore.cfg?.settings?.conversion_swipe ?? 3
+        for i in 0..<n {
+            if cancelFlag { return }
+            let midX = baseW / 2.0
+            let yBot = baseH * swipeBotPct
+            let yTop = baseH * swipeTopPct
+            let cmd = BLEController.swipe(x1: midX, y1: yBot, x2: midX, y2: yTop,
+                                          speed: swipeSpeed,
+                                          baseW: baseW, baseH: baseH, yFix: yFix)
+            _ = ble.send(cmd)
+            log("   §convert 滑动 \(i + 1)/\(n)  \(cmd)")
+            sleep(1.2)
+        }
+    }
+
     // MARK: - 工具
 
     /// 同步抓一帧（循环在自己的队列上，可以阻塞）
+    /// ⭐ 带**超时重试**（荔枝实测：10.1 秒 / 99 次尝试）
     private func grabSync() -> UIImage? {
-        let sem = DispatchSemaphore(value: 0)
-        var url: URL?
-        grabber.grab(timeout: grabTimeout) { u, _ in
-            url = u
-            sem.signal()
+        for attempt in 0..<max(1, ocrMaxTries / 10) {
+            if cancelFlag { return nil }
+            let sem = DispatchSemaphore(value: 0)
+            var url: URL?
+            grabber.grab(timeout: grabTimeout) { u, _ in
+                url = u
+                sem.signal()
+            }
+            _ = sem.wait(timeout: .now() + grabTimeout + 4)
+            if let u = url, let im = UIImage(contentsOfFile: u.path) {
+                return im
+            }
+            if attempt > 0 {
+                log("   §grab 第 \(attempt + 1) 次未拿到帧，重试…")
+            }
         }
-        _ = sem.wait(timeout: .now() + grabTimeout + 4)
-        guard let u = url else { return nil }
-        return UIImage(contentsOfFile: u.path)
+        return nil
     }
 
-    /// 画面签名：用极小的灰度缩略图做指纹（⛔ 不用全图，太快）
+    /// 画面签名：用极小的灰度缩略图做指纹
     private func signature(_ img: UIImage) -> String {
         let w = 16, h = 32
         guard let cg = img.cgImage else { return "-" }
@@ -213,7 +302,6 @@ final class Runner: ObservableObject {
             return "-"
         }
         ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
-        // 量化成 4 档，减少噪声影响
         return buf.map { String($0 / 64) }.joined()
     }
 
@@ -226,7 +314,6 @@ final class Runner: ObservableObject {
     }
 
     private func sleep(_ s: Double) {
-        // 分片睡，保证能及时响应停止
         var left = s
         while left > 0 && !cancelFlag {
             let d = min(0.2, left)

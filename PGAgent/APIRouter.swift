@@ -26,16 +26,19 @@ final class APIRouter {
     let grabber: ScreenGrabber
     let runner: Runner
     let broadcaster: BroadcastStarter
+    let pip: PiPManager
     var httpPort: UInt16 = 0
 
     init(log: LogStore, ble: BLEController, cfgStore: ConfigStore,
-         grabber: ScreenGrabber, runner: Runner, broadcaster: BroadcastStarter) {
+         grabber: ScreenGrabber, runner: Runner, broadcaster: BroadcastStarter,
+         pip: PiPManager) {
         self.log = log
         self.ble = ble
         self.cfgStore = cfgStore
         self.grabber = grabber
         self.runner = runner
         self.broadcaster = broadcaster
+        self.pip = pip
     }
 
     // MARK: - 工具
@@ -70,11 +73,12 @@ final class APIRouter {
 
         case ("GET", "/"):
             return .json([
-                "app": "PGAgent", "version": "0.7.0",
+                "app": "PGAgent", "version": "0.8.0",
                 "endpoints": ["/status", "/probe", "/reload", "/config", "/elements",
                               "/page", "/nav", "/ocr", "/see", "/grab", "/grabinfo",
                               "/shoot", "/shortcut", "/run", "/runstop", "/runstate",
                               "/dl", "/openurl", "/install-shortcut", "/rec/start", "/rec/state", "/frame", "/frame.jpg", "/rec/save",
+                              "/pip/start", "/pip/stop", "/pip/state", "/pip/text",
                               "/files", "/file", "/write", "/mkdir", "/ble/scan",
                               "/ble/connect", "/ble/send", "/click", "/log"],
             ])
@@ -151,7 +155,7 @@ final class APIRouter {
         case ("GET", "/status"):
             let cfgOK = cfgStore.cfg != nil
             return .json([
-                "app": "PGAgent", "version": "0.7.0",
+                "app": "PGAgent", "version": "0.8.0",
                 "ios": UIDevice.current.systemVersion,
                 "httpPort": Int(httpPort),
                 "documents": docsURL().path,
@@ -308,6 +312,22 @@ final class APIRouter {
 
         case ("GET", "/rec/state"):
             return .json(["ok": true, "state": broadcaster.snapshot()])
+
+        // ⭐⭐⭐⭐ 画中画保活（照荔枝的做法，`_note_2011` §7）
+        case ("POST", "/pip/start"):
+            let ok = pip.start()
+            return .json(["ok": ok, "state": pip.snapshot()], status: ok ? 200 : 500)
+
+        case ("POST", "/pip/stop"):
+            pip.stop()
+            return .json(["ok": true, "state": pip.snapshot()])
+
+        case ("GET", "/pip/state"):
+            return .json(["ok": true, "state": pip.snapshot()])
+
+        case ("POST", "/pip/text"):
+            if let t = r.query["t"] { pip.text = t }
+            return .json(["ok": true, "text": pip.text])
 
         // ⭐ 扩展把每一帧 POST 到这里（`http://127.0.0.1:8899/frame`）
         case ("POST", "/frame"):

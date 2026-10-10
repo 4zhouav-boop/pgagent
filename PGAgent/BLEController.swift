@@ -91,6 +91,62 @@ final class BLEController: NSObject, ObservableObject {
         return ["P:\(hx),\(hy)", "C:L"]
     }
 
+    /// ⭐ 坐标归一化（像素 → HID 0..32767）—— 与 `ks_io.py` 的 `plog()` 一致
+    static func norm(_ x: Double, _ y: Double,
+                     baseW: Double = 451, baseH: Double = 977,
+                     yFix: Double = 4) -> (Int, Int) {
+        let hx = max(0, min(32767, Int((x / baseW) * 32767.0)))
+        let hy = max(0, min(32767, Int(((y + yFix) / baseH) * 32767.0)))
+        return (hx, hy)
+    }
+
+    /// ⭐⭐ 滑动（`D:x1,y1,x2,y2,ms`）
+    ///
+    /// 📏 时长分档（照 **荔枝** 实测的两档，`_note_2012` §4）：
+    ///   · `fast`  = **100 ms**（快速甩 —— 刷视频翻页）
+    ///   · `mid`   = **220 ms**（默认 —— 通用）
+    ///   · `slow`  = **2000 ms**（慢速拖 —— 需要精确控制的场景）
+    ///
+    /// 荔枝日志实证：
+    /// ```
+    /// x1=589 y1=766  → x2=589 y2=1789  hs=100     (x16)  快甩
+    /// x1=589 y1=1789 → x2=589 y2=766   hs=2000    (x40)  慢拖
+    /// ```
+    enum SwipeSpeed: String {
+        case fast, mid, slow
+        var ms: Int {
+            switch self {
+            case .fast: return 100
+            case .mid:  return 220
+            case .slow: return 2000
+            }
+        }
+    }
+
+    static func swipe(x1: Double, y1: Double, x2: Double, y2: Double,
+                      speed: SwipeSpeed = .mid,
+                      baseW: Double = 451, baseH: Double = 977,
+                      yFix: Double = 4) -> String {
+        let a = norm(x1, y1, baseW: baseW, baseH: baseH, yFix: yFix)
+        let b = norm(x2, y2, baseW: baseW, baseH: baseH, yFix: yFix)
+        return "D:\(a.0),\(a.1),\(b.0),\(b.1),\(speed.ms)"
+    }
+
+    /// ⭐ 刷视频的「上滑换下一个」——x 固定屏幕中线，y 取**避让区**（避开顶/底栏）
+    ///
+    /// 荔枝的避让区（在 1179x2556 上）：`y 766 ~ 1789`
+    /// ⇒ 归一化到基准 451x977：`766/2556*977 = 293`，`1789/2556*977 = 684`
+    /// ⇒ ⭐ 即 `y1=684 → y2=293`（上滑）
+    static func swipeNextVideo(speed: SwipeSpeed = .fast,
+                               baseW: Double = 451, baseH: Double = 977,
+                               yFix: Double = 4) -> String {
+        let midX = baseW / 2.0
+        let yTop = baseH * 0.30     // ≈293
+        let yBot = baseH * 0.70     // ≈684
+        return swipe(x1: midX, y1: yBot, x2: midX, y2: yTop, speed: speed,
+                     baseW: baseW, baseH: baseH, yFix: yFix)
+    }
+
     private var foundPeripherals: [CBPeripheral] = []
 }
 

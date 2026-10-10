@@ -55,6 +55,10 @@ targets:
       - target: PGShot
       - sdk: ReplayKit.framework
       - sdk: CoreImage.framework
+      - sdk: AVKit.framework
+      - sdk: AVFoundation.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreVideo.framework
 
   # ⭐⭐⭐ 「眼」—— ReplayKit 广播扩展（荔枝/所有 RPA App 的真正做法）
   #   主 App 用 RPSystemBroadcastPickerView().triggerPicker() **程序化启动**它，

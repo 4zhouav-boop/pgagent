@@ -23,14 +23,53 @@
 
     "_loop_doc": [
       "⭐ 自主循环（Runner）参数 —— App 在手机上自己跑，⛔ 不需要 PC。",
-      "运行时⛔ 不需要开发者模式：抓帧走快捷指令、点击走 ESP32 蓝牙。",
+      "运行时⛔ 不需要开发者模式：抓帧走录屏扩展/快捷指令、点击走 ESP32 蓝牙。",
       "改这些值只推 config.json，⛔ 不用重编/重签/重装。"
     ],
     "target": "center",
     "loop_max_steps": 40,
     "loop_step_wait": 1.5,
     "loop_grab_timeout": 10.0,
-    "loop_stall_limit": 3
+    "loop_stall_limit": 3,
+
+    "_lizhi_doc": [
+      "⭐⭐ 以下参数照 **荔枝RPA** 实测值（_note_2010 / _note_2011 / _note_2012）。",
+      "荔枝的 settings 组 + 实测日志给了这些硬数字，直接采用。"
+    ],
+    "_ad_doc": [
+      "⭐ 广告页停留时长（荔枝 settingsAdTimeMin/Max = 40/60）。",
+      "用户明令：「谁让你强退的，都是跑循环广告」⇒ 广告页要**待够时间**，⛔ 不点 ✕。"
+    ],
+    "ad_stay_min": 40,
+    "ad_stay_max": 60,
+
+    "_conv_doc": [
+      "⭐ 转化关键词（荔枝 settingsConversionKeyword）——用 `-` 分隔。",
+      "命中即认为「广告转化完成」（下载/安装类广告的判定）。"
+    ],
+    "conversion_keyword": "领取福利-立即下载-极速下载-官方下载-急速下载",
+    "conversion_swipe": 3,
+
+    "_live_doc": "⭐ 直播间停留（荔枝 settingsLiveStay = 66 秒）",
+    "live_stay": 66,
+
+    "_timeout_doc": "⭐ OCR 等待超时（荔枝实测 10.1 秒 / 99 次尝试）",
+    "ocr_timeout_s": 10.0,
+    "ocr_max_tries": 99,
+
+    "_swipe_doc": [
+      "⭐ 滑动档位（荔枝 hs=100 快甩 / hs=2000 慢拖）。",
+      "刷视频用 fast（100ms），精确拖动用 slow（2000ms）。"
+    ],
+    "swipe_video_speed": "fast",
+    "swipe_y_top_pct": 0.30,
+    "swipe_y_bot_pct": 0.70,
+
+    "_yolo_doc": [
+      "⭐ OCR 找不到时的兜底（荔枝有 YOLOv8）。",
+      "我们暂用「模板池」当兜底，这里配它的阈值。"
+    ],
+    "fallback_template_threshold": 0.72
   },
 
   "rois": {
