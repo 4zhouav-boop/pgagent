@@ -236,7 +236,13 @@ final class PiPManager: NSObject, ObservableObject {
             "\(Int($0.frame.origin.x)),\(Int($0.frame.origin.y)) \(Int($0.frame.width))x\(Int($0.frame.height))"
         } ?? "-"
         d["layerStatus"] = layer.map { "\($0.status.rawValue)" } ?? "-"
-        d["layerReady"] = layer?.isReadyForDisplay ?? false
+        // ⚠️ `isReadyForDisplay` 是 iOS 17.4+（我们的 deploymentTarget 是 17.0）
+        //    ⇒ 必须用 `#available` 包起来，否则编译失败（§2233 踩过）
+        if #available(iOS 17.4, *) {
+            d["layerReady"] = layer?.isReadyForDisplay ?? false
+        } else {
+            d["layerReady"] = "(需 iOS 17.4+)"
+        }
         d["timebaseRate"] = timebase.map { "\(CMTimebaseGetRate($0))" } ?? "-"
         d["audioActive"] = AVAudioSession.sharedInstance().isOtherAudioPlaying == false
         d["audioCategory"] = AVAudioSession.sharedInstance().category.rawValue
