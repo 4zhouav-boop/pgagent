@@ -80,6 +80,7 @@ final class APIRouter {
                               "/dl", "/openurl", "/install-shortcut", "/rec/start", "/rec/state",
                               "/frame", "/frame.jpg", "/rec/save", "/framediag", "/framepoll",
                               "/pip/start", "/pip/stop", "/pip/state", "/pip/text",
+                              "/keepalive/start", "/keepalive/stop", "/keepalive/state",
                               "/files", "/file", "/write", "/mkdir", "/ble/scan",
                               "/ble/connect", "/ble/send", "/click", "/log"],
             ])
@@ -141,8 +142,10 @@ final class APIRouter {
         // ⭐⭐⭐⭐ `/run` —— **App 自己在手机上跑循环**（⛔ 不需要 PC / USB / 开发者模式）
         //    用户令：「以后是全部交到手机上的，调试可以取画面，APP那边得自己取画面。」
         case ("POST", "/run"):
+            // ⭐ 先把保活打开（否则一切后台就被挂起，循环必然断）
+            let ka = SilentKeepAlive.shared.start()
             runner.start(dest: r.query["dest"])
-            return .json(["ok": true, "started": true,
+            return .json(["ok": true, "started": true, "keepAlive": ka,
                           "dest": r.query["dest"] ?? cfgStore.cfg?.settings?.target ?? "center",
                           "state": runner.snapshot()])
 
@@ -344,6 +347,23 @@ final class APIRouter {
         case ("POST", "/pip/text"):
             if let t = r.query["t"] { pip.text = t }
             return .json(["ok": true, "text": pip.text])
+
+        // ⭐⭐⭐⭐⭐ **静音音频保活**（§2235）—— 比 PiP 简单可靠
+        //
+        // 语义：App 声明了 `UIBackgroundModes:[audio]`，
+        //       只要**真的有音频在播**（哪怕是静音），系统就**不挂起**它。
+        // ⇒ 这是「App 退后台还能继续跑 Runner」的**正路**。
+        case ("POST", "/keepalive/start"):
+            let ok = SilentKeepAlive.shared.start()
+            return .json(["ok": ok, "state": SilentKeepAlive.shared.snapshot()],
+                         status: ok ? 200 : 500)
+
+        case ("POST", "/keepalive/stop"):
+            SilentKeepAlive.shared.stop()
+            return .json(["ok": true, "state": SilentKeepAlive.shared.snapshot()])
+
+        case ("GET", "/keepalive/state"):
+            return .json(["ok": true, "state": SilentKeepAlive.shared.snapshot()])
 
         // ⭐ 扩展把每一帧 POST 到这里（`http://127.0.0.1:8899/frame`）
         case ("POST", "/frame"):

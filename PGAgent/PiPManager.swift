@@ -43,6 +43,8 @@ final class PiPManager: NSObject, ObservableObject {
     private var hostView: UIView?
     /// ⭐ 图层的时间基准（PiP 要求图层「在播」才会变 possible）
     private var timebase: CMTimebase?
+    /// ⭐ 启动探测次数（诊断：>0 说明 possible 曾为 true）
+    private(set) var startTries = 0
 
     /// 画面尺寸（小一点省资源）
     private let W = 320, H = 180
@@ -97,10 +99,13 @@ final class PiPManager: NSObject, ObservableObject {
         //       `UIBackgroundModes: [audio]`（见 project.yml）。
         do {
             let s = AVAudioSession.sharedInstance()
-            try s.setCategory(.playback, mode: .moviePlayback,
-                              options: [.mixWithOthers])
+            // ⛔⛔ **不要加 `.mixWithOthers`**（§2234 实测）：
+            //    PiP 要求本 App 是**主音频会话**（"now playing"）。
+            //    带 `.mixWithOthers` 时系统认为「可能有别的 App 在放音」
+            //    ⇒ 拒绝让 PiP 自动启动（`isPictureInPicturePossible` 也可能不稳）。
+            try s.setCategory(.playback, mode: .moviePlayback, options: [])
             try s.setActive(true)
-            NSLog("PGAgent PiP: AVAudioSession .playback 已激活")
+            NSLog("PGAgent PiP: AVAudioSession .playback 已激活（主会话）")
         } catch {
             NSLog("PGAgent PiP: AVAudioSession 设置失败 %@", String(describing: error))
         }
@@ -118,8 +123,12 @@ final class PiPManager: NSObject, ObservableObject {
         let host = UIView(frame: CGRect(x: 0, y: 0, width: 120, height: 68))
         host.isUserInteractionEnabled = false
         host.backgroundColor = .black
-        host.alpha = 0.02          // 近乎不可见（⛔ 不用 0，避免被当作隐藏）
+        // ⚠️ alpha 别设太小（§2234）：0.02 时 `isReadyForDisplay` 一直是 false
+        //    ⇒ 图层不算「真的在渲染」⇒ PiP 起不来。
+        //    ✅ 用 1.0，靠**层级**（insertSubview at:0）让它被 SwiftUI 内容盖住。
+        host.alpha = 1.0
         host.isHidden = false
+        host.clipsToBounds = true
         if let root = win.rootViewController?.view {
             root.insertSubview(host, at: 0)     // ⭐ 放最底层
         } else {
@@ -181,13 +190,19 @@ final class PiPManager: NSObject, ObservableObject {
     /// 刚建好时**必然**是 false（§2230 实测：等 0.3s 拿到 false，
     /// 而框架自己会在准备好后回调 delegate）。
     private func attemptStart(_ c: AVPictureInPictureController, tries: Int) {
-        if c.isPictureInPictureActive { return }
+        if c.isPictureInPictureActive {
+            NSLog("PGAgent PiP: 已经是 active，停手")
+            return
+        }
         if c.isPictureInPicturePossible {
+            startTries = tries + 1
+            NSLog("PGAgent PiP: 第 %d 次探测 possible=true ⇒ 调 startPictureInPicture()",
+                  tries + 1)
             c.startPictureInPicture()
-            NSLog("PGAgent PiP: startPictureInPicture() 已调用（第 %d 次探测）", tries + 1)
             return
         }
         guard tries < 15 else {
+            startTries = tries
             lastError = "PiP 当前不可用（isPictureInPicturePossible=false，等 3s）"
             NSLog("PGAgent PiP: %@", lastError)
             return
@@ -244,8 +259,10 @@ final class PiPManager: NSObject, ObservableObject {
             d["layerReady"] = "(需 iOS 17.4+)"
         }
         d["timebaseRate"] = timebase.map { "\(CMTimebaseGetRate($0))" } ?? "-"
+        d["startTries"] = startTries
         d["audioActive"] = AVAudioSession.sharedInstance().isOtherAudioPlaying == false
         d["audioCategory"] = AVAudioSession.sharedInstance().category.rawValue
+        d["audioOptions"] = AVAudioSession.sharedInstance().categoryOptions.rawValue
         return d
     }
 

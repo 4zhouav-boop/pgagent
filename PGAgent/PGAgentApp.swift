@@ -295,6 +295,9 @@ struct ContentView: View {
             if pip.active { pip.text = runner.pipLine() }
         }
 
+        // ⭐⭐⭐ 静音音频保活（§2235）—— 开机就开，这样**任何时候**退后台都不被挂起
+        store.log("保活（静音音频）= \(SilentKeepAlive.shared.start() ? "✅ 已开" : "⛔ \(SilentKeepAlive.shared.lastError)")")
+
         // ⭐ 起 HTTP 服务
         let rt = APIRouter(log: store, ble: ble, cfgStore: cfgStore,
                            grabber: grabber, runner: runner,
