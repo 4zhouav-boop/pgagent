@@ -81,6 +81,7 @@ final class APIRouter {
                               "/frame", "/frame.jpg", "/rec/save", "/framediag", "/framepoll",
                               "/pip/start", "/pip/stop", "/pip/state", "/pip/text",
                               "/keepalive/start", "/keepalive/stop", "/keepalive/state",
+                              "/runlog",
                               "/files", "/file", "/write", "/mkdir", "/ble/scan",
                               "/ble/connect", "/ble/send", "/click", "/log"],
             ])
@@ -347,6 +348,27 @@ final class APIRouter {
         case ("POST", "/pip/text"):
             if let t = r.query["t"] { pip.text = t }
             return .json(["ok": true, "text": pip.text])
+
+        // ⭐⭐⭐ `/runlog` —— **共享容器里的运行日志**（§2236）
+        //    App 退后台 HTTP 不通时，PC 直接
+        //    `ios file pull --app-group=<gid> --remote=/Documents/run_status.json`
+        case ("GET", "/runlog"):
+            var out: [String: Any] = [:]
+            if let u = AppGroup.sharedFile("run_status.json"),
+               let d = try? Data(contentsOf: u),
+               let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+                out["status"] = j
+            } else {
+                out["status"] = "(还没有 run_status.json)"
+            }
+            if let u = AppGroup.sharedFile("run_trace.log"),
+               let s = try? String(contentsOf: u, encoding: .utf8) {
+                out["traceTail"] = Array(s.split(separator: "\n").suffix(30)).map(String.init)
+            } else {
+                out["traceTail"] = []
+            }
+            out["path"] = AppGroup.sharedFile("run_status.json")?.path ?? "(no group)"
+            return .json(out)
 
         // ⭐⭐⭐⭐⭐ **静音音频保活**（§2235）—— 比 PiP 简单可靠
         //

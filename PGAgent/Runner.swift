@@ -153,6 +153,7 @@ final class Runner: ObservableObject {
         defer {
             DispatchQueue.main.async { self.running = false }
             log("§run === 结束：\(stopReason) ===")
+            writeHeartbeat(["phase": "deferred-exit"])
         }
 
         guard let cfg = cfgStore.cfg else { finish("配置未加载"); return }
@@ -164,6 +165,8 @@ final class Runner: ObservableObject {
 
         let target = dest ?? cfg.settings?.target ?? "center"
         log("§run ▶️ 开始 目标=\(target) 最大步数=\(maxSteps) 广告停留=\(Int(adStayMin))~\(Int(adStayMax))s")
+        writeTraceLine("=== 开始 目标=\(target) 最大步数=\(maxSteps) ===")
+        writeHeartbeat(["phase": "start", "target": target, "maxSteps": maxSteps])
 
         var stall = 0
         var lastSig = ""
@@ -171,16 +174,19 @@ final class Runner: ObservableObject {
         for k in 0..<maxSteps {
             if cancelFlag { finish("用户停止"); return }
             DispatchQueue.main.async { self.step = k + 1 }
+            writeHeartbeat(["phase": "loop", "k": k])
 
             // ① 抓帧
             guard let img = grabSync() else {
                 finish("抓帧失败：\(grabber.lastError)")
                 return
             }
+            writeHeartbeat(["phase": "grabbed", "k": k])
 
             // ② 判页
             let page = nav.pageHere(img) ?? "unknown"
             DispatchQueue.main.async { self.lastPage = page }
+            writeHeartbeat(["phase": "paged", "k": k, "detected": page])
 
             // ③ 到目的地了吗？
             if page == target {
@@ -345,8 +351,57 @@ final class Runner: ObservableObject {
         return buf.map { String($0 / 64) }.joined()
     }
 
+    /// ⭐⭐⭐ **心跳/日志文件**（§2236）—— 写到 App Group **共享容器**
+    ///
+    /// ## 为什么必须有它
+    /// App 退后台后 **HTTP 不再响应**（iOS 把监听 socket 挂起），
+    /// 于是「Runner 到底有没有在跑」**完全看不到** —— 这正是用户
+    /// 反复抱怨的「**没日志 / 卡死界面上 / 不知道在干什么**」。
+    ///
+    /// 共享容器是**文件**，⛔ 不受 App 挂起影响：
+    /// ```
+    /// PC: ios file pull --app-group=<gid> --remote=/Documents/run_status.json
+    /// ```
+    /// ⇒ 任何时候都能看到：跑到第几步、在哪一页、什么动作、为什么停。
+    ///
+    /// 同时写一个**只追加**的 `run_trace.log`（最近 N 行）。
+    private func writeHeartbeat(_ extra: [String: Any] = [:]) {
+        guard let u = AppGroup.sharedFile("run_status.json") else { return }
+        var d: [String: Any] = [
+            "updatedAt": ISO8601DateFormatter().string(from: Date()),
+            "t": Date().timeIntervalSince1970,
+            "running": running,
+            "step": step,
+            "page": lastPage,
+            "action": lastAction,
+            "stopReason": stopReason,
+            "error": lastError,
+            "adProgress": adProgress,
+            "keepAlive": SilentKeepAlive.shared.started,
+        ]
+        for (k, v) in extra { d[k] = v }
+        if let data = try? JSONSerialization.data(withJSONObject: d,
+                                                  options: [.prettyPrinted]) {
+            try? data.write(to: u, options: .atomic)
+        }
+    }
+
+    /// ⭐ 追加一行到共享日志（PC 可直接 pull 看）
+    private func writeTraceLine(_ s: String) {
+        guard let u = AppGroup.sharedFile("run_trace.log") else { return }
+        let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(s)\n"
+        if let h = try? FileHandle(forWritingTo: u) {
+            h.seekToEndOfFile()
+            h.write(Data(line.utf8))
+            try? h.close()
+        } else {
+            try? Data(line.utf8).write(to: u, options: .atomic)
+        }
+    }
+
     private func append(_ s: String) {
         log(s)
+        writeTraceLine(s)          // ⭐ 也落到共享容器（App 挂起后仍可读）
         DispatchQueue.main.async {
             self.trace.append(s)
             if self.trace.count > 400 { self.trace.removeFirst(self.trace.count - 400) }
@@ -365,5 +420,7 @@ final class Runner: ObservableObject {
     private func finish(_ reason: String) {
         DispatchQueue.main.async { self.stopReason = reason }
         log("§run \(reason)")
+        writeTraceLine("=== 结束：\(reason) ===")
+        writeHeartbeat(["phase": "finished", "reason": reason])
     }
 }

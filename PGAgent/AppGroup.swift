@@ -94,6 +94,14 @@ enum AppGroup {
         return nil
     }
 
+    /// ⭐ 共享目录里的**任意文件**路径（用于心跳/日志；没有共享容器 ⇒ nil）
+    static func sharedFile(_ name: String) -> URL? {
+        guard let root = containerURL() else { return nil }
+        let d = root.appendingPathComponent("Documents", isDirectory: true)
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d.appendingPathComponent(name)
+    }
+
     /// 诊断用（`/framediag` 回显）
     static func snapshot() -> [String: Any] {
         var tried: [String: String] = [:]
