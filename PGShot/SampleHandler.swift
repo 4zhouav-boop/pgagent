@@ -1,5 +1,4 @@
 import ReplayKit
-import Security
 import UIKit
 
 /// ⭐⭐⭐⭐⭐ 「眼」—— **录屏广播扩展**（荔枝/所有 RPA App 的真正做法）。
@@ -115,24 +114,48 @@ class SampleHandler: RPBroadcastSampleHandler {
         return nil
     }
 
-    /// ⭐ 候选 group：**entitlements 优先**，再兜常见形态
+    /// ⭐ 候选 group：**Bundle 前缀推导** + 常见形态兜底
+    ///
+    /// ## ⚠️ 为什么不用 `SecTaskCopyValueForEntitlement`（§2250 编译踩过）
+    /// 那个 API（`SecTaskCreateFromSelf`）在 **appex 目标里编不过**：
+    /// ```
+    /// SampleHandler.swift:122: error: cannot find 'SecTaskCreateFromSelf' in scope
+    /// ```
+    /// ⇒ 它是 **Security 框架的私有/未公开** 部分（主 App 目标能编是巧合）。
+    ///
+    /// ## ✅ 改用**公开**且**足够准**的推导
+    /// 签名工具插的 team 后缀**只加在 bundle id 最后一段**之前，例如：
+    /// ```
+    /// 扩展 bundle : run.pgagent.PGAgent.8W9ZSMW4UW.PGShot
+    /// 对应 group  : group.run.pgagent.PGAgent.8W9ZSMW4UW
+    /// ```
+    /// ⇒ 规则：**去掉最后一段**，前面整串加 `group.` 前缀。
+    ///    再兜常见形态（未签名 / 猜不到时）。
+    ///
+    /// ⚠️ 但**真正生效与否由 `containerURL(...)` 决定** ——
+    ///    它无权限时返回 nil ⇒ 下面的「拿路径 + 建目录 + 写探针」会**自然筛掉**错的候选。
+    ///    （这一段逻辑与主 App 的 `AppGroup.probe()` 同一套，⛔ 不靠猜。）
     private func candidateGroups() -> [String] {
         var out: [String] = []
-        // ① ⭐ 本扩展 entitlements 里真实声明的
-        if let task = SecTaskCreateFromSelf(nil),
-           let v = SecTaskCopyValueForEntitlement(
-               task, "com.apple.security.application-groups" as CFString, nil),
-           let arr = v as? [String] {
-            out += arr
-        }
-        // ② 兜底（entitlements 读不到时）
-        out += ["group.run.pgagent.PGAgent", "group.pgagent"]
+        // ① ⭐ 从**本扩展的 bundle id** 推导（去掉最后一段 = 去掉 .PGShot）
         if let bid = Bundle.main.bundleIdentifier {
             let parts = bid.split(separator: ".")
             if parts.count >= 2 {
-                out.append("group." + parts.prefix(2).joined(separator: "."))
+                // run.pgagent.PGAgent.8W9ZSMW4UW.PGShot
+                //   ⇒ 去掉最后一段 ⇒ group.run.pgagent.PGAgent.8W9ZSMW4UW
+                let all = parts.map(String.init)
+                out.append("group." + all.dropLast().joined(separator: "."))
+                // run.pgagent.PGAgent.PGShot（未插 team 后缀时）
+                //   ⇒ 也去掉最后一段 ⇒ group.run.pgagent.PGAgent
+                out.append("group." + all.dropLast().joined(separator: "."))
+                // bundleIdPrefix 只有两段时（run.pgagent）
+                out.append("group." + all.prefix(2).joined(separator: "."))
             }
         }
+        // ② 兜底（常见形态；⛔ 真正的判据是 containerURL 能不能写）
+        out += ["group.run.pgagent.PGAgent",
+                "group.run.pgagent.PGAgent.8W9ZSMW4UW",
+                "group.pgagent"]
         var seen = Set<String>()
         return out.filter { !$0.isEmpty && seen.insert($0).inserted }
     }
