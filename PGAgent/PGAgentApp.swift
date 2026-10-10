@@ -151,6 +151,25 @@ final class HTTPServerHolder: ObservableObject {
     @Published var lastError = ""
 }
 
+/// ⭐ 版本号：**从 Info.plist 读**（⛔ 不再手写硬编码）
+///
+/// ## 为什么改（§2239 教训）
+/// 之前标题写死成 `"PGAgent v0.10.0"`，之后发 v0.10.1…v0.10.5 都**忘了改**
+/// ⇒ 装了新包，界面还显示 0.10.0 ⇒ **用户以为没装上**（合理怀疑，是我的错）。
+///
+/// ✅ 现在：`CFBundleShortVersionString` + `CFBundleVersion` 都从 Info.plist 读，
+///    而它由 `project.yml` 里 `CFBundleShortVersionString` 控制；
+///    发版时**只改 project.yml 一处**，界面自动跟着变。
+enum AppVersion {
+    /// 形如 `0.10.5 (1)`；读不到就返回 `?`
+    static var display: String {
+        let b = Bundle.main
+        let short = (b.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "?"
+        let build = (b.infoDictionary?["CFBundleVersion"] as? String) ?? "?"
+        return "\(short) (\(build))"
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var store: LogStore
     @EnvironmentObject var ble: BLEController
@@ -262,7 +281,7 @@ struct ContentView: View {
                     .padding(6)
                 }
             }
-            .navigationTitle("PGAgent v0.10.0")
+            .navigationTitle("PGAgent v\(AppVersion.display)")
             .onAppear(perform: boot)
         }
         .navigationViewStyle(.stack)
@@ -272,7 +291,7 @@ struct ContentView: View {
         guard !started else { return }
         started = true
 
-        store.log("=== PGAgent v0.10.0 启动 ===")
+        store.log("=== PGAgent v\(AppVersion.display) 启动 ===")
         store.log("Documents = \(DocsScanner.docPath())")
         // ⭐ 「眼」的关键诊断：共享容器可用 ⇒ 帧能读到
         store.log("共享帧目录 = \(AppGroup.framesDir()?.path ?? "⛔ 无（帧读不到！）")")

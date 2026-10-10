@@ -87,8 +87,14 @@ final class APIRouter {
             ])
 
         // ⭐ 极简探活（⛔ 不碰文件系统、不做识别）—— 用来区分「App 挂了」和「handler 慢」
+        //
+        // ⭐ 顺手带上**真实版本**（读 Info.plist）—— 排查「装的新包还是旧包」一眼就够
         case ("GET", "/probe"):
-            return .json(["ok": true, "t": Date().timeIntervalSince1970])
+            let b = Bundle.main
+            let ver = (b.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "?"
+            let bld = (b.infoDictionary?["CFBundleVersion"] as? String) ?? "?"
+            return .json(["ok": true, "t": Date().timeIntervalSince1970,
+                          "version": ver, "build": bld])
 
         // ⭐⭐⭐ 「眼」—— App **自己取画面**（⛔ 不依赖 PC）
         //    App 触发快捷指令「拍摄截屏」⇒ 截图落到自己的 Documents
