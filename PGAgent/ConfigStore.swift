@@ -78,6 +78,18 @@ struct PGConfig: Codable {
         var ocr_min_confidence: Double?
         var template_threshold: Double?
         var max_steps: Int?
+
+        // ⭐ 自主循环（Runner）—— 全部可在 config.json 里改，⛔ 不用重装
+        /// 目标页（默认走到哪）
+        var target: String?
+        /// 循环最多走几步
+        var loop_max_steps: Int?
+        /// 每步之间的等待（秒）—— 等界面稳定
+        var loop_step_wait: Double?
+        /// 抓一帧的最长等待（秒）
+        var loop_grab_timeout: Double?
+        /// 画面连续 N 次不变就判卡死
+        var loop_stall_limit: Int?
     }
 
     struct Element: Codable {

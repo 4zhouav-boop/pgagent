@@ -67,6 +67,10 @@ struct ContentView: View {
     @State private var router: APIRouter?
     @State private var started = false
     @State private var port: UInt16 = 0
+    /// ⭐ 自主循环的运行状态（UI 显示）
+    @State private var runState = "-"
+    /// ⭐ 循环实例（boot 里创建，UI 按钮用）
+    @State private var runnerRef: Runner?
 
     var body: some View {
         NavigationView {
@@ -110,6 +114,20 @@ struct ContentView: View {
                 .padding(.horizontal, 8)
                 .padding(.top, 4)
 
+                // ⭐⭐⭐ 自主循环 —— App 自己在手机上跑（⛔ 不需要 PC / USB / 开发者模式）
+                HStack(spacing: 6) {
+                    Button("▶️ 开始跑") {
+                        store.log("▶️ 手动启动自主循环")
+                        runnerRef?.start(dest: nil)
+                    }
+                    Button("⛔ 停") { runnerRef?.stop() }
+                    Text(runState)
+                        .font(.system(size: 10, design: .monospaced))
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 8)
+                .padding(.top, 4)
+
                 ScrollView {
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(Array(store.snapshot().enumerated()), id: \.offset) { _, l in
@@ -130,11 +148,27 @@ struct ContentView: View {
         guard !started else { return }
         started = true
 
-        store.log("=== PGAgent v0.4.1 启动 ===")
+        store.log("=== PGAgent v0.5.0 启动 ===")
         store.log("Documents = \(DocsScanner.docPath())")
 
+        // ⭐ 自主循环（App 自己在手机上跑，⛔ 不需要 PC）
+        let runner = Runner(cfgStore: cfgStore, grabber: grabber, ble: ble) { s in
+            store.log(s)
+        }
+        runnerRef = runner
+        // 每秒刷新一次 UI 上的循环状态
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            let s = runner.snapshot()
+            let running = (s["running"] as? Bool) ?? false
+            let step = (s["step"] as? Int) ?? 0
+            let page = (s["page"] as? String) ?? "-"
+            let reason = (s["stopReason"] as? String) ?? "-"
+            runState = running ? "跑中 步\(step) \(page)" : "停 \(reason)"
+        }
+
         // ⭐ 起 HTTP 服务
-        let rt = APIRouter(log: store, ble: ble, cfgStore: cfgStore, grabber: grabber)
+        let rt = APIRouter(log: store, ble: ble, cfgStore: cfgStore,
+                           grabber: grabber, runner: runner)
         router = rt
         http.server.onRequest = { [weak rt] req in
             rt?.handle(req) ?? HTTPServer.Response.text("no router", status: 500)

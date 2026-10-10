@@ -19,7 +19,18 @@
     "y_fix": 4,
     "ocr_min_confidence": 0.5,
     "template_threshold": 0.80,
-    "max_steps": 12
+    "max_steps": 12,
+
+    "_loop_doc": [
+      "⭐ 自主循环（Runner）参数 —— App 在手机上自己跑，⛔ 不需要 PC。",
+      "运行时⛔ 不需要开发者模式：抓帧走快捷指令、点击走 ESP32 蓝牙。",
+      "改这些值只推 config.json，⛔ 不用重编/重签/重装。"
+    ],
+    "target": "center",
+    "loop_max_steps": 40,
+    "loop_step_wait": 1.5,
+    "loop_grab_timeout": 10.0,
+    "loop_stall_limit": 3
   },
 
   "rois": {

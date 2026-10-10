@@ -24,13 +24,16 @@ final class APIRouter {
     let ble: BLEController
     let cfgStore: ConfigStore
     let grabber: ScreenGrabber
+    let runner: Runner
     var httpPort: UInt16 = 0
 
-    init(log: LogStore, ble: BLEController, cfgStore: ConfigStore, grabber: ScreenGrabber) {
+    init(log: LogStore, ble: BLEController, cfgStore: ConfigStore,
+         grabber: ScreenGrabber, runner: Runner) {
         self.log = log
         self.ble = ble
         self.cfgStore = cfgStore
         self.grabber = grabber
+        self.runner = runner
     }
 
     // MARK: - 工具
@@ -65,11 +68,12 @@ final class APIRouter {
 
         case ("GET", "/"):
             return .json([
-                "app": "PGAgent", "version": "0.4.1",
+                "app": "PGAgent", "version": "0.5.0",
                 "endpoints": ["/status", "/probe", "/reload", "/config", "/elements",
-                              "/page", "/nav", "/ocr", "/files", "/file", "/write",
-                              "/mkdir", "/ble/scan", "/ble/connect", "/ble/send",
-                              "/click", "/log"],
+                              "/page", "/nav", "/ocr", "/see", "/grab", "/grabinfo",
+                              "/shoot", "/shortcut", "/run", "/runstop", "/runstate",
+                              "/files", "/file", "/write", "/mkdir", "/ble/scan",
+                              "/ble/connect", "/ble/send", "/click", "/log"],
             ])
 
         // ⭐ 极简探活（⛔ 不碰文件系统、不做识别）—— 用来区分「App 挂了」和「handler 慢」
@@ -126,10 +130,25 @@ final class APIRouter {
             }
             return .json(["ok": true, "shortcut": grabber.shortcutName])
 
+        // ⭐⭐⭐⭐ `/run` —— **App 自己在手机上跑循环**（⛔ 不需要 PC / USB / 开发者模式）
+        //    用户令：「以后是全部交到手机上的，调试可以取画面，APP那边得自己取画面。」
+        case ("POST", "/run"):
+            runner.start(dest: r.query["dest"])
+            return .json(["ok": true, "started": true,
+                          "dest": r.query["dest"] ?? cfgStore.cfg?.settings?.target ?? "center",
+                          "state": runner.snapshot()])
+
+        case ("POST", "/runstop"):
+            runner.stop()
+            return .json(["ok": true, "state": runner.snapshot()])
+
+        case ("GET", "/runstate"):
+            return .json(["ok": true, "state": runner.snapshot()])
+
         case ("GET", "/status"):
             let cfgOK = cfgStore.cfg != nil
             return .json([
-                "app": "PGAgent", "version": "0.4.1",
+                "app": "PGAgent", "version": "0.5.0",
                 "ios": UIDevice.current.systemVersion,
                 "httpPort": Int(httpPort),
                 "documents": docsURL().path,
@@ -141,6 +160,7 @@ final class APIRouter {
                 "bleState": ble.state,
                 "bleDevices": ble.devices,
                 "bleError": ble.lastError,
+                "runner": runner.snapshot(),
             ])
 
         case ("POST", "/reload"):
