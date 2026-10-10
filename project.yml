@@ -66,6 +66,15 @@ targets:
       - path: PGShot
     info:
       path: PGShot/Info.plist
+      properties:
+        CFBundleDisplayName: PGShot
+        CFBundleShortVersionString: "1.0.0"
+        CFBundleVersion: "1"
+        # ⭐ 扩展必须声明 NSExtension，否则 iOS 不认（xcodegen 会重写 Info.plist）
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SampleHandler
+          RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: run.pgagent.PGAgent.PGShot
