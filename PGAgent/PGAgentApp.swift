@@ -165,7 +165,7 @@ struct ContentView: View {
                     .padding(6)
                 }
             }
-            .navigationTitle("PGAgent v0.8.0")
+            .navigationTitle("PGAgent v0.9.0")
             .onAppear(perform: boot)
         }
         .navigationViewStyle(.stack)
@@ -175,11 +175,12 @@ struct ContentView: View {
         guard !started else { return }
         started = true
 
-        store.log("=== PGAgent v0.8.0 启动 ===")
+        store.log("=== PGAgent v0.9.0 启动 ===")
         store.log("Documents = \(DocsScanner.docPath())")
 
         // ⭐ 自主循环（App 自己在手机上跑，⛔ 不需要 PC）
-        let runner = Runner(cfgStore: cfgStore, grabber: grabber, ble: ble) { s in
+        let runner = Runner(cfgStore: cfgStore, grabber: grabber, ble: ble,
+                              broadcaster: broadcaster) { s in
             store.log(s)
         }
         runnerRef = runner

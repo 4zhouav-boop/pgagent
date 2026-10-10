@@ -45,15 +45,19 @@ final class Runner: ObservableObject {
     private let grabber: ScreenGrabber
     private let ble: BLEController
     private let log: (String) -> Void
+    /// ⭐ v0.9.0：优先从录屏帧取画面（⛔ 不用快捷指令、⛔ 不用前台）
+    private weak var broadcaster: BroadcastStarter?
 
     private let q = DispatchQueue(label: "pgagent.runner", qos: .userInitiated)
     private var cancelFlag = false
 
     init(cfgStore: ConfigStore, grabber: ScreenGrabber, ble: BLEController,
+         broadcaster: BroadcastStarter? = nil,
          log: @escaping (String) -> Void) {
         self.cfgStore = cfgStore
         self.grabber = grabber
         self.ble = ble
+        self.broadcaster = broadcaster
         self.log = log
     }
 
@@ -268,8 +272,31 @@ final class Runner: ObservableObject {
     // MARK: - 工具
 
     /// 同步抓一帧（循环在自己的队列上，可以阻塞）
-    /// ⭐ 带**超时重试**（荔枝实测：10.1 秒 / 99 次尝试）
+    ///
+    /// ⭐ v0.9.0 取帧优先级：
+    ///   ① **录屏帧**（`BroadcastStarter.lastFrame`）—— ⛔ 不用快捷指令、⛔ 不用前台
+    ///   ② 快捷指令截图（兜底）
+    ///
+    /// ⭐ 也带**超时重试**（荔枝实测：10.1 秒 / 99 次尝试）
     private func grabSync() -> UIImage? {
+        // ① 录屏帧（首选）
+        if let b = broadcaster {
+            for _ in 0..<max(1, ocrMaxTries / 10) {
+                if cancelFlag { return nil }
+                if let d = b.lastFrame, let im = UIImage(data: d) {
+                    return im
+                }
+                // 没帧就去读一次文件（扩展是异步写的）
+                b.pollFrame()
+                if let d = b.lastFrame, let im = UIImage(data: d) {
+                    return im
+                }
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+            log("   §grab 录屏帧没等到，退回快捷指令")
+        }
+
+        // ② 快捷指令截图（兜底）
         for attempt in 0..<max(1, ocrMaxTries / 10) {
             if cancelFlag { return nil }
             let sem = DispatchSemaphore(value: 0)

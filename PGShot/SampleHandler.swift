@@ -1,57 +1,57 @@
 import ReplayKit
 import UIKit
 
-/// ⭐⭐⭐⭐ 「眼」—— **录屏广播扩展**（这是荔枝/所有 RPA App 的真正做法）。
+/// ⭐⭐⭐⭐⭐ 「眼」—— **录屏广播扩展**（荔枝/所有 RPA App 的真正做法）。
 ///
-/// ## 为什么这条路对
-/// · 第三方 App **无法截别的 App 的屏**（沙箱）
-/// · 但 **ReplayKit 广播扩展** 能拿到**整块屏幕的连续视频帧**
-/// · 而且主 App 可以用 `RPSystemBroadcastPickerView` + `sendActions(for: .touchUpInside)`
-///   **程序化启动它**（⛔ 不用人手点）—— 见 `livekit/client-sdk-swift#1065` 的实测报告：
-///   > Tested on a physical iPhone: the system broadcast picker opens via `requestActivation()`,
-///   > shows the app's broadcast extension preselected, and **the broadcast starts and publishes normally**
-///
-/// ## 链路
+/// ## 架构（v0.9.0 改：写文件，⛔ 不发 HTTP）
 /// ```
 /// 主 App: RPSystemBroadcastPickerView().triggerPicker()   ← 程序化启动
 ///   ↓
-/// iOS 启动本扩展 (RPBroadcastSampleHandler)
+/// iOS 启动本扩展
 ///   ↓
-/// processSampleBuffer(每帧) ⇒ 编码成 JPEG ⇒ 写进共享容器
+/// processSampleBuffer(每帧) ⇒ JPEG ⇒ 写进**自己的 Documents**
 ///   ↓
-/// 主 App 读共享容器 ⇒ 得到「眼」
+/// PC: AFC 通道 house_arrest 读 Documents/lastframe.jpg
+///   ↓
+/// ⛔ 不需要 App 在前台、⛔ 不需要网络、⛔ 不需要同网段
 /// ```
 ///
-/// ## ⚠️ 免费 Apple ID 的约束（`_note_1798` 实测）
-/// · 描述文件里**只有 4 项 entitlement**（application-identifier / team-identifier /
-///   get-task-allow / keychain-access-groups）⇒ **⛔ 不能用 App Group**
-/// · ⇒ 所以扩展与主 App 之间**不能走 App Group 共享目录**
-/// · ✅ 替代：扩展写到自己沙箱的 `Documents`，主 App 通过 **IPC socket** 收
-///   （LiveKit 也是这个做法：`BroadcastUploader(socketPath:)`）
-/// · 但 socket 需要 `NSFileCoordinator`/共享容器在扩展里可达……
+/// ## 为什么改（§2020 实测对比）
+/// | 方式 | 需 App 前台 | 需网络 | 需同网段 |
+/// |---|---|---|---|
+/// | HTTP POST（v0.7/0.8）| ⛔ **需要** | ✅ | ✅ |
+/// | **写 Documents + AFC 读** | ⛔ **不需要** | ⛔ **不需要** | ⛔ **不需要** |
 ///
-/// ## ⭐ 本实现的取舍
-/// 先用**最简单能验证的方式**：扩展把帧写成 JPEG 到自己 Documents，
-/// 主 App 用 `UIFileSharingEnabled` 暴露的同一路径读（同进程组不同容器时不可行时，
-/// 退回「扩展直接发 HTTP 给主 App 的 127.0.0.1 端口」——但扩展在自己的沙箱里，
-/// 127.0.0.1 是**同一台设备**，所以**可以**连主 App 的 HTTP 服务！）。
+/// **⭐ 关键实测**：`HouseArrestService(bundle_id:..., documents_only=True)`
+/// 能直接读扩展/主 App 的 Documents ⇒ **这是最稳的「眼」。**
 ///
-/// ⇒ 采用：**扩展 → HTTP POST 到主 App 的 127.0.0.1:8899/frame**（本机回环，同一设备）。
+/// ## ⚠️ 扩展与主 App 的 Documents 是**同一个**吗？
+/// **是** —— 主 App 和它的 appex **共享同一个容器**（同一个 bundle id 前缀）。
+/// ⇒ 扩展写 `Documents/lastframe.jpg` ⇒ 主 App 和 PC(AFC) 都能读到。
+///
+/// ## 免费账号约束（`_note_1798`）
+/// ⛔ 没有 App Group entitlement ⇒ 不能用共享组目录
+/// ✅ 但用**自己的 Documents** 就够了（同容器）
 class SampleHandler: RPBroadcastSampleHandler {
 
     private var seq = 0
-    private var lastSent = Date.distantPast
-    private var fps = 2.0                 // 默认 2 fps（够识别用，省电省流量）
-    private let port: UInt16 = 8899
-    private var session: URLSession?
+    private var lastWrite = Date.distantPast
+    /// ⭐ 写盘频率（帧/秒）—— 2 fps 够识别用，省电省 IO
+    private let fps = 2.0
+    /// ⭐ 降采样后的宽度（识别够用，写盘快）
+    private let outWidth: CGFloat = 451
+
+    /// 停止标志文件名（主 App 放/删它来控制录屏，照荔枝的做法 `_note_2011` §8）
+    private let stopFlag = "stop_broadcast"
+
+    private var dir: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    }
 
     override func broadcastStarted(withSetupInfo setupInfo: [String: NSObject]?) {
-        NSLog("PGShot broadcastStarted")
-        let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 2
-        cfg.timeoutIntervalForResource = 2
-        cfg.waitsForConnectivity = false
-        session = URLSession(configuration: cfg)
+        NSLog("PGShot broadcastStarted dir=%@", dir.path)
+        // ⭐ 启动时清掉停止标志（主 App 也会清一次，双保险）
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent(stopFlag))
     }
 
     override func broadcastPaused() { NSLog("PGShot broadcastPaused") }
@@ -59,41 +59,69 @@ class SampleHandler: RPBroadcastSampleHandler {
 
     override func broadcastFinished() {
         NSLog("PGShot broadcastFinished")
-        session?.invalidateAndCancel()
-        session = nil
     }
 
     override func processSampleBuffer(_ sampleBuffer: CMSampleBuffer,
                                       with sampleBufferType: RPSampleBufferType) {
         guard sampleBufferType == .video else { return }
 
-        // 限流：默认 2 fps
+        // ① 限流
         let now = Date()
-        guard now.timeIntervalSince(lastSent) >= (1.0 / fps) else { return }
-        lastSent = now
+        guard now.timeIntervalSince(lastWrite) >= (1.0 / fps) else { return }
+        lastWrite = now
 
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        let ci = CIImage(cvPixelBuffer: pixelBuffer)
+        // ② 停止标志（荔枝用文件当控制信号）
+        if FileManager.default.fileExists(atPath: dir.appendingPathComponent(stopFlag).path) {
+            NSLog("PGShot 收到停止标志 ⇒ 结束广播")
+            finishBroadcastWithError(nil)
+            return
+        }
+
+        // ③ 出图
+        guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let ci = CIImage(cvPixelBuffer: pb)
         let ctx = CIContext(options: [.useSoftwareRenderer: false])
         guard let cg = ctx.createCGImage(ci, from: ci.extent) else { return }
         let img = UIImage(cgImage: cg)
-        guard let jpg = img.jpegData(compressionQuality: 0.6) else { return }
 
+        // ④ 降采样（省 IO，识别够用）
+        let scaled = downscale(img, toWidth: outWidth)
+        guard let jpg = scaled.jpegData(compressionQuality: 0.7) else { return }
+
+        // ⑤ 写盘（⭐ 原子写：先写 .tmp 再 rename，避免 PC 读到半截）
         seq += 1
-        post(jpg, seq: seq)
+        write(jpg, name: "lastframe.jpg")
+        // 每 10 帧留一张存档（调试用）
+        if seq % 10 == 0 {
+            write(jpg, name: "frame_\(seq).jpg")
+        }
     }
 
-    /// ⭐ 发到主 App 的 HTTP 服务（**同一台设备**，所以 127.0.0.1 通）
-    private func post(_ data: Data, seq: Int) {
-        guard let url = URL(string: "http://127.0.0.1:\(port)/frame?seq=\(seq)") else { return }
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
-        req.httpBody = data
-        session?.dataTask(with: req) { _, _, err in
-            if let err = err {
-                NSLog("PGShot frame post failed: %@", String(describing: err))
+    // MARK: - 工具
+
+    private func downscale(_ img: UIImage, toWidth w: CGFloat) -> UIImage {
+        guard img.size.width > w else { return img }
+        let scale = w / img.size.width
+        let newSize = CGSize(width: w, height: (img.size.height * scale).rounded())
+        let r = UIGraphicsImageRenderer(size: newSize)
+        return r.image { _ in img.draw(in: CGRect(origin: .zero, size: newSize)) }
+    }
+
+    private func write(_ data: Data, name: String) {
+        let dst = dir.appendingPathComponent(name)
+        let tmp = dir.appendingPathComponent(name + ".tmp")
+        do {
+            try data.write(to: tmp, options: .atomic)
+            // 原子替换（PC 端要么看到旧的完整帧，要么看到新的完整帧）
+            _ = try? FileManager.default.replaceItemAt(dst, withItemAt: tmp)
+            if FileManager.default.fileExists(atPath: tmp.path) {
+                try? FileManager.default.removeItem(at: tmp)
             }
-        }.resume()
+            if !FileManager.default.fileExists(atPath: dst.path) {
+                try data.write(to: dst, options: .atomic)
+            }
+        } catch {
+            NSLog("PGShot 写帧失败: %@", String(describing: error))
+        }
     }
 }
