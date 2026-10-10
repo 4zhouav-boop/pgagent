@@ -41,6 +41,20 @@ targets:
           - shortcuts
         # 本地网络（iOS 14+ 需要，虽然我们走 BLE 不走网络，先留着）
         NSLocalNetworkUsageDescription: "与本地设备通信"
+        # ⭐⭐⭐ 「活」—— 后台音频（§2230 实测必须）
+        #
+        # 📏 为什么需要：`AVPictureInPictureController` 用
+        #    `AVSampleBufferDisplayLayer` 当内容源时，语义上仍是「视频播放」；
+        #    ⛔ 没有后台音频声明 + 没激活 AVAudioSession ⇒
+        #       `isPictureInPicturePossible` **永远是 false** ⇒ PiP 起不来
+        #       ⇒ App 一切后台就被挂起 ⇒ `/run` 闭环走不完。
+        # ✅ 加上 `audio` 后，PiP 才能起来，App 才能在别人的 App 前面继续跑。
+        #
+        # ⚠️ 与 §1798 的 `bluetooth-central` **不同**：那条需要
+        #    `com.apple.developer.bluetooth-central` entitlement（免费账号没有）；
+        #    而 `audio` **不需要额外 entitlement** ⇒ 免费 Apple ID 可用。
+        UIBackgroundModes:
+          - audio
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: run.pgagent.PGAgent

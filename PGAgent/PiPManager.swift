@@ -1,3 +1,4 @@
+import AVFoundation
 import AVKit
 import Foundation
 import UIKit
@@ -40,6 +41,8 @@ final class PiPManager: NSObject, ObservableObject {
     private var pip: AVPictureInPictureController?
     private var timer: Timer?
     private var hostView: UIView?
+    /// ⭐ 图层的时间基准（PiP 要求图层「在播」才会变 possible）
+    private var timebase: CMTimebase?
 
     /// 画面尺寸（小一点省资源）
     private let W = 320, H = 180
@@ -80,6 +83,28 @@ final class PiPManager: NSObject, ObservableObject {
             return false
         }
 
+        // ⓪ ⭐⭐⭐ **必须配 AVAudioSession**（§2230 实测踩坑）
+        //
+        // 之前 `isPictureInPicturePossible` 一直是 **false** ⇒ PiP 起不来 ⇒
+        // App 一切后台就被挂起 ⇒ `/run` 闭环走不完。
+        //
+        // 📏 根因：`AVPictureInPictureController` 用
+        //    `AVSampleBufferDisplayLayer` 当内容源时，**系统仍要求 App 有一个
+        //    可播放的音频会话**（PiP 的语义是「视频播放」）。
+        //    ⛔ 不设 ⇒ `isPictureInPicturePossible=false`，且**永远不会变 true**。
+        // ✅ 设为 `.playback`（+ `setActive(true)`）即可。
+        //    ⚠️ 想让它**在后台**也活着，还需要 Info.plist 里
+        //       `UIBackgroundModes: [audio]`（见 project.yml）。
+        do {
+            let s = AVAudioSession.sharedInstance()
+            try s.setCategory(.playback, mode: .moviePlayback,
+                              options: [.mixWithOthers])
+            try s.setActive(true)
+            NSLog("PGAgent PiP: AVAudioSession .playback 已激活")
+        } catch {
+            NSLog("PGAgent PiP: AVAudioSession 设置失败 %@", String(describing: error))
+        }
+
         // ① 隐藏宿主视图（⛔ 别影响 UI）
         let host = UIView(frame: CGRect(x: -W - 10, y: -H - 10, width: W, height: H))
         host.isUserInteractionEnabled = false
@@ -91,6 +116,18 @@ final class PiPManager: NSObject, ObservableObject {
         let l = AVSampleBufferDisplayLayer()
         l.frame = host.bounds
         l.videoGravity = .resizeAspect
+        // ⭐ 给图层一个**时间基准**：没有它图层不会进入 `.rendering`，
+        //    PiP 也就永远「不可用」（§2230）
+        var tb: CMTimebase?
+        CMTimebaseCreateWithSourceClock(allocator: kCFAllocatorDefault,
+                                        sourceClock: CMClockGetHostTimeClock(),
+                                        timebaseOut: &tb)
+        if let tb = tb {
+            CMTimebaseSetTime(tb, time: CMClockGetTime(CMClockGetHostTimeClock()))
+            CMTimebaseSetRate(tb, rate: 1.0)
+            l.controlTimebase = tb
+            timebase = tb
+        }
         host.layer.addSublayer(l)
         layer = l
 
@@ -110,20 +147,39 @@ final class PiPManager: NSObject, ObservableObject {
         render()
 
         // ⑤ 起 PiP
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            if c.isPictureInPicturePossible {
-                c.startPictureInPicture()
-            } else {
-                self.lastError = "PiP 当前不可用（isPictureInPicturePossible=false）"
-                NSLog("PGAgent PiP: %@", self.lastError)
-            }
-        }
+        //
+        // ⚠️ `isPictureInPicturePossible` **不是立刻**为 true
+        //    （图层要先进入能播的状态）⇒ 轮询等它，最多 ~3 秒。
+        //    ⛔ 之前只等 0.3 秒就判死 ⇒ 几乎必然拿到 false（§2230 实测）。
+        attemptStart(c, tries: 0)
 
         // ⑥ 每秒重画（= 持续有帧 ⇒ App 不被挂起）
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             self?.render()
         }
         return true
+    }
+
+    /// ⭐ 轮询等待 `isPictureInPicturePossible` 再启动（最多 ~3 秒）
+    ///
+    /// 为什么必须轮询：这个属性依赖图层/音频会话进入可播状态，
+    /// 刚建好时**必然**是 false（§2230 实测：等 0.3s 拿到 false，
+    /// 而框架自己会在准备好后回调 delegate）。
+    private func attemptStart(_ c: AVPictureInPictureController, tries: Int) {
+        if c.isPictureInPictureActive { return }
+        if c.isPictureInPicturePossible {
+            c.startPictureInPicture()
+            NSLog("PGAgent PiP: startPictureInPicture() 已调用（第 %d 次探测）", tries + 1)
+            return
+        }
+        guard tries < 15 else {
+            lastError = "PiP 当前不可用（isPictureInPicturePossible=false，等 3s）"
+            NSLog("PGAgent PiP: %@", lastError)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            self.attemptStart(c, tries: tries + 1)
+        }
     }
 
     func stop() {
@@ -141,6 +197,7 @@ final class PiPManager: NSObject, ObservableObject {
             c.stopPictureInPicture()
         }
         pip = nil
+        timebase = nil
         layer?.removeFromSuperlayer()
         layer = nil
         hostView?.removeFromSuperview()
