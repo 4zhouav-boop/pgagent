@@ -96,7 +96,9 @@ enum AppGroup {
 
     /// ⭐ 共享目录里的**任意文件**路径（用于心跳/日志；没有共享容器 ⇒ nil）
     static func sharedFile(_ name: String) -> URL? {
-        guard let root = containerURL() else { return nil }
+        // ⚠️ 必须写 `AppGroup.containerURL()`（在 static 方法里不能裸调，
+        //    否则 `cannot find 'containerURL' in scope`，§2237 编译踩过）
+        guard let root = AppGroup.containerURL() else { return nil }
         let d = root.appendingPathComponent("Documents", isDirectory: true)
         try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
         return d.appendingPathComponent(name)
