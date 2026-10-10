@@ -313,7 +313,7 @@ final class APIRouter {
             guard let d = try? Data(contentsOf: u) else {
                 return .text("not found: \(name)", status: 404)
             }
-            return .data(d, contentType: "application/octet-stream",
+            return .data(d, type: "application/octet-stream",
                          extraHeaders: ["Content-Disposition":
                                         "attachment; filename=\"\(u.lastPathComponent)\""])
 
