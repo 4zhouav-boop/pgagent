@@ -94,11 +94,41 @@ enum AppGroup {
         return nil
     }
 
+    /// ⭐ 找到可用的共享容器**根目录**（带缓存；探测逻辑与 `probe()` 同一套）
+    private static func containerRoot() -> URL? {
+        lock.lock()
+        if probed, let c = cached {
+            // `cached` 是 frames 目录 ⇒ 它的上一级就是 Documents，再上一级是根
+            let root = c.deletingLastPathComponent().deletingLastPathComponent()
+            lock.unlock()
+            return root
+        }
+        lock.unlock()
+
+        let fm = FileManager.default
+        for g in candidates {
+            guard let root = fm.containerURL(
+                forSecurityApplicationGroupIdentifier: g) else { continue }
+            let d = root.appendingPathComponent("Documents", isDirectory: true)
+            do {
+                try fm.createDirectory(at: d, withIntermediateDirectories: true)
+                let probe = d.appendingPathComponent(".pgprobe")
+                try Data([0x50]).write(to: probe, options: .atomic)
+                try? fm.removeItem(at: probe)
+                lock.lock(); cached = d.appendingPathComponent("frames", isDirectory: true)
+                probed = true; lock.unlock()
+                return root
+            } catch {
+                continue
+            }
+        }
+        lock.lock(); cached = nil; probed = true; lock.unlock()
+        return nil
+    }
+
     /// ⭐ 共享目录里的**任意文件**路径（用于心跳/日志；没有共享容器 ⇒ nil）
     static func sharedFile(_ name: String) -> URL? {
-        // ⚠️ 必须写 `AppGroup.containerURL()`（在 static 方法里不能裸调，
-        //    否则 `cannot find 'containerURL' in scope`，§2237 编译踩过）
-        guard let root = AppGroup.containerURL() else { return nil }
+        guard let root = containerRoot() else { return nil }
         let d = root.appendingPathComponent("Documents", isDirectory: true)
         try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
         return d.appendingPathComponent(name)
