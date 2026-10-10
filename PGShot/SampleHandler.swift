@@ -73,7 +73,9 @@ class SampleHandler: RPBroadcastSampleHandler {
         // ② 停止标志（荔枝用文件当控制信号）
         if FileManager.default.fileExists(atPath: dir.appendingPathComponent(stopFlag).path) {
             NSLog("PGShot 收到停止标志 ⇒ 结束广播")
-            finishBroadcastWithError(nil)
+            // ⚠️ `finishBroadcastWithoutError()` 才是「正常结束」
+            //    （`finishBroadcastWithError(_:)` 要求非 nil 的 Error）
+            finishBroadcastWithoutError()
             return
         }
 
