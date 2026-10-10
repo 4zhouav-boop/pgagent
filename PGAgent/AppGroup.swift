@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// ⭐⭐⭐⭐⭐ **App Group 共享容器**（主 App 与 ReplayKit 扩展之间的「眼」通道）。
 ///
@@ -27,12 +28,63 @@ import Foundation
 ///    给一个**写不进去**的路径 ⇒ 所以「试 + 写」两步都过了才算数。
 enum AppGroup {
 
-    /// 候选 group id（带 team 后缀的由 iloader 签名时决定，这里覆盖常见形态）
-    static let candidates: [String] = [
-        "group.run.pgagent.PGAgent.8W9ZSMW4UW",   // ⭐ 真机实测到的（team 后缀）
-        "group.run.pgagent.PGAgent",              // 未签名/我们自己构建时的
-        "group.pgagent",
-    ]
+    /// ⭐⭐⭐ **候选 group id** —— **动态推导**，⛔ 不再写死。
+    ///
+    /// ## 为什么必须动态（§2242 换手机/换账号的坑）
+    /// 签名工具会在 group id 里插**签名者的 team id**：
+    /// ```
+    /// 我们自己构建时 : group.run.pgagent.PGAgent
+    /// iloader 签名后 : group.run.pgagent.PGAgent.8W9ZSMW4UW   ← 这个后缀是**别人的** team
+    /// ```
+    /// ⇒ 换一台手机 / 换一个 Apple ID 签名 ⇒ team 后缀就变了
+    ///   ⇒ 写死 `8W9ZSMW4UW` 会让**共享容器整条链路失配**（帧读不到、心跳写不出）。
+    ///
+    /// ## 修法：从**自己进程的 entitlements** 里读出真实 group
+    /// 这是**最可靠**的来源 —— 系统已经把「本进程能用哪些 group」
+    /// 放在 `com.apple.security.application-groups` 里了，
+    /// 我们只需**读出来**（⛔ 不用猜 team 后缀，⛔ 也不用枚举字符串）。
+    ///
+    /// ⚠️ 读 entitlements 要走 `SecTaskCopyValueForEntitlement`
+    ///   （见 `entitled()`）—— 那是**公开 API**，模拟器/真机都可用。
+    static var candidates: [String] {
+        var out: [String] = []
+        // ① ⭐ 自己 entitlements 里声明的（换手机/换账号也能自适应）
+        out += entitled()
+        // ② 兜底：common 形态（entitlements 读不到时）
+        out += [
+            "group.run.pgagent.PGAgent",
+            "group.pgagent",
+        ]
+        // ③ ⭐ 兜底：**构建时的 bundle id 前缀 + 常见 team 后缀**
+        //    （万一 entitlements 读不出，也尽量别整个哑掉）
+        if let bid = Bundle.main.bundleIdentifier {
+            // run.pgagent.PGAgent.8W9ZSMW4UW  →  前缀 run.pgagent
+            let parts = bid.split(separator: ".")
+            if parts.count >= 2 {
+                out.append("group." + parts.prefix(2).joined(separator: "."))
+            }
+        }
+        // 去重、保序
+        var seen = Set<String>()
+        return out.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    /// ⭐ 读**本进程**的 app group entitlements（公开 API，⛔ 不需要特殊权限）
+    private static func entitled() -> [String] {
+        guard let task = SecTaskCreateFromSelf(nil) else { return [] }
+        guard let v = SecTaskCopyValueForEntitlement(
+            task, "com.apple.security.application-groups" as CFString, nil) else { return [] }
+        return (v as? [String]) ?? []
+    }
+
+    /// 诊断用：把探测过程如实回显（排查「换手机后帧读不到」）
+    static func diag() -> [String: Any] {
+        [
+            "bundleID": Bundle.main.bundleIdentifier ?? "?",
+            "entitled": entitled(),
+            "candidates": candidates,
+        ]
+    }
 
     /// 缓存探测结果（会话内只探一次；`force: true` 可重探）
     ///
@@ -146,10 +198,10 @@ enum AppGroup {
                 tried[g] = "(containerURL = nil)"
             }
         }
-        return [
-            "candidates": candidates,
-            "probed": tried,
-            "framesDir": framesDir()?.path ?? "(nil) ⛔ 不可用",
-        ]
+        var out = diag()                        // ⭐ bundleID / entitled / candidates
+        out["probed"] = tried
+        out["framesDir"] = framesDir()?.path ?? "(nil) ⛔ 不可用"
+        out["active"] = framesDir()?.path ?? "(nil)"
+        return out
     }
 }

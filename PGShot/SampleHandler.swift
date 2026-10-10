@@ -1,4 +1,5 @@
 import ReplayKit
+import Security
 import UIKit
 
 /// ⭐⭐⭐⭐⭐ 「眼」—— **录屏广播扩展**（荔枝/所有 RPA App 的真正做法）。
@@ -81,13 +82,21 @@ class SampleHandler: RPBroadcastSampleHandler {
     }
 
     /// 共享帧目录（`<group>/Documents/frames`）；不可用 ⇒ nil
+    ///
+    /// ⭐⭐⭐ §2242 **group id 动态推导，⛔ 不写死**
+    ///
+    /// 为什么必须动态：签名工具会把**签名者的 team id** 插进 group id：
+    /// ```
+    /// 构建时       : group.run.pgagent.PGAgent
+    /// iloader 签名 : group.run.pgagent.PGAgent.8W9ZSMW4UW   ← 这是**某个账号**的 team
+    /// ```
+    /// ⇒ 换手机 / 换 Apple ID 签名 ⇒ 后缀就变 ⇒ 写死会让整条「眼」失配。
+    ///
+    /// ✅ 从**本扩展自己的 entitlements** 读真实 group
+    ///    （扩展有**独立** entitlements ⇒ 必须各自读，⛔ 不能借用主 App 的）。
     private func sharedFramesDir() -> URL? {
         let fm = FileManager.default
-        // ⚠️ group id **不能写死**：iloader 签名会插 team 后缀
-        //    （构建时 group.run.pgagent.PGAgent ⇒ 签名后 group.run.pgagent.PGAgent.8W9ZSMW4UW）
-        for g in ["group.run.pgagent.PGAgent.8W9ZSMW4UW",
-                  "group.run.pgagent.PGAgent",
-                  "group.pgagent"] {
+        for g in candidateGroups() {
             guard let root = fm.containerURL(
                 forSecurityApplicationGroupIdentifier: g) else { continue }
             let d = root.appendingPathComponent("Documents/frames", isDirectory: true)
@@ -104,6 +113,28 @@ class SampleHandler: RPBroadcastSampleHandler {
         }
         NSLog("PGShot: ⛔ 无共享容器 ⇒ 退回本扩展 Documents（主 App 读不到）")
         return nil
+    }
+
+    /// ⭐ 候选 group：**entitlements 优先**，再兜常见形态
+    private func candidateGroups() -> [String] {
+        var out: [String] = []
+        // ① ⭐ 本扩展 entitlements 里真实声明的
+        if let task = SecTaskCreateFromSelf(nil),
+           let v = SecTaskCopyValueForEntitlement(
+               task, "com.apple.security.application-groups" as CFString, nil),
+           let arr = v as? [String] {
+            out += arr
+        }
+        // ② 兜底（entitlements 读不到时）
+        out += ["group.run.pgagent.PGAgent", "group.pgagent"]
+        if let bid = Bundle.main.bundleIdentifier {
+            let parts = bid.split(separator: ".")
+            if parts.count >= 2 {
+                out.append("group." + parts.prefix(2).joined(separator: "."))
+            }
+        }
+        var seen = Set<String>()
+        return out.filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 
     /// ⭐ 停止标志可能出现在**两个**位置（主 App 写自己的 Documents；
