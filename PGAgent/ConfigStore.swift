@@ -204,6 +204,15 @@ struct PGConfig: Codable {
         var not: [String]?
         var parent: String?
         var go: String?
+        /// ⭐⭐ **备用出路**（§2247 移植 PC `PAGES[...]["alts"]`）
+        ///
+        /// 为什么必须有（PC `_nav_to_center` 里写得很清楚）：
+        /// > ⛔ 真机血案：`breadcrumb` 点了没变 ⇒ 记死 ⇒ 第 2 步**直接停手**，
+        /// >   而页面**明明还认得出来**
+        /// > 📏 Alas `ui_additional` 思路：**意外情况必须有多条 handler**
+        ///
+        /// ⇒ 主 `go` 点不动时，依次试 `alts`，⛔ 而不是整页放弃。
+        var alts: [String]?
         var island: Bool?
     }
 
@@ -211,6 +220,21 @@ struct PGConfig: Codable {
         var element: String
         var interval: Double?
         var desc: String?
+        /// ⭐⭐ **前置闸**（§2247）：必须**同时命中**这个元素，才允许点 `element`。
+        ///
+        /// ## 为什么需要它（PC 的两级设计）
+        /// 系统弹窗的处理分两步（照抄 PC `dismiss_sys_prompt`）：
+        /// ```
+        /// ① **检测形态**：按钮行里同时出现「不允许」**和**「允许」
+        ///    （= 系统级二选一弹窗；⛔ 不猜文案，因为 iOS 有跳转/定位/通知/相机多种弹窗）
+        /// ② 命中后才去**定位消极项**（不允许/取消/拒绝/以后）并点它
+        /// ```
+        /// ⇒ 「点哪个」和「凭什么认为是弹窗」是**两件事** ⇒ 需要两个元素：
+        ///    · `element`  = 要点的（`sys_prompt_deny`）
+        ///    · `require`  = 前置闸（`sys_prompt_btns`）
+        ///
+        /// ⛔ 如果只用 `element`：普通页面出现「取消」二字就会误点 ⇒ **误伤**。
+        var require: String?
     }
 
     struct StuckCfg: Codable {

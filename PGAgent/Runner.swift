@@ -282,22 +282,31 @@ final class Runner: ObservableObject {
                 }
             }
 
-            // ⑨ 页面图上前进一跳
-            if let p = cfg.pages[page], let go = p.go, go != "stop" {
-                if nav.tap(go, img: img) {
-                    DispatchQueue.main.async { self.lastAction = "tap:\(go)" }
+            // ⑨ ⭐⭐ 页面图上前进一跳（**带记死**，§2247 移植 PC `_nav_to_center`）
+            //
+            // ⛔ 老写法的问题（真机 trace 铁证）：
+            //     `feed.go = "tab_home"`，而 feed **本身就是首页**
+            //     ⇒ 点它没效果 ⇒ 下一帧还是 feed ⇒ **原地打转 6 次**
+            //     （而且卡死检测拦不住 —— 快手信息流有视频，指纹每帧都变）
+            // ✅ 新写法：`Navigator.step` 会
+            //     ① 按 `go` → `alts` 顺序试**没记死**的出路
+            //     ② 点完**再抓一帧**比上半屏有没有变
+            //     ③ 没变 ⇒ **记死这条腿**，换下一条
+            if let p = cfg.pages[page], (p.go != nil || !(p.alts ?? []).isEmpty) {
+                let r = nav.step(from: page, img: img) { [weak self] in
+                    self?.grabSync()
+                }
+                if r.acted {
+                    DispatchQueue.main.async { self.lastAction = "tap:\(r.go ?? "?")" }
+                    if !r.changed {
+                        log("   §run ⚠️ 点了 \(r.go ?? "?") 画面没变 ⇒ 下一步换腿")
+                    }
                     sleep(stepWait)
                     continue
                 }
-                log("§run ⚠️ 在 \(page) 想点 \(go) 但没找到")
-                // ⭐ 认得出页面但**点不到**出路 ⇒ 也容忍几次（可能正被弹窗挡着）
-                unknownStreak += 1
-                if unknownStreak >= unknownLimit {
-                    finish("⛔ 在 \(page) 连续 \(unknownLimit) 次点不到 \(go) ⇒ 停手")
-                    return
-                }
-                sleep(stepWait)
-                continue
+                log("§run ⛔ 在 \(page) 的出路**全被记死** ⇒ 停手")
+                finish("⛔ 在 \(page) 所有出路都试过且无效 ⇒ 停手")
+                return
             }
 
             // ⑩ ⛔ 页面认得、但配置里没给出路 ⇒ 停手（⛔ 不盲点）
@@ -421,8 +430,30 @@ final class Runner: ObservableObject {
     /// ⇒ 任何时候都能看到：跑到第几步、在哪一页、什么动作、为什么停。
     ///
     /// 同时写一个**只追加**的 `run_trace.log`（最近 N 行）。
+    ///
+    /// ## ⭐⭐ 为什么要写**两个地方**（§2249 用户令）
+    /// > 「**你现在还是全程用开发者权限，说了不要用开发者。**」
+    ///
+    /// 读心跳的两条通道，**只有一条不需要开发者模式**：
+    /// | 写到哪 | 怎么读 | 要开发者模式吗 |
+    /// |---|---|---|
+    /// | **App Group 共享容器** | `ios file --app-group=…` | ✅ **要** |
+    /// | ⭐ **App 自己的 Documents** | `ios fsync`（AFC/house_arrest）| ⛔ **不要** |
+    ///
+    /// ⇒ **两边都写**：
+    ///   · 共享容器 —— 给「扩展也看得见」的场合留着（帧在那儿）
+    ///   · ⭐ **Documents** —— 给 PC 用 `fsync` 读（⛔ 不碰开发者模式）
+    private func heartbeatURLs(_ name: String) -> [URL] {
+        var out: [URL] = []
+        if let g = AppGroup.sharedFile(name) { out.append(g) }
+        // ⭐ App 自己的 Documents（`ios fsync` 能读，⛔ 不用开发者模式）
+        let docs = FileManager.default.urls(for: .documentDirectory,
+                                            in: .userDomainMask)[0]
+        out.append(docs.appendingPathComponent(name))
+        return out
+    }
+
     private func writeHeartbeat(_ extra: [String: Any] = [:]) {
-        guard let u = AppGroup.sharedFile("run_status.json") else { return }
         var d: [String: Any] = [
             "updatedAt": ISO8601DateFormatter().string(from: Date()),
             "t": Date().timeIntervalSince1970,
@@ -436,22 +467,25 @@ final class Runner: ObservableObject {
             "keepAlive": SilentKeepAlive.shared.started,
         ]
         for (k, v) in extra { d[k] = v }
-        if let data = try? JSONSerialization.data(withJSONObject: d,
-                                                  options: [.prettyPrinted]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: d,
+                                                     options: [.prettyPrinted]) else { return }
+        for u in heartbeatURLs("run_status.json") {
             try? data.write(to: u, options: .atomic)
         }
     }
 
-    /// ⭐ 追加一行到共享日志（PC 可直接 pull 看）
+    /// ⭐ 追加一行到日志（**两个位置都写**，理由见 `heartbeatURLs`）
     private func writeTraceLine(_ s: String) {
-        guard let u = AppGroup.sharedFile("run_trace.log") else { return }
         let line = "[\(ISO8601DateFormatter().string(from: Date()))] \(s)\n"
-        if let h = try? FileHandle(forWritingTo: u) {
-            h.seekToEndOfFile()
-            h.write(Data(line.utf8))
-            try? h.close()
-        } else {
-            try? Data(line.utf8).write(to: u, options: .atomic)
+        let data = Data(line.utf8)
+        for u in heartbeatURLs("run_trace.log") {
+            if let h = try? FileHandle(forWritingTo: u) {
+                h.seekToEndOfFile()
+                h.write(data)
+                try? h.close()
+            } else {
+                try? data.write(to: u, options: .atomic)
+            }
         }
     }
 

@@ -83,7 +83,7 @@ final class APIRouter {
                               "/keepalive/start", "/keepalive/stop", "/keepalive/state",
                               "/runlog", "/recogdiag",
                               "/files", "/file", "/write", "/mkdir", "/ble/scan",
-                              "/ble/connect", "/ble/send", "/click", "/log"],
+                              "/ble/connect", "/ble/connect-paired", "/ble/send", "/click", "/log"],
             ])
 
         // ⭐ 极简探活（⛔ 不碰文件系统、不做识别）—— 用来区分「App 挂了」和「handler 慢」
@@ -598,6 +598,17 @@ final class APIRouter {
             guard let n = r.query["name"] else { return .text("need ?name=", status: 400) }
             ble.connect(n)
             return .json(["ok": true, "state": ble.state])
+
+        // ⭐⭐⭐ `/ble/connect-paired` —— **连已配对的板子**（§2249）
+        //
+        // 为什么需要：板子 `蓝牙=已连` 时**不再广播** ⇒ `scan` 扫不到
+        // ⇒ 只能走 `retrieveConnectedPeripherals` + 上次记住的 UUID。
+        // ⭐ 这也是「⛔ 不用开发者模式、全用 ESP32」的前提：
+        //    手机要能**自己**连上板子，才能发点击。
+        case ("GET", "/ble/connect-paired"):
+            let n = ble.connectPaired(hint: r.query["name"])
+            return .json(["ok": n > 0, "tried": n, "state": ble.state,
+                          "error": ble.lastError])
 
         case ("POST", "/ble/send"):
             guard let c = r.query["cmd"] else { return .text("need ?cmd=", status: 400) }

@@ -103,12 +103,23 @@ final class Recognizer {
     /// ⭐ 容错匹配（§1821 实测必要）：Vision 对中文小字常认错形近字
     ///   实测例子：「259金**币**」被认成「259金**市**」、「**联**系信息」→「**眹**系信息」
     ///   ⇒ 精确 `contains` 会漏检 ⇒ 用**编辑距离 + 字符重合率**兜底
+    ///
+    /// ## ⭐⭐ `minHits` 的两种语义（§2247）
+    /// 老实现只数「**命中的文字框总数**」——拿它做**形态判据**是错的：
+    /// 想让「不允许」**和**「允许」都出现时，同一个框里出现两次
+    /// （或两个词都落在同一个框）也会满足，**区分度不够**。
+    ///
+    /// ⇒ 现在按**意图**自动分：
+    /// · `minHits <= 1`（默认）⇒ 任一词命中即可（**放过**语义，最常用）
+    /// · `minHits >= 2`       ⇒ 要求命中 **`minHits` 个不同的词**
+    ///   （= 「这些词**都要**出现」⇒ 用于**形态判据**，如系统弹窗的双按钮）
     func findWords(_ img: UIImage, words: [String], roi: CGRect?,
                    minHits: Int = 1, minConfidence: Double = 0.5) -> Hit? {
         // ⭐ 归一化后，`size` **就是** 451×977 ⇒ 下面的 px 换算自动落在基准尺度
         let norm = self.norm(img)
         let size = norm.size
         let all = ocr(norm, minConfidence: minConfidence)
+        var perWord: [String: CGRect] = [:]     // ⭐ 每个词**各自**的命中框（去重）
         var matched: [(String, CGRect)] = []
         for (txt, nb, _c) in all {
             // 转成基准像素（⚠️ 必须用**归一化后**的 size，见 §2241）
@@ -117,11 +128,25 @@ final class Recognizer {
             if let r = roi, !r.intersects(px) { continue }
             for w in words where Self.fuzzyContains(txt, w) {
                 matched.append((txt, px))
+                // ⭐ 记录「这个词命中了」，并把它自己的框并起来
+                if let p = perWord[w] { perWord[w] = p.union(px) } else { perWord[w] = px }
                 break
             }
         }
-        guard matched.count >= minHits else { return nil }
-        // 把所有命中的框并起来
+        guard !matched.isEmpty else { return nil }
+
+        if minHits >= 2 {
+            // ⭐⭐ 形态判据：必须命中 **minHits 个不同的词**
+            guard perWord.count >= minHits else { return nil }
+            // 用**命中的这些词**的框并入（⛔ 不掺没命中的）
+            var u = perWord.values.first!
+            for r in perWord.values.dropFirst() { u = u.union(r) }
+            return Hit(name: "ocr", rect: u, score: 1.0,
+                       evidence: perWord.keys.sorted().joined(separator: "/")
+                                 + " ⇒ " + matched.map { $0.0 }.joined(separator: "/"))
+        }
+
+        // 默认：任一词命中即可
         var u = matched[0].1
         for (_, r) in matched.dropFirst() { u = u.union(r) }
         return Hit(name: "ocr", rect: u, score: 1.0,

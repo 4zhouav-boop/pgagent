@@ -127,6 +127,51 @@
       "threshold": 0.80,
       "mask": "none"
     },
+    "sys_prompt_title": {
+      "desc": "⭐ 系统弹窗**标题行**（只读细条，省 CPU）",
+      "_doc": [
+        "照抄 PC `dismiss_sys_prompt` 的**两级设计**：",
+        "  ① 检测只用**标题行细条**（PC: BOX_SYS(100,458,360,518)）—— 20~66ms，可每步都问",
+        "     ⛔ 不用整块：`没弹窗`时那块是广告正文/直播间画面，**文字密** ⇒ 慢 10 倍（PC 实测 546~1013ms）",
+        "  ② 命中后才跑一次按钮区定位（位置随 iOS 版本浮动）",
+        "⚠️ PC 原文：「弹窗上『取消』在 x≈148、『打开』在 x≈302，而 CTA 在 x≈225",
+        "   —— **正好夹在中间** ⇒ 不处理它，后续每次点 CTA 都点在弹窗空白处，",
+        "   表现为『点了没反应』，最终被误判成『CTA 连点 3 次没打开』而停手。」"
+      ],
+      "roi": [100, 458, 360, 518],
+      "match": "ocr",
+      "words": ["想要打开", "想要"],
+      "min_hits": 1
+    },
+    "sys_prompt_btns": {
+      "desc": "⭐ 系统弹窗**按钮行**（形态判据：同时有「不允许」+「允许」）",
+      "_doc": [
+        "⭐ PC §1449 的**决定性改进**：**认形态，⛔ 不猜文案**。",
+        "  血案：真机 16 轮卡死，BOX_SYS 读到的是 **WKWebView 定位权限弹窗**",
+        "       「想使用你当前的位置…」—— ⛔ 不是「想要打开」那种 App 跳转弹窗",
+        "       ⇒ 原判据（只认「想要打开」）**16/16 帧全 miss** ⇒ 空按 16 次 ✕ 后白丢一条。",
+        "  ✅ 改成：按钮行里**同时出现「不允许」与「允许」** = 系统级二选一弹窗",
+        "     （iOS 的 App 跳转 / 定位 / 通知 / 相机… 都是这个形态）",
+        "⚠️ 本元素用 `min_hits: 2` 表示「两个词都要有」（形态判据）。",
+        "⛔ 铁律：弹窗**只点消极项**（不允许/取消）⇒ 留在快手内，⛔ 不外跳、⛔ 不授权。"
+      ],
+      "roi": [40, 430, 411, 560],
+      "match": "ocr",
+      "words": ["不允许", "允许"],
+      "min_hits": 2
+    },
+    "sys_prompt_deny": {
+      "desc": "⭐ 系统弹窗的**消极项**（点这个，⛔ 不点「允许/打开」）",
+      "_doc": [
+        "⛔ 铁律④：一律点**消极项** —— 取消 / 不允许 / 以后 / 拒绝。",
+        "⇒ 页面留在快手里，⛔ 不外跳、⛔ 不授权。",
+        "（配合 `sys_prompt_btns` 的形态命中一起用）"
+      ],
+      "roi": [40, 500, 411, 570],
+      "match": "ocr",
+      "words": ["不允许", "取消", "拒绝", "以后"],
+      "min_hits": 1
+    },
     "tab_home": {
       "desc": "底栏「首页」",
       "roi": [0, 878, 451, 945],
@@ -178,45 +223,102 @@
 
   "pages": {
     "center": {
-      "desc": "金币中心（根）",
+      "desc": "金币中心（任务中心）= **所有导航的终点**",
       "check": ["center_marker"],
       "parent": null,
       "go": null
     },
+
     "feed": {
-      "desc": "信息流首页",
+      "desc": "信息流首页（底栏 tab）—— ⭐ 血案现场：没有返回键，唯一出口是底栏",
       "check": ["tab_home"],
       "not": ["mall_marker"],
       "parent": "center",
-      "go": "tab_home"
+      "go": "tab_featured",
+      "_go_doc": [
+        "⛔⛔ **不是 tab_home！**（PC 真机血案铁证 `_var/_1760_2round_d.log` L402→L407）",
+        "  L402: App底栏(首页/精选/消息) 上没悬浮球 ⇒ 先**切底栏『精选』**@scr(136,911)",
+        "  L407: App 页面（App底栏）⇒ 点左上「红包/金币」悬浮球 @scr(50,154) ✅",
+        "⇒ **悬浮球在「精选」tab 上，不在「首页」tab 上**。",
+        "⇒ 我们原来配 tab_home ⇒ 手机本来就在首页 ⇒ **原地踏步**（真机 trace 连点 6 次同一个点）。"
+      ],
+      "alts": ["back_arrow", "tab_msg"],
+      "_alts_doc": "备用出路：万一精选 tab 点不动，试试返回键 / 消息 tab（⛔ 总比原地打转好）"
     },
+
     "featured": {
-      "desc": "精选页（悬浮球在这）",
+      "desc": "精选 tab（⭐ 金币悬浮球在这里）",
       "check": ["tab_featured"],
       "parent": "center",
-      "go": "tab_featured"
+      "go": "center_marker",
+      "_go_doc": [
+        "⭐ 点「金币悬浮球」进金币中心。",
+        "⚠️ PC 用的是专门的 `coin_ball` 元素；我们先用 `center_marker` 的 ROI 近似",
+        "   （它是顶栏「我的金币/话费充值/金币商城」的 OCR 锚点）。",
+        "⚠️ 待补：真正的悬浮球模板（PC `_dev/assets` 里应有对应模板）"
+      ],
+      "alts": ["back_arrow"]
     },
+
     "mall": {
-      "desc": "商城页",
+      "desc": "快手商城（底栏 tab）",
       "check": ["mall_marker"],
       "parent": "feed",
-      "go": "tab_home"
+      "go": "tab_home",
+      "_go_doc": "商城页切回首页 tab（这个是**能改变状态**的：从商城 ⇒ 首页）",
+      "alts": ["back_arrow"]
     },
+
+    "msg": {
+      "desc": "消息页（底栏 tab）",
+      "check": ["tab_msg"],
+      "parent": "feed",
+      "go": "tab_home",
+      "alts": ["back_arrow"]
+    },
+
+    "deeppage": {
+      "desc": "任意有 `〈` 的二级页（商品详情/搜索结果/草稿箱…）",
+      "check": ["back_arrow"],
+      "parent": "feed",
+      "go": "back_arrow",
+      "alts": ["back_circle", "white_chevron"],
+      "_go_doc": "二级页点 `〈` 退一层。⚠️ 它**在 feed 之前判**（更具体优先）"
+    },
+
     "ad_video": {
       "desc": "视频广告页（⛔ 放行页，交给广告模块，导航不碰）",
       "check": ["ad_capsule"],
       "parent": null,
       "go": null,
-      "island": true
+      "island": true,
+      "_go_doc": [
+        "⛔ 用户令：「谁让你强退的，都是跑循环广告，你他妈一个广告就点X」",
+        "⇒ 广告页**只等时间**，⛔ 绝不点 ✕。"
+      ]
     }
   },
 
   "funnel": [
-    {"element": "pill_x",      "interval": 1.0, "desc": "顶栏胶囊 ✕"},
-    {"element": "float_x",     "interval": 1.0, "desc": "悬浮球 ✕"},
-    {"element": "back_arrow",  "interval": 1.0, "desc": "左上 〈"},
-    {"element": "back_circle", "interval": 1.0, "desc": "左上圆钮"},
-    {"element": "white_chevron","interval": 1.0, "desc": "白色 〈"}
+    {
+      "element": "sys_prompt_deny",
+      "require": "sys_prompt_btns",
+      "interval": 1.0,
+      "desc": "⭐⭐ **系统弹窗**优先（⛔ 它盖屏时底下什么都点不到）",
+      "_doc": [
+        "⭐ PC 原文（`ui_additional` 语义）：",
+        "   「Popups appear at page_os … so must take precedence」",
+        "   —— 弹窗盖住整屏时，底下任何『前进一跳』都**点在弹窗上**，既无效又浪费一轮。",
+        "⛔ 铁律④：只点**消极项**（不允许/取消）⇒ 留在快手内，⛔ 不外跳、⛔ 不授权。",
+        "⚠️ 放在**最前面** —— 弹窗优先级最高。",
+        "📏 形态判据见 `sys_prompt_btns`（同时有「不允许」+「允许」才算系统弹窗）。"
+      ]
+    },
+    {"element": "pill_x",         "interval": 1.0, "desc": "顶栏胶囊 ✕"},
+    {"element": "float_x",        "interval": 1.0, "desc": "悬浮球 ✕"},
+    {"element": "back_arrow",     "interval": 1.0, "desc": "左上 〈"},
+    {"element": "back_circle",    "interval": 1.0, "desc": "左上圆钮"},
+    {"element": "white_chevron",  "interval": 1.0, "desc": "白色 〈"}
   ],
 
   "stuck": {

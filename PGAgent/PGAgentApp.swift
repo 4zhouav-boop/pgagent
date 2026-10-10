@@ -204,6 +204,11 @@ struct ContentView: View {
                 HStack(spacing: 6) {
                     Button("扫 BLE") { ble.scan { _ in } }
                     Button("停扫") { ble.stopScan() }
+                    // ⭐⭐ 连已配对（§2249）—— 板子已连时不广播，只能这样连
+                    Button("连板子") {
+                        let n = ble.connectPaired()
+                        store.log("连已配对外设: \(n) 个  state=\(ble.state)")
+                    }
                     Button("清日志") { store.clear() }
                 }
                 .padding(.horizontal, 8)
@@ -295,6 +300,18 @@ struct ContentView: View {
         store.log("Documents = \(DocsScanner.docPath())")
         // ⭐ 「眼」的关键诊断：共享容器可用 ⇒ 帧能读到
         store.log("共享帧目录 = \(AppGroup.framesDir()?.path ?? "⛔ 无（帧读不到！）")")
+
+        // ⭐⭐⭐ 自动连已配对的 ESP32（§2249 —— ⛔ 不依赖 PC、⛔ 不依赖开发者模式）
+        //
+        // 为什么必须自动（真机实测）：
+        //   板子日志 `蓝牙=已连` ⇒ 它**已连到某设备，因此不再广播**
+        //   ⇒ `scan` **扫不到它** ⇒ 只靠「扫 BLE」按钮**永远连不上**。
+        // ⇒ 开机就 `connectPaired()`（走 `retrieveConnectedPeripherals` + 上次的 UUID）
+        //   ⭐ 这就是 PC `for_device()` 的"认得板子"语义在手机端的对应做法。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            let n = ble.connectPaired()
+            store.log("BLE 自动重连已配对外设: \(n) 个  state=\(ble.state)")
+        }
 
         // ⭐ 自主循环（App 自己在手机上跑，⛔ 不需要 PC）
         let runner = Runner(cfgStore: cfgStore, grabber: grabber, ble: ble,

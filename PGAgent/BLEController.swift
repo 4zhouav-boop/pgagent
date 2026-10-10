@@ -62,6 +62,52 @@ final class BLEController: NSObject, ObservableObject {
         central.connect(p, options: nil)
     }
 
+    /// ⭐⭐⭐ **连到「已经配对过」的板子**（§2249 —— 照 PC `for_device()` 的语义）
+    ///
+    /// ## 为什么必须有（真机实测的坑）
+    /// 板子日志显示 `蓝牙=已连` 时，它**已经连到某台设备，因此不再广播**
+    /// ⇒ `scanForPeripherals` **扫不到它**（实测 `found: []`）
+    /// ⇒ 只有 `scan` + `connect` 一条路的话 ⇒ **永远连不上**。
+    ///
+    /// ## PC 是怎么解决的
+    /// PC 有 `for_device()`：**⛔ 不靠"扫到"，靠"认得"**
+    /// （按 `fw_id > instance_path > location > com_hint` 四重解析串口）。
+    /// 手机端对应的机制是 **`retrieveConnectedPeripherals`** ——
+    /// 它能拿到**系统层面已配对/已连接**的外设，⛔ 不需要广播。
+    ///
+    /// ⚠️ 注意：iOS 的这个 API 返回的是「**本机**已配对的外设」，
+    ///    所以**必须是这台手机自己配过的板子**（也正是我们要的语义）。
+    @discardableResult
+    func connectPaired(hint: String? = nil) -> Int {
+        // ⚠️ `retrievePeripherals(withIdentifiers:)` 传**空数组会返回空**
+        //    （它要的是「你确实知道的那几个 UUID」）⇒ 所以只能：
+        //      ① `retrieveConnectedPeripherals` —— 系统里**当前已连接**的
+        //      ② 记住我们**上次连过**的 UUID（`lastKnownID`）→ 下次直接 retrieve
+        var cands: [CBPeripheral] = central.retrieveConnectedPeripherals(withServices: [])
+        if let id = lastKnownID,
+           let p = central.retrievePeripherals(withIdentifiers: [id]).first {
+            if !cands.contains(where: { $0.identifier == p.identifier }) {
+                cands.append(p)
+            }
+        }
+        var n = 0
+        for p in cands {
+            let nm = p.name ?? ""
+            if let h = hint, !h.isEmpty, !nm.contains(h) { continue }
+            p.delegate = self
+            target = p
+            state = "connecting"
+            central.connect(p, options: nil)
+            NSLog("PGAgent BLE: 尝试连已配对外设 %@ (%@)", nm, p.identifier.uuidString)
+            n += 1
+            if hint == nil { break }     // 没指定名字 ⇒ 先连一个试试
+        }
+        if n == 0 {
+            lastError = "没有已配对的外设（先去「扫 BLE」连一次）"
+        }
+        return n
+    }
+
     /// 写一条 HID 命令（自动补 \n，PG 固件按行解析）
     @discardableResult
     func send(_ cmd: String) -> Bool {
@@ -148,6 +194,22 @@ final class BLEController: NSObject, ObservableObject {
     }
 
     private var foundPeripherals: [CBPeripheral] = []
+
+    /// ⭐⭐ **上次连成功的板子 UUID**（持久化）
+    ///
+    /// 用途：板子已连时**不广播** ⇒ 扫不到 ⇒ 需要 `retrievePeripherals([id])` 才能重连。
+    /// 存起来 ⇒ 下次开机**自动重连**（照 PC `for_device()` 的"认得板子"语义）。
+    private static let lastIDKey = "pgagent.ble.lastPeripheralID"
+
+    var lastKnownID: UUID? {
+        get {
+            guard let s = UserDefaults.standard.string(forKey: Self.lastIDKey) else { return nil }
+            return UUID(uuidString: s)
+        }
+        set {
+            UserDefaults.standard.set(newValue?.uuidString, forKey: Self.lastIDKey)
+        }
+    }
 }
 
 extension BLEController: CBCentralManagerDelegate {
@@ -168,6 +230,8 @@ extension BLEController: CBCentralManagerDelegate {
 
     func centralManager(_ c: CBCentralManager, didConnect p: CBPeripheral) {
         state = "connected:\(p.name ?? "?")"
+        // ⭐ 记住它 ⇒ 下次开机自动重连（板子已连时**不广播**，只能靠这个）
+        lastKnownID = p.identifier
         p.discoverServices(nil)
     }
 
