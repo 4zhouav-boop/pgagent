@@ -105,11 +105,26 @@ final class PiPManager: NSObject, ObservableObject {
             NSLog("PGAgent PiP: AVAudioSession 设置失败 %@", String(describing: error))
         }
 
-        // ① 隐藏宿主视图（⛔ 别影响 UI）
-        let host = UIView(frame: CGRect(x: -W - 10, y: -H - 10, width: W, height: H))
+        // ① 宿主视图
+        //
+        // ⛔⛔ **必须在屏幕上**（§2232 实测根因）：
+        //   之前放在 `x = -W-10, y = -H-10`（**屏幕外**）⇒
+        //   图层永远不进入「可显示」状态 ⇒
+        //   `isPictureInPicturePossible` **恒为 false** ⇒ PiP 起不来。
+        //   📏 依据：PiP 用 `AVSampleBufferDisplayLayer` 做内容源时，
+        //      系统要求该图层**在可见的窗口层级里**（能真的上屏渲染）。
+        // ✅ 改法：放**屏幕上**、尺寸小、置**最底层**（被 SwiftUI 内容盖住，
+        //    用户几乎看不见，但几何上在屏内 ⇒ 满足系统要求）。
+        let host = UIView(frame: CGRect(x: 0, y: 0, width: 120, height: 68))
         host.isUserInteractionEnabled = false
         host.backgroundColor = .black
-        win.addSubview(host)
+        host.alpha = 0.02          // 近乎不可见（⛔ 不用 0，避免被当作隐藏）
+        host.isHidden = false
+        if let root = win.rootViewController?.view {
+            root.insertSubview(host, at: 0)     // ⭐ 放最底层
+        } else {
+            win.addSubview(host)
+        }
         hostView = host
 
         // ② 显示层
@@ -206,12 +221,26 @@ final class PiPManager: NSObject, ObservableObject {
     }
 
     func snapshot() -> [String: Any] {
-        [
+        var d: [String: Any] = [
             "supported": Self.supported(),
             "active": active,
             "text": text,
             "error": lastError,
         ]
+        // ⭐⭐ 诊断（§2232）：PiP 起不来时，靠这些字段定位到底卡在哪一步
+        d["possible"] = pip?.isPictureInPicturePossible ?? false
+        d["hasLayer"] = (layer != nil)
+        d["hostInWindow"] = (hostView?.window != nil)
+        d["hostHidden"] = hostView?.isHidden ?? true
+        d["hostFrame"] = hostView.map {
+            "\(Int($0.frame.origin.x)),\(Int($0.frame.origin.y)) \(Int($0.frame.width))x\(Int($0.frame.height))"
+        } ?? "-"
+        d["layerStatus"] = layer.map { "\($0.status.rawValue)" } ?? "-"
+        d["layerReady"] = layer?.isReadyForDisplay ?? false
+        d["timebaseRate"] = timebase.map { "\(CMTimebaseGetRate($0))" } ?? "-"
+        d["audioActive"] = AVAudioSession.sharedInstance().isOtherAudioPlaying == false
+        d["audioCategory"] = AVAudioSession.sharedInstance().category.rawValue
+        return d
     }
 
     // MARK: - 画一帧状态图
