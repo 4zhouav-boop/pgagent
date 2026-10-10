@@ -25,15 +25,17 @@ final class APIRouter {
     let cfgStore: ConfigStore
     let grabber: ScreenGrabber
     let runner: Runner
+    let broadcaster: BroadcastStarter
     var httpPort: UInt16 = 0
 
     init(log: LogStore, ble: BLEController, cfgStore: ConfigStore,
-         grabber: ScreenGrabber, runner: Runner) {
+         grabber: ScreenGrabber, runner: Runner, broadcaster: BroadcastStarter) {
         self.log = log
         self.ble = ble
         self.cfgStore = cfgStore
         self.grabber = grabber
         self.runner = runner
+        self.broadcaster = broadcaster
     }
 
     // MARK: - 工具
@@ -68,11 +70,11 @@ final class APIRouter {
 
         case ("GET", "/"):
             return .json([
-                "app": "PGAgent", "version": "0.6.0",
+                "app": "PGAgent", "version": "0.7.0",
                 "endpoints": ["/status", "/probe", "/reload", "/config", "/elements",
                               "/page", "/nav", "/ocr", "/see", "/grab", "/grabinfo",
                               "/shoot", "/shortcut", "/run", "/runstop", "/runstate",
-                              "/dl", "/openurl", "/install-shortcut",
+                              "/dl", "/openurl", "/install-shortcut", "/rec/start", "/rec/state", "/frame", "/frame.jpg", "/rec/save",
                               "/files", "/file", "/write", "/mkdir", "/ble/scan",
                               "/ble/connect", "/ble/send", "/click", "/log"],
             ])
@@ -149,7 +151,7 @@ final class APIRouter {
         case ("GET", "/status"):
             let cfgOK = cfgStore.cfg != nil
             return .json([
-                "app": "PGAgent", "version": "0.6.0",
+                "app": "PGAgent", "version": "0.7.0",
                 "ios": UIDevice.current.systemVersion,
                 "httpPort": Int(httpPort),
                 "documents": docsURL().path,
@@ -295,6 +297,44 @@ final class APIRouter {
             for c in cmds { if ble.send(c) { sent.append(c) }; usleep(60_000) }
             return .json(["ok": sent.count == cmds.count, "sent": sent,
                           "state": ble.state, "error": ble.lastError])
+
+        // ⭐⭐⭐⭐ 录屏广播 —— 「眼」的**正路**（荔枝/所有 RPA App 的做法）
+        //    ⛔ 不需要快捷指令、⛔ 不需要人手点：
+        //    `RPSystemBroadcastPickerView().triggerPicker()` 程序化启动
+        case ("POST", "/rec/start"):
+            let ok = broadcaster.start()
+            return .json(["ok": ok, "state": broadcaster.snapshot()],
+                         status: ok ? 200 : 500)
+
+        case ("GET", "/rec/state"):
+            return .json(["ok": true, "state": broadcaster.snapshot()])
+
+        // ⭐ 扩展把每一帧 POST 到这里（`http://127.0.0.1:8899/frame`）
+        case ("POST", "/frame"):
+            let seq = Int(r.query["seq"] ?? "-1") ?? -1
+            let ok = broadcaster.onFrame(r.body, seq: seq)
+            return .json(["ok": ok, "seq": seq, "bytes": r.body.count,
+                          "frames": broadcaster.frames])
+
+        // ⭐ 取最近一帧（=「眼」）—— 存成 PNG 供 /ocr /page /elements 用
+        case ("GET", "/frame.jpg"):
+            guard let d = broadcaster.lastFrame else {
+                return .text("还没有帧（先 POST /rec/start）", status: 404)
+            }
+            return .data(d, type: "image/jpeg")
+
+        case ("POST", "/rec/save"):
+            guard let d = broadcaster.lastFrame else {
+                return .json(["ok": false, "error": "还没有帧"], status: 404)
+            }
+            let name = r.query["name"] ?? "lastframe.jpg"
+            let u = docsURL().appendingPathComponent(name)
+            do {
+                try d.write(to: u)
+                return .json(["ok": true, "file": name, "bytes": d.count])
+            } catch {
+                return .json(["ok": false, "error": "\(error)"], status: 500)
+            }
 
         // ── 文件 ──
         case ("GET", "/files"):

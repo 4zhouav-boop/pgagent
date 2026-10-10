@@ -51,3 +51,29 @@ targets:
         CODE_SIGNING_REQUIRED: "NO"
         CODE_SIGNING_ALLOWED: "NO"
         DEVELOPMENT_TEAM: ""
+      dependencies:
+        - target: PGShot
+        - sdk: ReplayKit.framework
+        - sdk: CoreImage.framework
+
+  # ⭐⭐⭐ 「眼」—— ReplayKit 广播扩展（荔枝/所有 RPA App 的真正做法）
+  #   主 App 用 RPSystemBroadcastPickerView().triggerPicker() **程序化启动**它，
+  #   它拿到**整块屏幕的连续帧**，每帧 POST 到主 App 的 http://127.0.0.1:8899/frame
+  PGShot:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: PGShot
+    info:
+      path: PGShot/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: run.pgagent.PGAgent.PGShot
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGNING_ALLOWED: "NO"
+        DEVELOPMENT_TEAM: ""
+        SKIP_INSTALL: "YES"

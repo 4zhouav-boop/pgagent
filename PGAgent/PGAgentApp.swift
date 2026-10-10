@@ -64,6 +64,7 @@ struct ContentView: View {
     @StateObject private var http = HTTPServerHolder()
     @StateObject private var cfgStore = ConfigStore()
     @StateObject private var grabber = ScreenGrabber()
+    @StateObject private var broadcaster = BroadcastStarter()
     @State private var router: APIRouter?
     @State private var started = false
     @State private var port: UInt16 = 0
@@ -94,7 +95,19 @@ struct ContentView: View {
                 }
                 .padding(.horizontal, 8)
 
-                // ⭐ 「眼」—— App 自己取画面（触发快捷指令截图）
+                // ⭐⭐⭐⭐ 「眼」正路 —— 录屏广播（⛔ 不用快捷指令、⛔ 不用人手点）
+                HStack(spacing: 6) {
+                    Button("🔴 开录屏") {
+                        let ok = broadcaster.start()
+                        store.log("▶️ 启动录屏广播: \(ok ? "✅ 已触发" : "⛔ \(broadcaster.lastError)")")
+                    }
+                    Text("帧 \(broadcaster.frames)")
+                        .font(.system(size: 10, design: .monospaced))
+                }
+                .padding(.horizontal, 8)
+                .padding(.top, 4)
+
+                // 「眼」备选 —— 快捷指令截图
                 HStack(spacing: 6) {
                     Button("📷 抓一帧") {
                         store.log("▶️ 手动抓帧（快捷指令 \(grabber.shortcutName)）")
@@ -138,7 +151,7 @@ struct ContentView: View {
                     .padding(6)
                 }
             }
-            .navigationTitle("PGAgent v0.6.0")
+            .navigationTitle("PGAgent v0.7.0")
             .onAppear(perform: boot)
         }
         .navigationViewStyle(.stack)
@@ -148,7 +161,7 @@ struct ContentView: View {
         guard !started else { return }
         started = true
 
-        store.log("=== PGAgent v0.6.0 启动 ===")
+        store.log("=== PGAgent v0.7.0 启动 ===")
         store.log("Documents = \(DocsScanner.docPath())")
 
         // ⭐ 自主循环（App 自己在手机上跑，⛔ 不需要 PC）
@@ -168,7 +181,8 @@ struct ContentView: View {
 
         // ⭐ 起 HTTP 服务
         let rt = APIRouter(log: store, ble: ble, cfgStore: cfgStore,
-                           grabber: grabber, runner: runner)
+                           grabber: grabber, runner: runner,
+                           broadcaster: broadcaster)
         router = rt
         http.server.onRequest = { [weak rt] req in
             rt?.handle(req) ?? HTTPServer.Response.text("no router", status: 500)
