@@ -1209,6 +1209,33 @@
       ],
       "threshold": 0.8,
       "mask": "none"
+    },
+    "live_x": {
+      "desc": "直播间右上角关闭 X (template; iron rule: find it then tap, never blind-tap)",
+      "roi": [
+        395,
+        50,
+        451,
+        110
+      ],
+      "match": "template",
+      "templates": [
+        "nav/live_x.png"
+      ],
+      "threshold": 0.8,
+      "mask": "none",
+      "_doc": [
+        "section 2306: why the livestream page needs this (real-device blood case v0.10.43):",
+        "  the live page WAS recognised, but its exit leg back_edge (left-edge swipe B:)",
+        "  means NEXT LIVESTREAM inside Kuaishou, not exit -- the firmware comment says so.",
+        "  Trace: back_edge 20+ times, each judged OK, while the phone never left the live room.",
+        "  Real native frame measured: there IS a close X at base (423,76).",
+        "Not blind-tapping because: PC deleted its blind fallback (section 1630: written-down values are wrong),",
+        "  and PC recorded find_live_x misreading ad-page warning/volume icons as the live X",
+        "  -> tapping opened the ad-report page -> infinite stall.",
+        "  => this element matches only the livestream-flavoured X, and only on the live page.",
+        "Template gate: std=49.44 >> 6.0 OK; two live frames score 1.000, a feed frame None."
+      ]
     }
   },
   "pages": {
@@ -1362,7 +1389,7 @@
         "live_marker"
       ],
       "parent": "feed",
-      "go": "back_edge",
+      "go": "live_x",
       "_doc": [
         "⭐⭐ 照电脑端 `_note_1377b` 血案：**沉浸式直播间/全屏视频整页没有任何 `〈` 或 `✕`**",
         "   —— 点任何按钮都没用，**唯一出路是系统左边缘右滑手势**（固件 `B:`）。",
@@ -1374,7 +1401,14 @@
         "  ⇒ 标了 island 的页型**永远不会被判出来**（只能靠单独的 detect() 叫它）。",
         "  而 `island` 在 PC 那边的语义只是“图上需要专门的出路”，",
         "  ⛔ **不是**“不参与判页”。本次实现取消后，直播间能被 pageHere 认出，",
-        "  而它的出路（`back_edge` 左缘返回手势）仍然保留在 go 字段里。"
+        "  而它的出路（`back_edge` 左缘返回手势）仍然保留在 go 字段里。",
+        "",
+        "section 2306: exit changed to live_x (top-right X); back_edge demoted to an alternate leg:",
+        "  measured: B: (left-edge swipe) means switch livestream inside Kuaishou, not exit",
+        "  -> 20+ repeats could not get out. The top-right X is the real exit."
+      ],
+      "alts": [
+        "back_edge"
       ]
     },
     "ad_video": {
