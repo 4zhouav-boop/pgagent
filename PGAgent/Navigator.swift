@@ -208,6 +208,37 @@ final class Navigator {
         // 📏 与 §2265/§2278 同一类病：**动作之后要等"新帧"，⛔ 不是立刻抓**。
         //
         // ✅ 做法：轮询等一帧**与参考帧不同**的帧（最多 ~8s）。
+        //
+        // ⚠️ 这里**自己判"变没变"**（⛔ 不调 `screenChanged`）——
+        //    因为 `switchToApp` 是 `static`，而 `screenChanged` 是**实例方法**
+        //    （它要用 self.baseW）⇒ 直接调会**编译不过**
+        //    （真机 CI 实测：`error: cannot use instance member 'screenChanged'`）。
+        //    判据与 `screenChanged` 同款：**只看上半屏**（避开视频区），
+        //    24×24 灰度，差 >18 记一笔，>2% 算变。
+        func changed(_ a: UIImage, _ b: UIImage) -> Bool {
+            func thumb(_ img: UIImage) -> [UInt8]? {
+                let W = 24, H = 24
+                guard let cg = img.cgImage else { return nil }
+                var buf = [UInt8](repeating: 0, count: W * H)
+                guard let ctx = CGContext(data: &buf, width: W, height: H,
+                                          bitsPerComponent: 8, bytesPerRow: W,
+                                          space: CGColorSpaceCreateDeviceGray(),
+                                          bitmapInfo: CGImageAlphaInfo.none.rawValue)
+                else { return nil }
+                // 上半屏（基准 0..baseH*0.5）映射到原图像素
+                let sx = CGFloat(cg.width) / CGFloat(max(baseW, 1))
+                let sy = CGFloat(cg.height) / CGFloat(max(baseH, 1))
+                let rect = CGRect(x: 0, y: 0,
+                                  width: CGFloat(baseW) * sx, height: CGFloat(baseH * 0.5) * sy)
+                guard let sub = cg.cropping(to: rect) else { return nil }
+                ctx.draw(sub, in: CGRect(x: 0, y: 0, width: W, height: H))
+                return buf
+            }
+            guard let x = thumb(a), let y = thumb(b), x.count == y.count else { return true }
+            var diff = 0
+            for i in 0..<x.count where abs(Int(x[i]) - Int(y[i])) > 18 { diff += 1 }
+            return Double(diff) / Double(x.count) > 0.02
+        }
         func waitFresh(_ ref: UIImage?, maxSec: Double = 8) -> UIImage? {
             guard let ref = ref else { return frame() }
             let t0 = Date()
@@ -216,7 +247,7 @@ final class Navigator {
                 Thread.sleep(forTimeInterval: 0.6)
                 guard let im = frame() else { continue }
                 last = im
-                if !screenChanged(ref, im) { continue }   // 还没变 ⇒ 继续等
+                if !changed(ref, im) { continue }   // 还没变 ⇒ 继续等
                 return im
             }
             return last ?? frame()
