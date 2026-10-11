@@ -202,7 +202,12 @@ final class FeatureEngine {
                 // ✅ 用 `grabFresh(since: img)` 等一张**与点击前不同**的帧；
                 //    画面真没变 ⇒ 等满预算才判失败（结论仍对）。
                 let i2 = grabFresh(since: img, maxWait: maxFrameAgeCfg + 3.0)
-                if let i2 = i2, nav.pageHere(i2) == "ad_video" {
+                // ⛔⛔ 判据必须用 `looksLikeAdPage`（**独立判据**），⛔ 不是 `pageHere == "ad_video"`：
+                //    后者走 `elements` 表 ⇒ 真机胶囊 `已成功领取438金币 ×`/`1s后可领取560金币 ×`
+                //    **读不出** ⇒ 恒 false ⇒ 日志刷「点了任务但没进广告页 ⇒ 重试」
+                //    而**人其实已经进去了**（真机 trace 那几行正是这个假阴性）。
+                if let i2 = i2,
+                   Self.looksLikeAdPage(i2, rec: rec, nav: nav, bw: baseW, bh: baseH) {
                     log("§adbox ⛔ 已进广告页 ⇒ 放行待够 \(Int(dwell))s")
                     dwellOnAd(dwell)
                     n += 1
@@ -214,7 +219,35 @@ final class FeatureEngine {
                 continue
             }
 
-            // ③ 认不出 ⇒ 交给漏斗（弹窗优先），不自杀
+            // ③ ⛔⛔⛔ **先在广告页上放行**（照 PC `is_ad_page`）—— ⛔ 绝不能落到漏斗去点 ✕
+            //
+            // ## ⛔⛔ 血案（用户令）：「**时间都没到就提前点击了X**」
+            // 真机 `_var/_ad2_n.png` 铁证：胶囊写着 **`1s后可领取560金币`**（只剩 1 秒），
+            // 而脚本**把它关了** —— 因为这里原来**直接掉进漏斗**，
+            // 而漏斗里有 `pill_x`（顶栏胶囊 ✕）⇒ **把正在看的广告点掉了**。
+            //
+            // ## 为什么页型判据救不了（必须用**独立判据**拦）
+            // `nav.pageHere(img) == "ad_video"` 走 `elements` 表（`ad_capsule`），
+            // 而真机胶囊 `1s后可领取560金币 ×` **读不出** ⇒ 页型 `unknown`
+            // ⇒ 上面第 ① 条的放行**没命中** ⇒ 掉进漏斗 ⇒ 点 ✕。
+            //
+            // ## ✅ 照 PC 的两道防线
+            // ```
+            //   ① 主循环里 `is_ad_page(img)` ⇒ **放行**（`_1377_ad_loop.py` L9189）
+            //   ② 导航里 `is_ad_page(img)` ⇒ **return False 不碰**（L2698）
+            // ```
+            // PC 判据（L3609）是**顶栏原文子串**：`("可领取" in t) or ("已成功领取" in t)`
+            // ⇒ ⛔ 不经过元素表 ⇒ 不受 OCR 词表/阈值影响。
+            if Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+                log("§adbox ⛔ 已在**广告页**（胶囊含「可领取/已成功领取/秒+金币」）"
+                    + " ⇒ **放行待够 \(Int(dwell))s**（⛔ 绝不点 ✕ —— 用户令）")
+                dwellOnAd(dwell)
+                n += 1
+                _ = ensureInCenter(tag: "adbox_back\(n)")
+                continue
+            }
+
+            // ④ 认不出 ⇒ 交给漏斗（弹窗优先），不自杀
             if nav.runFunnel(img) {
                 log("§adbox 漏斗处理了一层")
                 sleep(1.0)
@@ -237,7 +270,50 @@ final class FeatureEngine {
         return n > 0
     }
 
-    // MARK: - ⭐⭐⭐ 按任务行定位「看广告得金币」（移植 PC `find_ad_row_button`）
+    // MARK: - ⭐⭐⭐ 广告页拦阻（照 PC `is_ad_page`，⛔ 独立于页型表）
+
+    /// ⭐⭐⭐ 是不是**视频广告页** —— 照 PC `is_ad_page`（`_1377_ad_loop.py:3609`）**逐字**。
+    ///
+    /// ```python
+    /// def is_ad_page(img):
+    ///     t = txt(img, BOX_TOP)          # BOX_TOP = (0, 62, 451, 140)
+    ///     return ("可领取" in t) or ("已成功领取" in t)
+    /// ```
+    ///
+    /// ## ⛔ 为什么必须**独立于 `elements` 表**（这是本轮血案的根因）
+    /// 页型 `ad_video` 走 `elements` 表（`ad_capsule`）⇒ 那套是 **OCR 词匹配 + ROI**；
+    /// 而真机胶囊是 **`已成功领取438金币 ×`**（带数字/带 ✕）⇒ **读不出** ⇒ 页型 `unknown`
+    /// ⇒ 「广告页放行」失效 ⇒ **漏斗把广告 ✕ 点了**（用户令：
+    /// 「**时间都没到就提前点击了X**」）。
+    /// ✅ PC 的这条判据是**对顶栏原文做子串判断**（`in`），**不经过元素表**
+    ///   ⇒ ⛔ 不受 OCR 词表/阈值影响 ⇒ 更稳。
+    ///
+    /// ## 职责划分（PC L2697 逐字）
+    /// > ⭐ 职责划分：广告页归**广告模块（adbox）**；导航只处理非广告页。
+    ///
+    /// ## ⭐⭐ §2276 **多级判据**（真机又逮到「奖励面板盖屏」这一态）
+    /// 真机 `_var/_ad2_n.png` 铁证：奖励面板盖在广告上时，
+    /// 顶栏仍写着 **`1s后可领取560金币`** ⇒ 只剩 1 秒，**更要放行**（⛔ 不能点 ✕）。
+    /// ⚠️ 这种帧上顶栏**带数字**（`后`/`秒`），PC 那三个词可能读不到 ⇒ 必须补更宽的兜底：
+    /// ```
+    ///   ① PC 原判据：顶栏含「可领取」/「已成功领取」     ← 最准，先试
+    ///   ② 兜底：顶栏含「秒」且含「金币」                 ← 倒计时胶囊形态
+    ///   ③ 兜底：`pill_x` 模板命中（胶囊 ✕ 是广告页专属） ← 纯像素，⛔ 不受 OCR 影响
+    /// ```
+    /// ⛔ 三级**都是"广告页独有"的信号**，⛔ 不是放宽（快手内容页没有胶囊 ✕）。
+    static func looksLikeAdPage(_ img: UIImage, rec: Recognizer, nav: Navigator,
+                               bw: Double, bh: Double) -> Bool {
+        // ① PC 原判据（顶栏原文子串，⛔ 不靠元素匹配）
+        let items = rec.ocrRegion(img, rect: CGRect(x: 0, y: 62, width: bw, height: 78),
+                                  minConfidence: 0.3)
+        let t = items.map(\.0).joined()
+        if t.contains("可领取") || t.contains("已成功领取") { return true }
+        // ② 兜底：倒计时胶囊形态（`Ns后可领取N金币`）
+        if t.contains("秒") && t.contains("金币") { return true }
+        // ③ 兜底：胶囊 ✕ 模板（纯像素；`ad/pill_x.png`）
+        if nav.detect("pill_x", img: img) != nil { return true }
+        return false
+    }
 
     /// PC `AD_ROW_Y_WIN = 26` —— 行内 y 容差（同一张卡片的标题与按钮落在此窗口内）
     private static let adRowYWin: Double = 26
@@ -583,14 +659,30 @@ final class FeatureEngine {
                 log("   §\(tag) ✅ 已在任务中心（第 \(k + 1) 步）")
                 return true
             }
-            // ⛔⛔ **广告页必须最先放行**（照 PC `ensure_in_center` L8955 `return True`）
+            // ⛔⛔⛔ **广告页必须最先放行** —— 用**独立判据**拦一道，照 PC `_nav_to_center` L2698
             //
-            // ⚠️ 顺序**不能反**：漏斗里有 `pill_x`（顶栏胶囊 ✕）⇒
-            //   若先跑漏斗，它会**把正在看的广告关掉** —— 而用户令是
-            //   「**谁让你强退的，都是跑循环广告**」（§1534）⇒ 广告页**只等时间，⛔ 不点 ✕**。
-            // ⇒ 所以：**先判广告页 ⇒ 放行**；漏斗只处理"广告之外的弹窗/盖屏"。
-            if here == "ad_video" {
-                log("   §\(tag) ⛔ 停在广告页 ⇒ **放行**（交给主循环等够时间、⛔ 不点 ✕）")
+            // ## ⛔ 血案（用户令）：「**时间都没到就提前点击了X**」
+            // 我原来**先判页型、后跑漏斗**，而页型判不出广告页时
+            // ⇒ **漏斗的 `pill_x` 就把正在看的广告关掉了** ⇒ 奖励没拿够。
+            // 📏 PC 的防线（L2694~L2700 逐字）：
+            // ```python
+            // if is_ad_page(img):            # ⭐ 在跑漏斗**之前**拦
+            //     return False               # 放行，⛔ 漏斗和任何腿都不许碰
+            // ```
+            // > ⛔ 我原来给 `ad_video` 配了 `go="pill_x"` ⇒ 导航把广告点掉了
+            // > ⭐ 职责划分：广告页归**广告模块（adbox）**；导航只处理非广告页。
+            //
+            // ## 判据必须**独立于页型表**（这是关键）
+            // PC `is_ad_page`（L3609）用的是**子串包含**：
+            // ```python
+            // return ("可领取" in t) or ("已成功领取" in t)
+            // ```
+            // ⛔ 而我的 `ad_capsule` 走 OCR 元素匹配 ⇒ 真机 `已成功领取438金币 ×`
+            //   **读不出** ⇒ 页型 `unknown` ⇒ 防线失效 ⇒ 点✕。
+            // ✅ 所以这里**直接对顶栏做子串判断**，⛔ 不经过元素表。
+            if Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+                log("   §\(tag) ⛔ 这是**视频广告页**（顶栏含「可领取/已成功领取」）"
+                    + " ⇒ **放行**（⛔ 不碰，交给广告模块；⛔ 绝不点 ✕）")
                 return true
             }
             // ⭐⭐⭐⭐⭐ §2275 **漏斗排在"前进一跳"之前**（照 PC `_nav_to_center` L2705）
