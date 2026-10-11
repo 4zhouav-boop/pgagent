@@ -153,22 +153,47 @@ final class FeatureEngine {
                 continue
             }
 
-            // ② 找「广告任务」那一行的按钮并点它（PC `find_ad_row_button`）
-            if nav.detect("ad_task_btn", img: img) != nil {
-                if nav.tap("ad_task_btn", img: img) {
-                    sleep(2.0)
-                    // ⭐ 点完**立即**再抓一帧看是不是广告页
-                    if let i2 = grab(), nav.pageHere(i2) == "ad_video" {
-                        log("§adbox ⛔ 已进广告页 ⇒ 放行待够 \(Int(dwell))s")
-                        dwellOnAd(dwell)
-                        n += 1
-                        _ = ensureInCenter(tag: "adbox_back\(n)")
-                        continue
-                    }
-                    log("§adbox ⚠️ 点了任务但没进广告页 ⇒ 重试")
-                    sleep(1.5)
+            // ② ⭐⭐⭐ **按任务行定位**并点它（照 PC `find_ad_row_button`，L2146）
+            //
+            // ## ⛔⛔ 为什么不能用 `nav.detect("ad_task_btn")`（真机血案 §2263）
+            // 原来那版拿**词表**在全屏找「看广告/去观看/去领取/立即领取」——
+            // 而金币中心里**并存多条**含"广告/领取"的任务行，它们是**不同的任务**：
+            //   · `看广告得金币`（最高4500000）    ← ✅ **本链条要进的就是它**
+            //   · `刷广告视频赚金币`                ← ⛔ **另一个任务**
+            //   · `立即签到`（连续签到那条）        ← ⛔ 另一个任务
+            // ⇒ 真机实测就点错了：`§click ad_task_btn @(258,469) score=1.000
+            //    ev=点击领取今天奖励/待领50金币|立即领取/去观看`
+            //    —— 它命中的是**签到行/待领行**，不是「看广告得金币」行。
+            //
+            // ## PC 的做法（`_1377_ad_loop.py` L2120~L2174，逐条照抄）
+            // ```python
+            // AD_ROW_TASK_RX = re.compile(r"看\s*广\s*告\s*得\s*金\s*币")   # 唯一目标行
+            // AD_ROW_Y_WIN  = 26      # 行内 y 容差：同一张卡片的标题与按钮落在此窗口
+            // AD_ROW_X_MIN  = 330     # 右列按钮 x 下界
+            // rows = _ocr_rows(words(img, (0, 250, 451, 977)))   # 按 y 聚成"行"
+            // y_row = _task_row_y(rows)                          # 找「看广告得金币」那道行
+            // if y_row is None: → **放弃本腿**（⛔ 不得改点同屏别的广告任务行）
+            // cands = [同 y_row±26 内、x ≥ 330 的词] → 取**最右**那个当按钮
+            // if 按钮文案 in AD_ROW_DEAD_KEYS: → 放弃（那行是"冷却中/已领取"，按了没用）
+            // ```
+            // ⛔ 铁律②：`看广告得金币` 是**唯一**目标；它不可用就**放弃本腿**，
+            //    ⛔ **绝不"跳到下一行"**（用户 2026-10-06 明确纠正过：
+            //    「你搞到刷广告得金币干什么 说了 是错的」）。
+            if let btn = findAdRowButton(img) {
+                log("§adbox 按行定位到「看广告得金币」行 ⇒ 按钮 \(btn.evidence) @(\(Int(btn.point.x)),\(Int(btn.point.y)))")
+                nav.tapPoint(Double(btn.point.x), Double(btn.point.y))
+                sleep(2.0)
+                // ⭐ 点完**立即**再抓一帧看是不是广告页
+                if let i2 = grab(), nav.pageHere(i2) == "ad_video" {
+                    log("§adbox ⛔ 已进广告页 ⇒ 放行待够 \(Int(dwell))s")
+                    dwellOnAd(dwell)
+                    n += 1
+                    _ = ensureInCenter(tag: "adbox_back\(n)")
                     continue
                 }
+                log("§adbox ⚠️ 点了任务但没进广告页 ⇒ 重试")
+                sleep(1.5)
+                continue
             }
 
             // ③ 认不出 ⇒ 交给漏斗（弹窗优先），不自杀
@@ -192,6 +217,104 @@ final class FeatureEngine {
         }
         log("§adbox 跑完 \(n) 条")
         return n > 0
+    }
+
+    // MARK: - ⭐⭐⭐ 按任务行定位「看广告得金币」（移植 PC `find_ad_row_button`）
+
+    /// PC `AD_ROW_Y_WIN = 26` —— 行内 y 容差（同一张卡片的标题与按钮落在此窗口内）
+    private static let adRowYWin: Double = 26
+    /// PC `AD_ROW_X_MIN = 330` —— 右列按钮 x 下界
+    private static let adRowXMin: Double = 330
+    /// PC `AD_ROW_TASK_RX = r"看\s*广\s*告\s*得\s*金\s*币"` —— **唯一**合法目标行
+    ///
+    /// ⛔ 用 `\s*` 容忍 OCR 把「看广告得金币」切成多个 token（`看广告 得金币` 也算命中）。
+    private static let adRowTaskWords = ["看广告得金币", "看广告 得金币", "看广告赚金币"]
+    /// PC `AD_ROW_DEAD_KEYS` —— 右列按钮的**非动作态**词表；命中 ⇒ 本腿放弃
+    ///
+    /// PC 原文：「可用态永远是祈使（`领福利`/`去观看`/…），
+    /// `冷却中`/`倒计时…`/`已领取`/`已完成` 都是**状态**（按了不会有任何事）」。
+    private static let adRowDeadKeys = ["冷却中", "倒计时", "已领取", "已领完",
+                                        "已完成", "已抢光", "明日再来", "已瓜分"]
+
+    /// ⭐⭐⭐ 按**行结构**定位「看广告得金币」那道任务行右侧的入口按钮。
+    ///
+    /// 逐条移植 PC `find_ad_row_button`（`_1377_ad_loop.py:2146`）。
+    /// - Returns: `(点, 证据串)`；⛔ 找不到 / 该行不可用 ⇒ **nil**（调用方什么都不做）
+    private func findAdRowButton(_ img: UIImage)
+        -> (point: CGPoint, evidence: String)? {
+        // ① 先 OCR 出任务列表那一带的词（PC: `words(img, (0, 250, 451, 977))`）
+        let band = CGRect(x: 0, y: 250, width: baseW, height: baseH - 250)
+        let ws = rec.ocrRegion(img, rect: band, minConfidence: 0.3)
+        guard !ws.isEmpty else {
+            log("   §adbox_row ⚠️ 任务列表带内没读到任何文字 ⇒ 本腿放弃")
+            return nil
+        }
+        // ② 按 y 聚成「行」—— 任务列表的结构就是 [标题 + 金币数 + 右侧按钮]
+        let rows = Self.ocrRows(ws, yWin: Self.adRowYWin)
+        // ③ 找「看广告得金币」那道行（⛔ 唯一目标；找不到 ⇒ 放弃本腿）
+        guard let yRow = Self.taskRowY(rows, words: Self.adRowTaskWords) else {
+            log("   §adbox_row ⚠️ 本屏没有「看广告得金币」这道任务行 ⇒ 本腿放弃"
+                + "（§1703：⛔ 不得改点同屏别的广告任务行）")
+            return nil
+        }
+        // ④ 取**该行** ±26 内、x ≥ 330 的词 → 最右那个当按钮
+        var cands: [(String, CGPoint)] = []
+        for r in rows where abs(r.y - yRow) <= Self.adRowYWin {
+            for w in r.items where w.center.x >= Self.adRowXMin {
+                cands.append((w.text, w.center))
+            }
+        }
+        guard !cands.isEmpty else {
+            log("   §adbox_row ⚠️ 「看广告得金币」行 y=\(Int(yRow)) 里 x≥\(Int(Self.adRowXMin))"
+                + " 没有按钮 ⇒ 本腿放弃")
+            return nil
+        }
+        // PC: `cands.sort(key=lambda c: (-c[1], abs(c[2] - y_row)))` ⇒ 最右优先
+        cands.sort { a, b in
+            if a.1.x != b.1.x { return a.1.x > b.1.x }
+            return abs(a.1.y - yRow) < abs(b.1.y - yRow)
+        }
+        let (bt, pt) = cands[0]
+        // ⑤ ⛔ 非动作态（冷却中/已领取…）⇒ **放弃本腿**（⛔ 不许改点别的行）
+        if Self.adRowDeadKeys.contains(where: { bt.contains($0) }) {
+            log("   §adbox_row ⏭ 「看广告得金币」行按钮是「\(bt)」（**非动作态**）⇒ 本腿放弃"
+                + "（§1703：⛔ 不得改点同屏别的广告任务行）")
+            return nil
+        }
+        let title = rows.filter { abs($0.y - yRow) <= Self.adRowYWin }
+                        .flatMap { $0.items.map(\.text) }.joined(separator: " ")
+        return (pt, "\(bt) ｜行「\(title.prefix(30))」")
+    }
+
+    /// 把 OCR 词按 y 聚成「行」（照 PC `_ocr_rows`）
+    private struct OcrRow { var y: Double; var items: [(text: String, center: CGPoint)] }
+
+    private static func ocrRows(_ ws: [(String, CGRect, Double)],
+                               yWin: Double) -> [OcrRow] {
+        var rows: [OcrRow] = []
+        for (t, r, _c) in ws.sorted(by: { $0.1.midY < $1.1.midY }) {
+            let cy = Double(r.midY)
+            if let i = rows.firstIndex(where: { abs($0.y - cy) <= yWin }) {
+                rows[i].items.append((t, CGPoint(x: r.midX, y: r.midY)))
+                rows[i].y = rows[i].items.map { Double($0.center.y) }.reduce(0, +)
+                            / Double(rows[i].items.count)
+            } else {
+                rows.append(OcrRow(y: cy, items: [(t, CGPoint(x: r.midX, y: r.midY))]))
+            }
+        }
+        return rows
+    }
+
+    /// 本屏「**看广告得金币**」那道任务行的行心 y（找不到 ⇒ nil）
+    ///
+    /// ⛔ PC 原文：「这是**唯一**合法目标行：同屏的 `刷广告视频赚金币` 是**另一个任务**」。
+    private static func taskRowY(_ rows: [OcrRow], words: [String]) -> Double? {
+        let hits = rows.filter { r in
+            let joined = r.items.map(\.text).joined(separator: " ")
+            return words.contains { joined.contains($0) }
+        }
+        // 正常只有一条；万一多条，取**最上面**那条（照 PC `hits.sort(key=lambda r: r[0])`）
+        return hits.min(by: { $0.y < $1.y })?.y
     }
 
     /// ⭐ 广告页**待够时间**（⛔ 绝不点 ✕ —— 用户令 + 荔枝 40/60 秒）
@@ -464,29 +587,79 @@ final class FeatureEngine {
     }
 
     /// ⭐ 打开搜索页（**可重入**：已在搜索/结果页 ⇒ 直接算成功）
+    ///
+    /// ## ⛔⛔ §2263 修：原来**上来就找放大镜**，而放大镜只在 **feed 顶栏**
+    /// 真机 trace 铁证（金币中心页上）：
+    /// ```
+    /// §tag ⚠️ 直接开搜索没成 ⇒ 先回 feed 首页再试
+    /// §tag ⛔ 打不开搜索页 ⇒ 停手
+    /// ```
+    /// **根因**：`openSearch` 第一步就 `nav.tap("search_entry")`（放大镜），
+    /// 而**金币中心页没有放大镜** ⇒ 恒 miss ⇒ 直接 `return false` ⇒ tag/mall 全废。
+    ///
+    /// ✅ 照 PC `open_ks_search`（`_1377_ad_loop.py:6051`）的腿序：
+    /// ```
+    /// ① 已在搜索页/结果页 ⇒ 直接算成功（**可重入**，PC §1737c 血案：省一次往返）
+    /// ② feed 首页 ⇒ **模板**定位放大镜 ⇒ 点
+    /// ③ 其它页 ⇒ 找 `〈` 回退，再回 ②
+    /// ```
+    /// ⭐ 关键差别：**②③ 是"先到 feed、再点放大镜"** —— 而 feed 靠**页面图**走过去
+    ///   （`feed.go = coin_ball` 是回中心；**去 feed 要走 `gotoFeed`**）。
     private func openSearch(tag: String) -> Bool {
-        for _ in 0..<3 {
+        for _ in 0..<4 {
             if isCancelled() { return false }
             guard let img = grab() else { return false }
+            // ① 可重入：已在搜索/结果页 ⇒ 成功（PC 铁律：先问这个，别重链）
             if nav.detect("search_page", img: img) != nil { return true }
             if nav.runFunnel(img) { sleep(1.0); continue }
-            if nav.tap("search_entry", img: img) { sleep(1.8); continue }
-            return false
+            // ② 只**在 feed 页**才点放大镜（放大镜是 feed 顶栏的元素）
+            let here = nav.pageHere(img) ?? "unknown"
+            if here == "feed" {
+                if nav.tap("search_entry", img: img) {
+                    sleep(1.8)
+                    continue
+                }
+                log("   §\(tag) ⚠️ 在 feed 但**没找到放大镜**（模板 `x_ref_ks_mag.png` 未命中）")
+                return false
+            }
+            // ③ 不在 feed ⇒ **先走到 feed**（照 PC「先回首页再找放大镜」）
+            log("   §\(tag) 在 \(here)（非 feed）⇒ 先去 feed 首页再找放大镜")
+            if !gotoFeed(tag: "\(tag)_tofeed") {
+                log("   §\(tag) ⛔ 到不了 feed 首页 ⇒ 打不开搜索页")
+                return false
+            }
         }
         return false
     }
 
     /// ⭐ 进小店首页（可重入）
+    ///
+    /// ⛔⛔ §2263 修（与 `openSearch` 同病）：原来**上来就 `tap("mall_entry")`**，
+    /// 而 `mall_entry` 的判据是顶栏「商城/快手小店」——**金币中心页没有这些词**
+    /// ⇒ 恒 miss ⇒ `enter_mall` 空转到 4 次 ⇒ `进不了小店首页 ⇒ 停手`。
+    /// ✅ 照 PC `enter_mall`（L7233）**可重入 + 先到已知入口态**：先 `gotoFeed`。
     private func enterMall(tag: String) -> Bool {
         for _ in 0..<4 {
             if isCancelled() { return false }
             guard let img = grab() else { return false }
+            // ① 可重入：已在商城页 / 已命中商城入口词 ⇒ 成功
             if nav.pageHere(img) == "mall"
                 || nav.detect("mall_entry", img: img) != nil { return true }
             if nav.runFunnel(img) { sleep(1.0); continue }
+            // ② 不在 feed ⇒ 先到 feed（商城入口在 feed 底栏/顶栏）
+            let here = nav.pageHere(img) ?? "unknown"
+            if here != "feed" {
+                log("   §\(tag) 在 \(here)（非 feed）⇒ 先去 feed 首页再进小店")
+                if !gotoFeed(tag: "\(tag)_tofeed") {
+                    log("   §\(tag) ⛔ 到不了 feed 首页 ⇒ 进不了小店")
+                    return false
+                }
+                continue
+            }
+            // ③ 在 feed ⇒ 点商城入口
             if nav.tap("mall_entry", img: img) { sleep(1.8); continue }
-            _ = ensureInCenter(tag: "\(tag)_center")
-            sleep(0.8)
+            log("   §\(tag) ⚠️ 在 feed 但没找到小店入口 ⇒ 停手")
+            return false
         }
         return false
     }
