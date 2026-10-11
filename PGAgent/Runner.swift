@@ -186,6 +186,30 @@ final class Runner: ObservableObject {
         writeTraceLine("=== 开始 目标=\(target) 最大步数=\(maxSteps) ===")
         writeHeartbeat(["phase": "start", "target": target, "maxSteps": maxSteps])
 
+        // ⭐⭐⭐ §2255 **有勾选功能 ⇒ 走 FeatureEngine 的一轮闭环**
+        //
+        // 为什么这样分流（照 PC L9360~9395 的语义）：
+        //   · config 里**没设** `features`（或为空）⇒ 走原来的**纯导航**循环（旧行为一字不改）
+        //   · config 里**设了** `features`      ⇒ 走 `FeatureEngine.runRound()`
+        //     它内部按 `FEAT_ORDER` 依次跑 adbox/feed/tag/search，每棒跑完回中心
+        //
+        // ⚠️ 这样「只跑导航」的老用法**完全不受影响**（用户令：旧行为零改动）。
+        let feats = cfg.settings?.features?.filter { FeatureEngine.order.contains($0) } ?? []
+        if !feats.isEmpty {
+            log("§run ⭐ 走功能闭环（\(feats.count) 个功能：\(feats.map(FeatureEngine.cn).joined(separator: " / "))）")
+            let fe = FeatureEngine(cfgStore: cfgStore, nav: nav, rec: rec, ble: ble,
+                                   grab: { [weak self] in self?.grabSync() },
+                                   isCancelled: { [weak self] in self?.cancelFlag ?? true },
+                                   beat: { [weak self] d in self?.writeHeartbeat(d) },
+                                   log: { [weak self] s in self?.append(s) })
+            let rep = fe.runRound()
+            let done = (rep["done"] as? [String]) ?? []
+            finish("✅ 功能闭环结束：完成 \(done.count)/\(feats.count)"
+                   + (done.isEmpty ? "" : "（\(done.map(FeatureEngine.cn).joined(separator: "、"))）"))
+            return
+        }
+        log("§run ⚠️ 没勾功能 ⇒ 只跑导航循环（旧行为）")
+
         var stall = 0
         var lastSig = ""
         /// ⭐ 连续「认不出」计数（见 `unknownLimit` 的说明）
