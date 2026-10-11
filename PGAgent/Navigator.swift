@@ -148,15 +148,85 @@ final class Navigator {
 
     // MARK: - 动作
 
+    /// ⭐⭐ 点击时序（照电脑端 `ks_io.py::tap` 的**实测值**）
+    ///
+    /// ```python
+    /// # ks_io.py:198
+    /// def tap(x, y, wait=1.2):
+    ///     cmd(plog(x, y), wait=0.15)   # ⭐ 移动后只等 0.15s
+    ///     cmd("C:L", wait=wait)        # ⭐ 点击后等 1.2s
+    /// ```
+    /// 📏 **为什么必须等**（§2253 对齐）：我原来 `for cmd in cmds { ble.send(cmd) }`
+    ///    两条命令**瞬间连发**（BLE 写不等）⇒ 板子可能把 `P:` 和 `C:L` 挤在一起处理，
+    ///    甚至指针还没到位就按下了 ⇒ **点空**。
+    /// ⇒ 现在显式对齐电脑端的节奏。
+    static let tapMoveSettle: Double = 0.15
+    static let tapAfterSettle: Double = 1.2
+
     /// 点击一个元素（⛔ 必须先找到 ⇒ 坐标是识别结果，不是盲点坐标）
+    ///
+    /// ⭐ 参数 `atomic`：`true` ⇒ 走固件**原子通道** `Q:x,y`（移+按+放一条 HID 序列）。
+    ///    给**时序敏感**的场景用（系统弹窗）—— 照电脑端 `_ext_q`。
     @discardableResult
-    func tap(_ name: String, img: UIImage) -> Bool {
+    func tap(_ name: String, img: UIImage, atomic: Bool = false) -> Bool {
         guard let h = detect(name, img: img) else { return false }
         let c = h.center
+        if atomic {
+            let cmd = BLEController.atomicClickCmd(x: Double(c.x), y: Double(c.y),
+                                                   baseW: baseW, baseH: baseH, yFix: yFix)
+            ble.send(cmd)
+            Thread.sleep(forTimeInterval: Self.tapAfterSettle)
+            log("   §click \(name) ATOMIC Q @(\(Int(c.x)),\(Int(c.y))) score=\(String(format: "%.3f", h.score)) ev=\(h.evidence)")
+            return true
+        }
+        // ⭐ 两步式（`P:` + `C:L`）—— 与电脑端 `click_at` 一致，**并按电脑端节奏等待**
         let cmds = BLEController.moveAndClick(x: Double(c.x), y: Double(c.y),
                                               baseW: baseW, baseH: baseH, yFix: yFix)
-        for cmd in cmds { ble.send(cmd) }
+        for (i, cmd) in cmds.enumerated() {
+            ble.send(cmd)
+            Thread.sleep(forTimeInterval: i == 0 ? Self.tapMoveSettle : Self.tapAfterSettle)
+        }
         log("   §click \(name) @(\(Int(c.x)),\(Int(c.y))) score=\(String(format: "%.3f", h.score)) ev=\(h.evidence)")
+        return true
+    }
+
+    /// ⭐ **按坐标直接点**（坐标来自别处，如 OCR 词中心）
+    /// 同样遵守电脑端的点击节奏。
+    @discardableResult
+    func tapPoint(_ x: Double, _ y: Double, atomic: Bool = false) -> Bool {
+        if atomic {
+            ble.send(BLEController.atomicClickCmd(x: x, y: y,
+                                                  baseW: baseW, baseH: baseH, yFix: yFix))
+            Thread.sleep(forTimeInterval: Self.tapAfterSettle)
+            return true
+        }
+        let cmds = BLEController.moveAndClick(x: x, y: y,
+                                              baseW: baseW, baseH: baseH, yFix: yFix)
+        for (i, cmd) in cmds.enumerated() {
+            ble.send(cmd)
+            Thread.sleep(forTimeInterval: i == 0 ? Self.tapMoveSettle : Self.tapAfterSettle)
+        }
+        return true
+    }
+
+    /// ⭐⭐ **iOS 左边缘右滑返回**（`B:` 固件专用命令）—— 沉浸式页面唯一出路
+    ///
+    /// ## 为什么必须有（§2253 对齐电脑端）
+    /// 固件 `B[:y]` 源码注释（`_1377_ad_loop.py` 里也引过）：
+    /// > 「★新增(§1372)：iOS **返回手势**(左边缘右滑)、广告转化浏览滑动、
+    /// >   直播间换间都要用它」
+    ///
+    /// 📏 血案（电脑端 `_note_1377b`）：**沉浸式直播间/全屏视频整页没有 `〈`、没有 `✕`**
+    ///    —— 点任何按钮都没用，**只有这条系统手势能出来**。
+    ///
+    /// ⛔ 与 `back_arrow` 的区别：
+    ///   · `back_arrow` = **点**左上角那个 `〈` 图（需要它存在）
+    ///   · `back_edge`  = **滑**（系统手势，不依赖任何可见按钮）
+    @discardableResult
+    func backEdge() -> Bool {
+        ble.send(BLEController.backGestureCmd())
+        Thread.sleep(forTimeInterval: 1.0)
+        log("   §gesture 左边缘右滑返回（B:）")
         return true
     }
 
@@ -180,9 +250,16 @@ final class Navigator {
             }
             if detect(it.element, img: img) != nil {
                 funnelLast[it.element] = now
+                // ⭐⭐ **漏斗一律用原子点击**（`Q:x,y`）—— 照电脑端 `_ext_q` 的语义
+                //
+                // 为什么：漏斗处理的都是**弹窗/盖屏**（系统权限框、券弹窗、挽留面板…），
+                //   这类东西**时序敏感**：`P:` 与 `C:L` 之间若被抢断，指针可能已不在按钮上。
+                //   原子序列「移+按+放」一条发出 ⇒ **不可能被拆开**。
+                let isSys = it.element.hasPrefix("sys_prompt")
                 log("   §funnel \(it.element)（\(it.desc ?? "")）"
-                    + (it.require != nil ? " [闸:\(it.require!)]" : ""))
-                return tap(it.element, img: img)
+                    + (it.require != nil ? " [闸:\(it.require!)]" : "")
+                    + (isSys ? " [系统弹窗 ⇒ 原子点击]" : ""))
+                return tap(it.element, img: img, atomic: true)
             }
         }
         return false
@@ -283,7 +360,15 @@ final class Navigator {
         for g in cands where !isDead(page, g) {
             // ① 点之前抓一帧
             let pre = img
-            guard tap(g, img: img) else {
+            // ⭐ **手势类出路**（不是"找到再点"，而是直接发一条手势命令）
+            //    `back_edge` = 左边缘右滑返回（B:）—— 沉浸式页面唯一出路
+            let acted: Bool
+            if g == "back_edge" {
+                acted = backEdge()
+            } else {
+                acted = tap(g, img: img)
+            }
+            guard acted else {
                 log("   §nav 在 \(page) 想点 \(g) 但**没找到** ⇒ 记死这条腿")
                 markDead(page, g)
                 continue
@@ -292,10 +377,10 @@ final class Navigator {
             Thread.sleep(forTimeInterval: 1.2)
             guard let post = grab() else { return (true, g, true) }
             if screenChanged(pre, post) {
-                log("   §nav 在 \(page) ⇒ 点 \(g) **有效**（画面已变）")
+                log("   §nav 在 \(page) ⇒ \(g) **有效**（画面已变）")
                 return (true, g, true)
             }
-            log("   §nav 在 \(page) ⇒ 点 \(g) **点了画面没变** ⇒ 记死（⛔ 不再重复点）")
+            log("   §nav 在 \(page) ⇒ \(g) **做了画面没变** ⇒ 记死（⛔ 不再重复）")
             markDead(page, g)
             // ⭐ 换下一条腿继续试（⛔ 不是整页放弃）
         }

@@ -218,6 +218,24 @@
       "match": "ocr",
       "words": ["广告"],
       "min_hits": 1
+    },
+    "live_marker": {
+      "desc": "⭐ 直播间（沉浸式）—— 底部「说点什么」输入框占位",
+      "_doc": [
+        "⭐⭐ 照电脑端 `_1377_ad_loop.py` 的 `is_live_now()`（生产唯一性锚）",
+        "   —— 它用底部输入框「说点什么」作判据。",
+        "   PC 原文（`_1737` 附近）：「判据直接用生产唯一性锚 is_live_now()",
+        "      （底部『说点什么』输入框，§1710）」",
+        "⛔ 为什么不能用别的：直播间的「关注/礼物」等元素别的页也有；",
+        "   只有底部这个输入框占位**独属**直播间。",
+        "⚠️ PC 还记了一条：**必须**在 `close_comment_panel` **之后**判 ——",
+        "   因为评论区的输入框占位**也是**「说点什么」。",
+        "   ⇒ 手机端同理：`Runner.runFeed` 里先关评论区再判直播间。"
+      ],
+      "roi": [0, 800, 451, 900],
+      "match": "ocr",
+      "words": ["说点什么"],
+      "min_hits": 1
     }
   },
 
@@ -282,8 +300,35 @@
       "check": ["back_arrow"],
       "parent": "feed",
       "go": "back_arrow",
-      "alts": ["back_circle", "white_chevron"],
+      "alts": ["back_circle", "white_chevron", "back_edge"],
       "_go_doc": "二级页点 `〈` 退一层。⚠️ 它**在 feed 之前判**（更具体优先）"
+    },
+
+    "darkpage": {
+      "desc": "深色视频页/客服页（黑底白勾）—— 靠白色 〈 或圆钮退",
+      "check": ["white_chevron"],
+      "parent": "feed",
+      "go": "white_chevron",
+      "alts": ["back_circle", "back_edge"],
+      "_doc": [
+        "⭐ 照 PC `_1765_nav.PAGES['darkpage']`（`check=['white_chevron','back_circle']`）。",
+        "⛔ 这里只留 `white_chevron`：`back_circle` 已归 deeppage 的 alts，",
+        "   两者同时判会互相抢（`pageOrder` 里 deeppage 在前）。"
+      ]
+    },
+
+    "live": {
+      "desc": "直播间（沉浸式）—— ⛔ 整页没有 〈 也没有 ✕",
+      "check": ["live_marker"],
+      "parent": "feed",
+      "go": "back_edge",
+      "island": true,
+      "_doc": [
+        "⭐⭐ 照电脑端 `_note_1377b` 血案：**沉浸式直播间/全屏视频整页没有任何 `〈` 或 `✕`**",
+        "   —— 点任何按钮都没用，**唯一出路是系统左边缘右滑手势**（固件 `B:`）。",
+        "⛔ `island: true` ⇒ 不参与「我在哪」的判定（照 PC），",
+        "   但一旦被识别出来，出路就是 `back_edge`。"
+      ]
     },
 
     "ad_video": {

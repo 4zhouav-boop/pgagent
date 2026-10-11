@@ -202,11 +202,15 @@ final class APIRouter {
             guard let img = im else { return .json(["ok": false, "error": err], status: 400) }
             let rec = makeRecognizer()
             let items = rec.ocr(img, minConfidence: 0.3)
+            // ⭐ 坐标是**基准像素**（451×977 尺度）—— 与 ROI / 模板 / 点击坐标同一套
             let list: [[String: Any]] = items.map { (t, r, c) in
                 ["text": t, "conf": c,
                  "x": r.minX, "y": r.minY, "w": r.width, "h": r.height]
             }
-            return .json(["ok": true, "count": list.count, "items": list])
+            return .json(["ok": true, "count": list.count,
+                          "coordSpace": "base_px_451x977",
+                          "ocrScale": Double(Recognizer.ocrScale),
+                          "items": list])
 
         // ⭐⭐⭐⭐ `/recogdiag` —— **识别专项诊断**（§2241）
         //

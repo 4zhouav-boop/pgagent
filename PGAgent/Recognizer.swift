@@ -62,36 +62,102 @@ final class Recognizer {
 
     // MARK: - OCR
 
-    /// 对整帧做一次 OCR ⇒ 返回 (文字, 归一化 bbox, 置信度)
-    /// ⚠️ Vision 的 bbox 原点在**左下**，这里**转成左上原点**的归一化坐标。
+    /// ⭐⭐ **OCR 放大倍数**（对齐电脑端 `ks_io.py` 第 49 行 `SCALE = 2`）
+    ///
+    /// ## 为什么必须放大（§2253 对齐电脑端水平）
+    /// 电脑端原文（`ks_io.py::words` 第 169 行）：
+    /// ```python
+    /// big = c.resize((w * SCALE, h * SCALE), Image.LANCZOS)   # ⭐ 放大后再 OCR
+    /// res, _e = _ocr_engine()(np.array(big))
+    /// xs = [p[0] / SCALE for p in pts]                        # 坐标再除回去
+    /// ```
+    /// ⇒ **小字放大后才认得出**。我原来直接喂原尺寸 ⇒ 明显弱于电脑端。
+    static let ocrScale: CGFloat = 2.0
+
+    /// 对整帧做一次 OCR ⇒ 返回 (文字, **基准像素** bbox, 置信度)
+    ///
+    /// ⚠️ **坐标是基准像素（451×977 尺度），⛔ 不是归一化 0..1**（§2253 改了契约）。
+    ///    理由：全项目（ROI / 模板 / 点击坐标）都用基准像素 ⇒ 统一一种尺度，
+    ///    ⛔ 免得每处都要 `× size`（那正是 §2241 尺度 bug 的温床）。
+    ///
+    /// ⭐ 本函数**总是整屏 OCR**。要「只在某块区域找」（电脑端的**先裁再 OCR**）
+    ///   请用 `findWords(..., roi:)` —— 它会**真的裁图**再调 `ocrRegion`，
+    ///   ⛔ 不是"整屏 OCR 完再按 roi 过滤"（那样慢 10 倍，电脑端 §1512 实测）。
     func ocr(_ img: UIImage, minConfidence: Double = 0.5) -> [(String, CGRect, Double)] {
-        // ⭐⭐ 先归一到基准（否则后面所有 ROI 都不相交）
-        let img = norm(img)
-        guard let cg = img.cgImage else { return [] }
+        ocrRegion(img, rect: nil, minConfidence: minConfidence)
+    }
+
+    /// ⭐⭐ **先裁再 OCR**（对齐电脑端 `words(img, box)`）
+    ///
+    /// - Parameter rect: **基准像素**下的裁剪框；`nil` = 整屏
+    /// - Returns: `(文字, **基准像素** bbox, 置信度)` —— ⚠️ 与 `ocr()` 不同，
+    ///   这里返回的是**绝对像素坐标**（已加回裁剪偏移），调用方不用再换算。
+    ///
+    /// ## 两个关键做法（都照电脑端抄）
+    /// ① **先裁**：`c = img.crop(box)` 后再 OCR ⇒ 快（电脑端实测 20~100ms vs 整屏 2329ms）
+    /// ② **放大 `ocrScale` 倍**再 OCR，坐标**除回去** ⇒ 小字才认得出
+    func ocrRegion(_ img: UIImage,
+                   rect: CGRect?,
+                   minConfidence: Double = 0.5) -> [(String, CGRect, Double)] {
+        let base = norm(img)                    // ① 归一到 451×977（§2241）
+        let baseW = base.size.width, baseH = base.size.height
+
+        // ② 决定裁剪框（基准像素，夹在图像内）
+        var crop = CGRect(x: 0, y: 0, width: baseW, height: baseH)
+        if let r = rect {
+            crop = r.intersection(crop)
+            if crop.width < 2 || crop.height < 2 { return [] }
+        }
+        guard let cgAll = base.cgImage else { return [] }
+        // 基准 451×977 与 cg 像素的比（norm 已强制 scale=1 ⇒ 通常 1:1）
+        let px = CGFloat(cgAll.width) / max(baseW, 1)
+        let cropPx = CGRect(x: crop.minX * px, y: crop.minY * px,
+                            width: crop.width * px, height: crop.height * px)
+        guard let cgCrop = cgAll.cropping(to: cropPx) else { return [] }
+
+        // ③ ⭐ 放大 ocrScale 倍（照电脑端 LANCZOS 语义；CoreGraphics 高质量插值）
+        let outW = Int(cropPx.width * Self.ocrScale)
+        let outH = Int(cropPx.height * Self.ocrScale)
+        guard outW > 2, outH > 2 else { return [] }
+        let cs = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(data: nil, width: outW, height: outH,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: cs,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue
+                                              | CGBitmapInfo.byteOrder32Little.rawValue)
+        else { return [] }
+        ctx.interpolationQuality = .high
+        ctx.draw(cgCrop, in: CGRect(x: 0, y: 0, width: outW, height: outH))
+        guard let bigCG = ctx.makeImage() else { return [] }
+
+        // ④ Vision
         let req = VNRecognizeTextRequest()
         req.recognitionLevel = .accurate
         req.recognitionLanguages = ["zh-Hans", "en-US"]
         req.usesLanguageCorrection = false      // ⚠️ Vision 对中文不支持 language correction
         req.minimumTextHeight = 0.0
-
-        let handler = VNImageRequestHandler(cgImage: cg, options: [:])
-        do {
-            try handler.perform([req])
-        } catch {
-            return []
-        }
+        let handler = VNImageRequestHandler(cgImage: bigCG, options: [:])
+        do { try handler.perform([req]) } catch { return [] }
         guard let obs = req.results else { return [] }
 
+        // ⑤ 坐标换算：Vision 归一化(左下原点) → 放大图像素 → 除回放大 → 加裁剪偏移
+        let sc = Self.ocrScale
         var out: [(String, CGRect, Double)] = []
         for o in obs {
             guard let top = o.topCandidates(1).first else { continue }
             if Double(top.confidence) < minConfidence { continue }
-            let bb = o.boundingBox                     // 归一化，原点左下
-            // ⭐ 关键转换：左下原点 → 左上原点
-            let r = CGRect(x: bb.minX,
-                           y: 1.0 - bb.maxY,
-                           width: bb.width,
-                           height: bb.height)
+            let bb = o.boundingBox                     // 归一化，原点**左下**
+            let w = CGFloat(outW), h = CGFloat(outH)
+            // 放大图里的左上原点像素框
+            let x = bb.minX * w
+            let y = (1.0 - bb.maxY) * h
+            let bw = bb.width * w
+            let bh = bb.height * h
+            // ⭐ 除回放大倍数 + 加裁剪偏移 ⇒ **基准像素绝对坐标**
+            let r = CGRect(x: crop.minX + x / sc,
+                           y: crop.minY + y / sc,
+                           width: bw / sc,
+                           height: bh / sc)
             out.append((top.string, r, Double(top.confidence)))
         }
         return out
@@ -115,16 +181,32 @@ final class Recognizer {
     ///   （= 「这些词**都要**出现」⇒ 用于**形态判据**，如系统弹窗的双按钮）
     func findWords(_ img: UIImage, words: [String], roi: CGRect?,
                    minHits: Int = 1, minConfidence: Double = 0.5) -> Hit? {
-        // ⭐ 归一化后，`size` **就是** 451×977 ⇒ 下面的 px 换算自动落在基准尺度
-        let norm = self.norm(img)
-        let size = norm.size
-        let all = ocr(norm, minConfidence: minConfidence)
+        // ⭐⭐ **先裁再 OCR**（对齐电脑端 `ks_io.py::words(img, box)`）
+        //
+        // 电脑端原文（第 151 行）：
+        //   「⛔⛔ 为什么必须**先裁**（§1512 实测，用户 10-04 质问"用我一半 CPU"）：
+        //      旧写法是"**先整屏 OCR、再按 box 过滤**"⇒ 每次查一条细带都要付一次**整屏**的钱。
+        //      真机实测：整屏 1137~3487ms（均 2329ms），而"细带"居然也是 509~881ms
+        //      ⇒ 生产脚本 `txt()` 是**先裁再 OCR**（实测 **20~100ms**）。」
+        // ⇒ 我原来就是"整屏 OCR 再过滤" ⇒ 慢 10 倍。现在改成**真的裁图**。
+        //
+        // ⚠️ 但保留**兜底**：若带 roi 裁完**一个词都没命中**，再跑一次整屏。
+        //    理由：窄条 OCR（电脑端也记了这坑）偶尔会漏；宁可慢一点也别漏检。
+        var all: [(String, CGRect, Double)] = []
+        if let r = roi {
+            all = ocrRegion(img, rect: r, minConfidence: minConfidence)
+            if all.isEmpty {
+                // 兜底：整屏一次（roi 之外也可能有这个词，交给下层按 roi 过滤）
+                all = ocrRegion(img, rect: nil, minConfidence: minConfidence)
+            }
+        } else {
+            all = ocrRegion(img, rect: nil, minConfidence: minConfidence)
+        }
+
+        // ⚠️ `ocrRegion` 已返回**基准像素绝对坐标** ⇒ 这里不用再乘 size
         var perWord: [String: CGRect] = [:]     // ⭐ 每个词**各自**的命中框（去重）
         var matched: [(String, CGRect)] = []
-        for (txt, nb, _c) in all {
-            // 转成基准像素（⚠️ 必须用**归一化后**的 size，见 §2241）
-            let px = CGRect(x: nb.minX * size.width, y: nb.minY * size.height,
-                            width: nb.width * size.width, height: nb.height * size.height)
+        for (txt, px, _c) in all {
             if let r = roi, !r.intersects(px) { continue }
             for w in words where Self.fuzzyContains(txt, w) {
                 matched.append((txt, px))
@@ -198,11 +280,19 @@ final class Recognizer {
         return im
     }
 
+    /// ⭐ 模板**质量闸**（照电脑端 `_1765_match.py:40` `MIN_TPL_STD = 6.0`）
+    ///
+    /// 电脑端原文：
+    /// > `MIN_TPL_STD = 6.0`  # ⭐ 模板质量闸（§1762b；实测最平在用模板 11.91）
+    ///
+    /// ⇒ 方差太低的模板（一片纯色）匹配结果**不可信** ⇒ 直接判为不可用。
+    static let minTplStd: Double = 6.0
+
     /// 单模板匹配（灰度 + 可选 ink 掩码）⇒ 返回最佳位置的**基准像素**框 或 nil
     ///
     /// 📏 算法与 `_1765_match.py` 一致：
-    ///   ① 转灰度  ② 只看模板"有墨"的像素（ink mask，避开白底噪声）
-    ///   ③ 在 ROI 内滑窗算 NCC  ④ 取最高分，低于阈值 ⇒ nil
+    ///   ① 转灰度  ② 只看模板"有墨"的像素（ink mask **带 pad 膨胀**，照 MaaFW 语义）
+    ///   ③ 在 ROI 内滑窗算 NCC  ④ 取最高分，低于阈值 ⇒ nil  ⑤ **模板质量闸**
     func matchTemplate(_ img: UIImage, tplName: String, roi: CGRect?,
                        threshold: Double, mask: String?) -> (CGRect, Double)? {
         guard let t = tpl(tplName) else { return nil }
@@ -214,19 +304,54 @@ final class Recognizer {
         let W = g.w, H = g.h, TW = tg.w, TH = tg.h
         guard TW > 2, TH > 2, TW <= W, TH <= H else { return nil }
 
+        // ⭐ **模板质量闸**（照电脑端 `MIN_TPL_STD`）：太"平"的模板不可信
+        //   —— 先在**全模板**上算方差（与掩码无关）
+        do {
+            var s = 0.0, s2 = 0.0
+            let n = TW * TH
+            for k in 0..<n { let v = Double(tg.p[k]); s += v; s2 += v * v }
+            let mean = s / Double(n)
+            let std = max(0, s2 / Double(n) - mean * mean).squareRoot()
+            if std < Self.minTplStd {
+                NSLog("PGAgent 模板闸: %@ 太平面（std=%.2f < %.2f）⇒ 弃用",
+                      tplName, std, Self.minTplStd)
+                return nil
+            }
+        }
+
         let search = roi ?? CGRect(x: 0, y: 0, width: CGFloat(W), height: CGFloat(H))
         let x0 = max(0, Int(search.minX)), y0 = max(0, Int(search.minY))
         let x1 = min(W - TW, Int(search.maxX)), y1 = min(H - TH, Int(search.maxY))
         guard x1 >= x0, y1 >= y0 else { return nil }
 
-        // 掩码：只用模板里"有墨"的像素
+        // 掩码：只用模板里"有墨"的像素（⭐ **带 pad 膨胀**，照 MaaFW `green_mask` 语义）
+        //
+        // 电脑端原文（`_1765_match.py:79 ink_mask`）：
+        //   「墨迹 + pad 邻域参与匹配，其余置 0 ⇒ 效果同 MaaFW 的"只留主体 + 紧邻边缘"」
+        //   ⚠️ 「应仅遮盖干扰区域，避免过度涂抹导致**主体边缘特征丢失**」⇒ pad=2（保住抗锯齿边缘）
         var maskIdx: [Int] = []
         if mask == "ink" {
+            let pad = 2
+            // 先标"有墨"，再对每个墨点把 pad 邻域也算进来（等价 dilate）
+            var isInk = [Bool](repeating: false, count: TW * TH)
             for j in 0..<TH {
-                for i in 0..<TW where tg.p[j * TW + i] < 128 {
-                    maskIdx.append(j * TW + i)
+                for i in 0..<TW where tg.p[j * TW + i] < 128 { isInk[j * TW + i] = true }
+            }
+            var dil = isInk
+            for j in 0..<TH {
+                for i in 0..<TW where isInk[j * TW + i] {
+                    for dj in -pad...pad {
+                        let nj = j + dj
+                        guard nj >= 0, nj < TH else { continue }
+                        for di in -pad...pad {
+                            let ni = i + di
+                            guard ni >= 0, ni < TW else { continue }
+                            dil[nj * TW + ni] = true
+                        }
+                    }
                 }
             }
+            for k in 0..<(TW * TH) where dil[k] { maskIdx.append(k) }
             if maskIdx.count < 30 { maskIdx = [] }   // 墨太少 ⇒ 不用掩码
         }
 

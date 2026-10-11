@@ -156,6 +156,29 @@ final class BLEController: NSObject, ObservableObject {
         return ["P:\(hx),\(hy)", "C:L"]
     }
 
+    /// ⭐⭐ **原子点击**（`Q:x,y`）—— 固件的「移+按+放**一条** HID 序列」
+    ///
+    /// ## 为什么要有两条点击路（照电脑端 `_1377_ad_loop.py:3176`）
+    /// ```python
+    /// def _ext_q(cx, cy):
+    ///     """★§1699b 走固件**原子通道** Q:x,y
+    ///        （Mouse.moveToWithButtons = 移+按+放**一条** HID 序列）"""
+    /// ```
+    /// | 命令 | HID 序列 | 适用 |
+    /// |---|---|---|
+    /// | `P:` + `C:L` | **两条** | 通用（`click_at` 用它）|
+    /// | **`Q:x,y`** | **一条（原子）** | ⭐ **时序敏感**场景：系统弹窗 |
+    ///
+    /// 📏 为什么弹窗要用原子的：`P:` 与 `C:L` 之间若被抢断/延迟，
+    ///    指针可能已经不在目标上 ⇒ 点空。
+    ///    一条序列发出 ⇒ **不可能被拆开**。
+    static func atomicClickCmd(x: Double, y: Double,
+                               baseW: Double = 451, baseH: Double = 977,
+                               yFix: Double = 4) -> String {
+        let (hx, hy) = norm(x, y, baseW: baseW, baseH: baseH, yFix: yFix)
+        return "Q:\(hx),\(hy)"
+    }
+
     /// ⭐ 坐标归一化（像素 → HID 0..32767）—— 与 `ks_io.py` 的 `plog()` 一致
     static func norm(_ x: Double, _ y: Double,
                      baseW: Double = 451, baseH: Double = 977,
@@ -197,7 +220,7 @@ final class BLEController: NSObject, ObservableObject {
         return "D:\(a.0),\(a.1),\(b.0),\(b.1),\(speed.ms)"
     }
 
-    /// ⭐ 刷视频的「上滑换下一个」——x 固定屏幕中线，y 取**避让区**（避开顶/底栏）
+    /// ⭐⭐ 刷视频的「上滑换下一个」——x 固定屏幕中线，y 取**避让区**（避开顶/底栏）
     ///
     /// 荔枝的避让区（在 1179x2556 上）：`y 766 ~ 1789`
     /// ⇒ 归一化到基准 451x977：`766/2556*977 = 293`，`1789/2556*977 = 684`
@@ -210,6 +233,28 @@ final class BLEController: NSObject, ObservableObject {
         let yBot = baseH * 0.70     // ≈684
         return swipe(x1: midX, y1: yBot, x2: midX, y2: yTop, speed: speed,
                      baseW: baseW, baseH: baseH, yFix: yFix)
+    }
+
+    /// ⭐⭐ **iOS 左边缘右滑 = 返回手势**（固件的 `B:` 专用命令）
+    ///
+    /// ## 为什么必须有（§2253 对齐电脑端 + 固件注释）
+    /// 固件 `B[:y]` 的实现：
+    /// ```cpp
+    /// int by = a.length() ? constrain(a.toInt(),0,32767) : 16383;
+    /// Mouse.swipeAbs(40, by, 14000, by, 260);   // ⭐ 左边缘 40 → 右边 14000
+    /// ```
+    /// 固件源码里的用途注释：
+    /// > 「★新增(§1372)：iOS **返回手势**(左边缘右滑)、广告转化浏览滑动、
+    /// >   直播间换间都要用它」
+    ///
+    /// 📏 为什么它比点 `〈` 更可靠：
+    /// **沉浸式页面（直播间/全屏视频）整页没有任何 `〈` 或 `✕`** ——
+    /// 唯一出路就是这条**系统级返回手势**（电脑端 `_note_1377b` 实测）。
+    ///
+    /// - Parameter yNorm: 滑动的 y（HID 0..32767）；不传用固件默认 `16383`（屏幕中线）
+    static func backGestureCmd(yNorm: Int? = nil) -> String {
+        if let y = yNorm { return "B:\(y)" }
+        return "B"          // 固件默认 y=16383
     }
 
     private var foundPeripherals: [CBPeripheral] = []
