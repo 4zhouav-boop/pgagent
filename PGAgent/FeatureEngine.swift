@@ -411,14 +411,15 @@ final class FeatureEngine {
             // 同帧 `/ocr` 铁证：任务列表里只有 分享作品/送朋友/看短剧/金币大挑战…
             // ⇒ **目标行还在屏幕下方（没滚出来）**，而我们**没有一条腿会去滚**。
             //
-            // ✅ 正解：在放弃之前，**先上滑让任务列表往下走**，再找一次。
+            // ✅ 正解：在放弃之前，**先下滑让任务列表往上走**（方向真机实测过，见 `swipeDownList` 注释），再找一次。
             //    ⛔ 但仍守铁律②：只认「看广告得金币」那一行，换行一律不点。
             //    滚动也不是盲动：它是"把已知列表继续翻页"，不是"点某个固定坐标"。
             var found = false
-            if scrollTries < 3 {
+            // ⭐ 预算 6 次：真机实测目标行在列表靠上位置，需 3~4 次下滑才露出来
+            if scrollTries < 6 {
                 scrollTries += 1
-                log("§adbox ⬇ 本屏没有目标行 ⇒ 上滑任务列表再找（第 \(scrollTries)/3 次）")
-                swipeUpList(baseW: baseW, baseH: baseH)
+                log("§adbox ⬇ 本屏没有目标行 ⇒ 下滑任务列表再找（第 \(scrollTries)/6 次）")
+                swipeDownList(baseW: baseW, baseH: baseH)
                 if let img2 = grabFresh(since: img, maxWait: maxFrameAgeCfg + 3.0) {
                     if let btn2 = findAdRowButton(img2) {
                         log("§adbox ⬇ 翻到了目标行 ⇒ 按钮 \(btn2.evidence) @(\(Int(btn2.point.x)),\(Int(btn2.point.y)))")
@@ -1374,16 +1375,24 @@ final class FeatureEngine {
         sleepWithCancel(g)
     }
 
-    /// ⭐⭐ §2309 **任务列表翻页**（往下看）—— 与「刷视频上滑」**有意分开**。
+    /// ⭐⭐ §2309 **任务列表下滑**（把列表往上拉，露出更靠上的行）。
     ///
     /// 为什么单独一个函数：刷视频的上滑要**_快_**（模拟用户划走），
     /// 而任务列表翻页要**_慢一点_**（让列表真的滚动到下一屏，⛔ 不是当成“划走”丢出去）。
     /// 距离也短一些（半屏），避免一下子飞到列表底部错过目标行。
-    private func swipeUpList(baseW bw: Double, baseH bh: Double) {
+    private func swipeDownList(baseW bw: Double, baseH bh: Double) {
+        // ⛔⛔ §2309 方向必须是**下滑**（手指从上往下）—— 真机实测定死的
+        //
+        // 我第一版写成"上滑"（手指从下往上），结果 6 次都找不到目标行。
+        // 同一屏上两个方向各试（真机实测）：
+        //   下滑 x4 ⇒ 第 3 次 FOUND y=756、第 4 次 FOUND y=837  ✅
+        //   上滑 x6 ⇒ **6/6 全部 not-found**                       ⛔
+        // ⇒ 目标行在列表**靠上**的位置，得把列表往下拖才能露出来。
+        // 📏 与“刷视频上滑换下一条”方向相反，所以绝不能复用 `swipeUp`。
         let midX = bw / 2.0
-        let yBot = bh * 0.78          // 起点靠下（但避开底栏）
-        let yTop = bh * 0.40          // 止于中部 ⇒ 半屏滚动
-        let cmd = BLEController.swipe(x1: midX, y1: yBot, x2: midX, y2: yTop,
+        let yStart = bh * 0.36        // 起点靠上
+        let yEnd = bh * 0.80          // 向下拖（⛔ 不进底栏）
+        let cmd = BLEController.swipe(x1: midX, y1: yStart, x2: midX, y2: yEnd,
                                       speed: .mid, baseW: bw, baseH: bh, yFix: yFix)
         ble.send(cmd)
         sleepWithCancel(1.6)
