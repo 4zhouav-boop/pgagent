@@ -34,6 +34,59 @@ public final class SilentKeepAlive {
     private var node: AVAudioSourceNode?
     private(set) var started = false
     private(set) var lastError = ""
+    /// ⭐ §2300 自愈守护（主线程定时器）—— 见 `installWatchdog()`
+    private var watchdog: Timer?
+    private var resumptions = 0
+
+    /// ⭐⭐⭐⭐⭐ §2300 **为什么必须有它（真机血案）**
+    ///
+    /// ## 现象
+    /// 装完 v0.10.43 后真机实测：
+    /// ```
+    ///   keepalive: started=True  playing=False     ← ⛔ 声音已经不在播了，可 started 还是 True
+    ///   → App 在后台被系统挂起 ⇒ HTTP 8899 断 ⇒ switchToApp 后的 grab() 拿不到帧
+    ///   → 表现：「回了桌面并且点开了快手，但后面一步都走不动」
+    /// ```
+    /// 根因：`AVAudioPlayer` 会被 **中断**（interruption）而暂停，而社区版
+    /// 声音一旦不播，`UIBackgroundModes:[audio]` 就**不再保护**这个 App。
+    /// ⛔ 而 `started` 只是我自己记的一个 Bool → 它**不会自己变回 false**
+    /// ⇒ 所以只看 `started` 会得到**假阳性**（“保活已开”）。
+    ///
+    /// ## 修法（两道）
+    /// ① 监听 `AVAudioSession.interruptionNotification` ⇒ `.ended` 时**立即重播**；
+    /// ② **定时自检**（每 5s）：`player` 存在但 `!isPlaying` ⇒ 重播（兜住任何其他原因）。
+    private func installWatchdog() {
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main) { [weak self] note in
+                guard let self = self else { return }
+                let raw = (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) ?? 0
+                let t = AVAudioSession.InterruptionType(rawValue: raw)
+                NSLog("PGAgent KeepAlive: 收到中断通知 type=%@", "\(raw)")
+                if t == .ended { self.resume() }
+            }
+
+        // ⛔ 必须在**主线程**建 Timer（同 `BroadcastStarter.startWatching` 的血案：
+        //    后台队列的 RunLoop 从不 run ⇒ timer 永远不触发）。
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.watchdog?.invalidate()
+            self.watchdog = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+                guard let self = self, self.started else { return }
+                if let p = self.player, !p.isPlaying { self.resume() }
+            }
+        }
+    }
+
+    /// 重播静音（幂等：已在播就什么都不做）
+    private func resume() {
+        guard let p = player, !p.isPlaying else { return }
+        do { try AVAudioSession.sharedInstance().setActive(true) } catch {}
+        let ok = p.play()
+        resumptions += 1
+        NSLog("PGAgent KeepAlive: 自愈重播 ok=%@ 第%d次", ok ? "是" : "否", resumptions)
+    }
 
     /// 生成一段**静音** WAV（44.1kHz 单声道，1 秒）
     ///
@@ -108,11 +161,14 @@ public final class SilentKeepAlive {
         }
 
         started = true
+        installWatchdog()          // ⭐ §2300 装上自愈守护
         NSLog("PGAgent KeepAlive: ✅ 静音音频保活已启动（循环播放）")
         return true
     }
 
     func stop() {
+        watchdog?.invalidate()
+        watchdog = nil
         player?.stop()
         player = nil
         engine?.stop()
@@ -128,6 +184,8 @@ public final class SilentKeepAlive {
             "playing": player?.isPlaying ?? false,
             "volume": player?.volume ?? -1,
             "loops": player?.numberOfLoops ?? 0,
+            // ⭐ §2300 出诊断：自愈重播次数（⛔ 不是 0 就说明真的中断过）
+            "resumptions": resumptions,
             "error": lastError,
             "audioCategory": AVAudioSession.sharedInstance().category.rawValue,
             "audioActive": AVAudioSession.sharedInstance().isOtherAudioPlaying == false,
