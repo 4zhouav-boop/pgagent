@@ -892,6 +892,8 @@ final class FeatureEngine {
         // ⇒ 「记死」的语义是**本轮这张表内**有效（防止在**同一帧**上反复空点同一条腿），
         //    ⛔ 不是"这条腿永远不许用"。
         nav.resetDead()
+        // ⭐ §2287 未知页补救计数（照 PC `UNK[0]`，最多 2 次）
+        var unknownRetry = 0
         for k in 0..<8 {
             if isCancelled() { return false }
             guard let img = grab() else { return false }
@@ -945,10 +947,63 @@ final class FeatureEngine {
                 sleep(1.0)
                 continue
             }
+            // ⭐⭐⭐⭐⭐ §2287 **判未知 ⇒ 最多重判 2 次，⛔ 不空转 8 步**（用户令）
+            //
+            // ## 用户原话（逐字，这条就是本段的规格）
+            // > 「**老子都是页面识别锚点的，不会像你傻逼一样写的狗屎。
+            // >   找不到就停止 判未知就停止。我基本所有页面都做了锚点识别**」
+            //
+            // ## ⛔ 我的病（真机 trace 铁证）
+            // ```
+            //   §adbox_boot ⚠️ 在 unknown 找不到回中心的路（第 1 步）
+            //   …（一路到第 8 步）
+            //   §adbox ⛔ 回不到金币中心 ⇒ 停手
+            // ```
+            // ⇒ **固定 8 步、每步 sleep(1)** ⇒ 白烧 ~10 秒，日志还刷 8 行噪声。
+            //
+            // ## ✅ 照 PC 的「未知页补救」（`_1377_ad_loop.py:10139` C0 分支）
+            // ```python
+            // if (UNK[0] < 2) and ...:        # ⭐ 最多补救 2 次
+            //     UNK[0] += 1
+            //     # 第 1 次：只等 2.5s 重判（页面可能只是**还没画完**）
+            //     # 第 2 次：才试「〈」返回腿（先找到再点，⛔ 找不到不点）
+            //     wait(2.5); continue
+            // # 补救用完 ⇒ 走统一腿序（maxstep=6）⇒ 失败才**停手**
+            // ```
+            // 📏 PC 的原始意图（注释逐字）：
+            // > 「同一条广告内最多重判 2 次（每次先看状态栏面包屑，再等 2.5s 重来）。
+            // >  ⛔ 一旦某条广告完成（done_ads 变了）计数自动归零 ⇒ 结构上不可能无限打转。」
+            //
+            // ⇒ 手机端现在：**未知 ⇒ 第 1 次只等 2.5s 重判；第 2 次试返回腿；
+            //    再认不出就停手**（⛔ 不再固定 8 步空转）。
+            if here == "unknown" {
+                if unknownRetry < 2 {
+                    unknownRetry += 1
+                    if unknownRetry >= 2 {
+                        // ⭐ 第 2 次补救才试返回腿（照 PC：第 1 次仍"只等"，页面可能没画完）
+                        if nav.detect("back_arrow", img: img) != nil {
+                            log("   §\(tag) 未知页补救第 2 次 ⇒ 试「〈」返回腿")
+                            _ = nav.tap("back_arrow", img: img, atomic: true)
+                        } else if nav.detect("white_chevron", img: img) != nil {
+                            log("   §\(tag) 未知页补救第 2 次 ⇒ 试「白色〈」返回腿")
+                            _ = nav.tap("white_chevron", img: img, atomic: true)
+                        } else {
+                            log("   §\(tag) 未知页补救第 2 次 ⇒ 既无〈也无白勾，**不点任何东西**（铁律①）")
+                        }
+                    } else {
+                        log("   §\(tag) 未知页补救第 \(unknownRetry)/2 次 ⇒ 只等 2.5s 重判（页面可能没画完）")
+                    }
+                    sleep(2.5)
+                    continue
+                }
+                log("   §\(tag) ⛔ 未知页补救 \(unknownRetry) 次仍认不出 ⇒ **停手**（照 PC C0）")
+                return false
+            }
             let r = nav.step(from: here, img: img) { [weak self] in self?.grab() }
             if r.acted { sleep(1.0); continue }
-            log("   §\(tag) ⚠️ 在 \(here) 找不到回中心的路（第 \(k + 1) 步）")
-            sleep(1.0)
+            // ⭐ 已知页型、但出路全被记死 ⇒ **停手**（照 PC：⛔ 不空转）
+            log("   §\(tag) ⛔ 在 \(here) 的出路全试过且无效 ⇒ **停手**（⛔ 不空转）")
+            return false
         }
         return false
     }

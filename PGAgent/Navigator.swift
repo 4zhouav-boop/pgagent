@@ -207,50 +207,36 @@ final class Navigator {
         //    `looksLikeDesktop` 当然 false ⇒ **安全闸把翻页拦死了** ⇒ 白跑。
         // 📏 与 §2265/§2278 同一类病：**动作之后要等"新帧"，⛔ 不是立刻抓**。
         //
-        // ✅ 做法：轮询等一帧**与参考帧不同**的帧（最多 ~8s）。
+        // ⭐⭐⭐⭐⭐ §2284 **回主屏后"等帧"要按"时间"等，⛔ 不能按"画面变化"等**
         //
-        // ⚠️ 这里**自己判"变没变"**（⛔ 不调 `screenChanged`）——
-        //    因为 `switchToApp` 是 `static`，而 `screenChanged` 是**实例方法**
-        //    （它要用 self.baseW）⇒ 直接调会**编译不过**
-        //    （真机 CI 实测：`error: cannot use instance member 'screenChanged'`）。
-        //    判据与 `screenChanged` 同款：**只看上半屏**（避开视频区），
-        //    24×24 灰度，差 >18 记一笔，>2% 算变。
-        func changed(_ a: UIImage, _ b: UIImage) -> Bool {
-            func thumb(_ img: UIImage) -> [UInt8]? {
-                let W = 24, H = 24
-                guard let cg = img.cgImage else { return nil }
-                var buf = [UInt8](repeating: 0, count: W * H)
-                guard let ctx = CGContext(data: &buf, width: W, height: H,
-                                          bitsPerComponent: 8, bytesPerRow: W,
-                                          space: CGColorSpaceCreateDeviceGray(),
-                                          bitmapInfo: CGImageAlphaInfo.none.rawValue)
-                else { return nil }
-                // 上半屏（基准 0..baseH*0.5）映射到原图像素
-                let sx = CGFloat(cg.width) / CGFloat(max(baseW, 1))
-                let sy = CGFloat(cg.height) / CGFloat(max(baseH, 1))
-                let rect = CGRect(x: 0, y: 0,
-                                  width: CGFloat(baseW) * sx, height: CGFloat(baseH * 0.5) * sy)
-                guard let sub = cg.cropping(to: rect) else { return nil }
-                ctx.draw(sub, in: CGRect(x: 0, y: 0, width: W, height: H))
-                return buf
-            }
-            guard let x = thumb(a), let y = thumb(b), x.count == y.count else { return true }
-            var diff = 0
-            for i in 0..<x.count where abs(Int(x[i]) - Int(y[i])) > 18 { diff += 1 }
-            return Double(diff) / Double(x.count) > 0.02
-        }
-        func waitFresh(_ ref: UIImage?, maxSec: Double = 8) -> UIImage? {
-            guard let ref = ref else { return frame() }
+        // ## ⛔⛔ 真机血案（v0.10.42 实测，用户令：「**你还是加入了开发者的功能么？
+        //    回桌面你还是用的开发者命令？**」→ 跑起来后卡住）
+        // ```
+        //   15:46:18 ② 在桌面上找「kslite」图标
+        //   15:46:19 ⚠️ 第一页没找到（或拿不到帧）⇒ 左滑翻页再找
+        //   15:47:24 ⛔ 翻页也没找到        ← ⛔ **卡了 65 秒**（4 轮 × 8s 等待 + 翻页）
+        // ```
+        // ## 根因（我自己造的）
+        // 我写的 `waitFresh` 等的是「**画面与参考帧不同**」——
+        // ⛔ 可**桌面本来就是静止的**（没有视频、没有动效）⇒ 两帧当然一样
+        // ⇒ `waitFresh` **每轮都等到 8 秒超时** ⇒ 4 轮 = 32 秒 + 翻页 ⇒ 全废。
+        // 📏 这正是 PC 记过的坑（`_1377_ad_loop.py:9474`）：
+        // > 本来想用「连续两帧一模一样」判"页面渲染完了"，但**实测不成立** ——
+        // > 投屏流是**有损压缩** + 页面自带**动效** ⇒ 两者**量级重叠**。
+        // > ⇒ 老实承认它等价于"**固定多等 3.2s 让页面渲染**"。
+        //
+        // ✅ 正解：**按时间等**（固定睡一会儿让新帧写进来），⛔ 不按"变化"等。
+        //    录屏是 1fps ⇒ 睡 1.5s 必定拿到新帧。
+        func waitFrame(maxSec: Double = 3) -> UIImage? {
             let t0 = Date()
-            var last: UIImage?
+            var im: UIImage?
             while Date().timeIntervalSince(t0) < maxSec {
-                Thread.sleep(forTimeInterval: 0.6)
-                guard let im = frame() else { continue }
-                last = im
-                if !changed(ref, im) { continue }   // 还没变 ⇒ 继续等
-                return im
+                if let f = frame() { im = f; break }
+                Thread.sleep(forTimeInterval: 0.4)
             }
-            return last ?? frame()
+            // 再睡半拍，让"动作产生的新帧"写进来（录屏 1fps）
+            Thread.sleep(forTimeInterval: 1.2)
+            return frame() ?? im
         }
 
         // ② ⭐ OCR 找图标标签 ⇒ 点标签上方
@@ -286,7 +272,7 @@ final class Navigator {
 
         log("   ② 在桌面上找「\(which)」图标（OCR 标签 → 点标签上方 0.055 屏高）")
         // ⭐ 上滑后**等新帧**（⛔ 不是立刻抓旧帧 —— 见上面 §2282b 血案）
-        if let img = waitFresh(refBefore), let (pt, label) = findIcon(img) {
+        if let img = waitFrame(), let (pt, label) = findIcon(img) {
             log("      ✅ 命中标签「\(label)」⇒ 点 (\(Int(pt.x)),\(Int(pt.y)))")
             hid(BLEController.moveAndClick(x: Double(pt.x), y: Double(pt.y),
                                            baseW: baseW, baseH: baseH, yFix: yFix))
@@ -296,7 +282,7 @@ final class Navigator {
         log("      ⚠️ 第一页没找到（或拿不到帧）⇒ 左滑翻页再找（照 PC `find_desktop_icon_paged`）")
         for k in 1...4 {
             // ⛔ 安全闸：不像桌面就**不翻页**（PC 原文：「免得在 App 里乱滑」）
-            guard let cur = waitFresh(frame()) else { break }
+            guard let cur = waitFrame() else { break }
             if !looksLikeDesktop(cur, rec: rec, baseW: baseW, baseH: baseH) {
                 log("      ⛔ 这一页不像 iOS 桌面 ⇒ 不翻页")
                 break
