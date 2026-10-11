@@ -182,9 +182,19 @@ final class FeatureEngine {
             if let btn = findAdRowButton(img) {
                 log("§adbox 按行定位到「看广告得金币」行 ⇒ 按钮 \(btn.evidence) @(\(Int(btn.point.x)),\(Int(btn.point.y)))")
                 nav.tapPoint(Double(btn.point.x), Double(btn.point.y))
-                sleep(2.0)
-                // ⭐ 点完**立即**再抓一帧看是不是广告页
-                if let i2 = grab(), nav.pageHere(i2) == "ad_video" {
+                // ⭐⭐ §2265 **等一张"新的"帧再判**（⛔ 不是固定睡 2s 就抓）
+                //
+                // ## 为什么（与写盘节拍**成对**的一条）
+                // 为活过 iOS 写入预算，扩展写盘节拍 = **1帧/4s**（§2265）。
+                // 而原来这里是 `sleep(2.0)` + `grab()` ⇒ 4 秒窗口内拿到的
+                // **还是点击前那张帧** ⇒ `pageHere(i2) == "ad_video"` 恒 false
+                // ⇒ 日志刷「点了任务但没进广告页 ⇒ 重试」⇒ **明明进去了也说没进去**。
+                // 📏 真机 trace 里那几行正是这个（`§adbox ⚠️ 点了任务但没进广告页 ⇒ 重试`）。
+                //
+                // ✅ 用 `grabFresh(since: img)` 等一张**与点击前不同**的帧；
+                //    画面真没变 ⇒ 等满预算才判失败（结论仍对）。
+                let i2 = grabFresh(since: img, maxWait: maxFrameAge + 3.0)
+                if let i2 = i2, nav.pageHere(i2) == "ad_video" {
                     log("§adbox ⛔ 已进广告页 ⇒ 放行待够 \(Int(dwell))s")
                     dwellOnAd(dwell)
                     n += 1
@@ -315,6 +325,32 @@ final class FeatureEngine {
         }
         // 正常只有一条；万一多条，取**最上面**那条（照 PC `hits.sort(key=lambda r: r[0])`）
         return hits.min(by: { $0.y < $1.y })?.y
+    }
+
+    /// ⭐⭐ **等到一张"新的"帧**（与 `ref` 不同）⇒ 返回它；等不到 ⇒ nil
+    ///
+    /// ## 为什么必须有它（§2265 —— 与写盘节拍成对的一条）
+    /// 为活过 iOS 的磁盘写入预算，扩展写盘节拍 = **1帧/4s**（见 `SampleHandler.fps`）。
+    /// ⇒ 任何「**做动作 → 睡 1~2 秒 → 抓帧看结果**」的旧写法都会拿到
+    ///   **动作之前那张帧** ⇒ 判据恒 false ⇒ 表现为
+    ///   「点了任务但没进广告页 ⇒ 重试」/**每条腿都被记死**。
+    /// 📏 教训：**节拍变了，所有"睡一会儿再抓帧"的地方都要改成"等新帧"**。
+    ///
+    /// - Parameters:
+    ///   - ref: 动作**之前**那张帧（比它不同即算新）
+    ///   - maxWait: 最多等多久（默认 = 帧龄上限 + 3s，即至少能覆盖一个写盘周期）
+    private func grabFresh(since ref: UIImage, maxWait: Double) -> UIImage? {
+        let deadline = Date().addingTimeInterval(max(1.5, maxWait))
+        var last: UIImage?
+        while Date() < deadline {
+            if isCancelled() { return nil }
+            Thread.sleep(forTimeInterval: 0.5)
+            guard let p = grab() else { continue }
+            last = p
+            if nav.screenChanged(ref, p) { return p }
+        }
+        // ⛔ 画面真没变 ⇒ 返回最后一张（让调用方按"没变"处理，结论仍正确）
+        return last
     }
 
     /// ⭐ 广告页**待够时间**（⛔ 绝不点 ✕ —— 用户令 + 荔枝 40/60 秒）

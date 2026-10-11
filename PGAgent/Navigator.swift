@@ -418,9 +418,34 @@ final class Navigator {
                 continue
             }
             // ② 点之后再抓一帧，比「有没有变」
-            Thread.sleep(forTimeInterval: 1.2)
-            guard let post = grab() else { return (true, g, true) }
-            if screenChanged(pre, post) {
+            //
+            // ⛔⛔ §2265 **必须"等一帧新的"，⛔ 不是固定睡 1.2s 就去比**。
+            //
+            // ## 为什么（这是与写盘节拍**成对**的一条，漏了就必炸）
+            // 为了活过 iOS 的写入预算，扩展的写盘节拍从 2fps 降到 **1帧/4s**（§2265）。
+            // 而 `grab()` 在 4 秒窗口内返回的是**同一张帧** ⇒
+            // `screenChanged(pre, post)` 等于**拿一张图跟自己比** ⇒ 恒 false
+            // ⇒ 每条腿都被误判"做了画面没变" ⇒ **全被记死** ⇒ 一步都走不动。
+            // 📏 这正是"改了 A 忘了 B"的典型 —— **节拍与判据必须成对调**。
+            //
+            // ✅ 修法：**轮询等一张真的不同的帧**（最多 `changeWait` 秒）。
+            //   · 画面**真变了** ⇒ 新帧到了，比较立刻成立 ⇒ 早退（⛔ 不白等）
+            //   · 画面**真没变** ⇒ 等满预算才判"没变"（结论仍正确）
+            //   ⚠️ 这也让 2fps 的老配置照常工作：新帧 ~0.5s 就到，早退。
+            let changeWait = max(1.2, (cfg.settings?.loop_frame_max_age ?? 7.0) + 1.5)
+            let deadline = Date().addingTimeInterval(changeWait)
+            let preSig = pre
+            var changed = false
+            var post: UIImage? = nil
+            while Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.5)
+                guard let p = grab() else { break }
+                post = p
+                if screenChanged(preSig, p) { changed = true; break }
+            }
+            guard let finalPost = post else { return (true, g, true) }
+            _ = finalPost
+            if changed {
                 log("   §nav 在 \(page) ⇒ \(g) **有效**（画面已变）")
                 return (true, g, true)
             }

@@ -39,9 +39,45 @@ class SampleHandler: RPBroadcastSampleHandler {
 
     private var seq = 0
     private var lastWrite = Date.distantPast
-    /// ⭐ 写盘频率（帧/秒）—— 2 fps 够识别用，省电省 IO
-    private let fps = 2.0
-    /// ⭐ 降采样后的宽度（识别够用，写盘快）
+    /// ⭐ 写盘频率（帧/秒）—— §2265 **按 iOS 写入预算反推**
+    ///
+    /// ## 预算（系统报告铁证，见 `writeShared` 的注释）
+    /// ```
+    ///   Writes limit:  1073.74 MB / 86400s  ⇒ 平均 **12.43 KB/s**
+    /// ```
+    /// ⇒ 想**长期**不被杀，长期平均写入必须压到 **~12 KB/s** 以下。
+    ///
+    /// ## ⭐⭐ 用**实测**定参数（⛔ 我第一版是估算的，差点又埋雷）
+    /// 在真机帧上实测 451×977 的 JPEG 体积（`_dev/_2265_write_budget.py` 可复跑）：
+    /// ```
+    ///   q0.7 = 43.4~48.6 KB   ⇒ 1帧/3s = 14.5~16.2 KB/s   ⛔ 超预算
+    ///   q0.5 = 33.8~38.2 KB   ⇒ 1帧/3s = 11.3~12.7 KB/s   ⚠️ **正好卡在预算线（12.73）**
+    ///   q0.4 = 30.3~34.2 KB   ⇒ 1帧/4s =  7.6~8.6 KB/s   ✅ 有余量
+    /// ```
+    /// 📏 **教训**：我原以为单帧只有 22~35 KB，实测是 **34~49 KB** ——
+    ///   快手界面**文字密集**，JPEG 压缩率远比自然图像差。
+    ///   ⇒ ⛔ 参数**必须实测**，⛔ 不能按经验系数估（我这次估偏了 ~40%）。
+    ///
+    /// ## 最终取值（两项一起调，把余量拉到 ~1.5×）
+    /// | 参数 | 值 | 平均写入 | 对预算(12.73 KB/s) |
+    /// |---|---|---|---|
+    /// | 原始 | 2fps / q0.7 / 2文件 / 1353px | **1530 KB/s** | ⛔ **120×**（12 分钟被杀）|
+    /// | 仅修 bug（①②③） | 2fps / q0.7 | ~150 KB/s | ⛔ 12× |
+    /// | 第一版估算 | 1帧/3s / q0.5 | 11.3~12.7 KB/s | ⚠️ **≈1.0×（无余量）** |
+    /// | **最终** | **1帧/4s / q0.4** | **7.6~8.6 KB/s** | ✅ **~1.5×** |
+    ///
+    /// ## 够用性（帧龄上限**必须跟着调**，已在 §2265 同时改）
+    /// `Runner` 每步 `loop_step_wait`（默认 **1.5s**）抓一帧；
+    /// 1帧/4s ⇒ 帧龄在 **0~4s** 波动，
+    /// 而 `loop_frame_max_age` 已放宽到 **5.0s**
+    /// （⚠️ 若仍写 3.0s，4s 节拍会**必然超限** ⇒ 每帧都误判"画面是旧帧"）。
+    ///
+    /// ⚠️ **诚实的边界**：预算是 **1073 MB / 24h**，
+    ///    本配置理论可撑 **~35 小时**连续录屏 —— 够一次长跑，⛔ **不是无限**。
+    ///    ⛔ 真 7×24 不间断须改成「**按需取帧**」（App 要帧时扩展才写）——
+    ///    结构性改动，留到确认本轮修复能稳定长跑之后。
+    private let fps = 1.0 / 4.0
+    /// ⭐ 降采样后的宽度（**像素**！见 `downscale` 的 scale 修正）
     private let outWidth: CGFloat = 451
 
     /// 停止标志文件名（主 App 放/删它来控制录屏，照荔枝的做法 `_note_2011` §8）
@@ -234,8 +270,17 @@ class SampleHandler: RPBroadcastSampleHandler {
         let img = UIImage(cgImage: cg)
 
         // ④ 降采样（省 IO，识别够用）
+        //    ⛔⛔ §2265 这一步**原来等于没做** —— `UIGraphicsImageRenderer` 默认
+        //    scale=3 ⇒ "451 宽"实际输出 **1353px**（像素数 9×）⇒ 磁盘写入超限 ⇒
+        //    扩展被系统杀 ⇒「**直播一直停止**」。已在 `downscale` 里钉 `scale = 1.0`。
         let scaled = downscale(img, toWidth: outWidth)
-        guard let jpg = scaled.jpegData(compressionQuality: 0.7) else { return }
+        // ⭐ 质量 0.7 → **0.4**：⭐ 这是**实测**定的（⛔ 不是估的）。
+        //    真机帧实测 451×977：q0.7=43~49KB、q0.5=34~38KB、q0.4=30~34KB。
+        //    q0.5 + 1帧/3s 恰好卡在预算线（12.7 KB/s）⇒ 无余量；
+        //    **q0.4 + 1帧/4s ⇒ 7.6~8.6 KB/s ⇒ ~1.5× 余量**（见 `fps` 的对账表）。
+        //    ⚠️ 识别用的是 OCR 二值化 + 模板灰度，q0.4 的压缩噪声影响极小
+        //      （§2263 实测：q0.7 与缩放后的帧在真机上判页/命中都正常）。
+        guard let jpg = scaled.jpegData(compressionQuality: 0.4) else { return }
 
         seq += 1
 
@@ -257,36 +302,48 @@ class SampleHandler: RPBroadcastSampleHandler {
 
     /// ⭐⭐⭐ 写进「眼」的落盘目录（**优先 App Group 共享容器**）。
     ///
-    /// 目录由 `dir` 决定（共享可用即共享，否则本容器）。
-    /// 同时更新 `lastframe.jpg`（主 App 轮询它）并按序号留档。
+    /// ## ⛔⛔⛔ §2265 **写盘预算铁律** —— 这是「直播一直停止」的真根因
     ///
-    /// ## ⭐⭐ §2263 为什么**每帧都留一个带序号的档**（照荔枝"新文件"语义）
-    /// 荔枝的取帧是「**等新截图文件出现**」（`_note_2011` L253：
-    /// 「⏳ 等待截图文件生成... (第10次检查)」），所以它**天生**能分辨
-    /// "扩展还在写" 与 "扩展已死" —— 因为**死的时候不会有新文件**。
+    /// 系统报告 `PGShot.diskwrites_resource-2026-10-11-134852.ips` 铁证：
+    /// ```
+    ///   Event:         disk writes
+    ///   Writes:        1073.95 MB over 719 seconds (1493.70 KB/s)
+    ///   Writes limit:  1073.74 MB      ← 撞上限 ⇒ 扩展被杀
+    ///   Duration:      719s            ← 只跑了 12 分钟
+    /// ```
+    /// 📏 **iOS 给每个扩展的磁盘写入预算是「24 小时 1073 MB」**（≈ 12.4 KB/s 平均）。
+    ///   ⇒ 一旦超限，系统**直接杀掉扩展** ⇒ 表现就是「**直播自己停了**」。
     ///
-    /// 我原来 `seq % 10 == 0` 才留档 ⇒ 文件清单**稀疏且滞后**，
-    /// 光看目录**分不出**"扩展还活着"（主 App 只能靠 mtime，而 mtime 属于覆盖写的
-    /// `lastframe.jpg`，一旦扩展死掉它就**冻在那里**，看不出是死的）。
+    /// ## 我踩的三个叠加错误（⛔ 逐个都已修）
+    /// | # | 错 | 倍数 |
+    /// |---|---|---|
+    /// | ① | `downscale` 没生效（renderer 默认 scale=3）⇒ "451宽"实际 **1353px** | **9×** |
+    /// | ② | 我上一轮改的「每帧都写 `frame_<seq>.jpg`」⇒ 一帧**两个文件** | **2×** |
+    /// | ③ | 全程 2fps 无脑写，而 Runner 实际 1~3 秒才要一帧 | **~4×** |
     ///
-    /// ⇒ 改成**每帧都写 `frame_<seq>.jpg`**，并**只保留最近 `keepFrames` 个**
-    ///   （避免把共享容器写爆 —— 每帧约 100~400KB，2fps）。
-    ///   ⚠️ 主 App 侧仍然优先用内存里的 `lastFrame` + **帧龄**判据（§2263），
-    ///      这个序号档是**给文件通道/诊断用的第二重证据**。
+    /// ## ✅ 修法：**每帧只写一次 `lastframe.jpg`**，并按 `minWriteInterval` 限频
+    /// ⛔ **不再逐帧留档 `frame_<seq>.jpg`** ——
+    ///   那条是我上一轮"照荔枝新文件语义"加的，**恰恰是 2× 的浪费**，
+    ///   而它的收益（"目录能看出扩展还活着"）**主 App 侧根本不需要**：
+    ///   `Runner` 用的是**内存帧 + 帧龄**判据（§2263 `lastFrameAge`），
+    ///   ⛔ 不靠扫目录。
+    /// ⚠️ 保留**低频**留档（每 30 帧 ≈ 15 秒一张）供**事后取证**，成本可忽略。
     private func writeShared(_ data: Data) {
         write(data, name: "lastframe.jpg")
-        // ⭐ 每帧都留档（照荔枝"新文件"语义）⇒ 目录本身就是"扩展还活着"的证据
-        write(data, name: "frame_\(seq).jpg")
-        trimOldFrames()
+        // ⭐ 低频留档（每 30 帧一次 ≈ 15s 一张）—— 只为事后取证，⛔ 不是每帧
+        if seq % 30 == 0 {
+            write(data, name: "frame_\(seq).jpg")
+            trimOldFrames()
+        }
     }
 
-    /// 只保留最近 `keepFrames` 个 `frame_*.jpg`（⛔ 别把共享容器写爆）
+    /// 只保留最近几个 `frame_*.jpg`（⛔ 别把共享容器写爆）
     private func trimOldFrames() {
-        let keep = 40
-        guard seq > keep else { return }
+        let keep = 6
+        guard seq > 30 * (keep + 2) else { return }
         let fm = FileManager.default
-        // 只扫最近这一小段（⛔ 不全目录遍历，省 IO）
-        for old in (seq - keep - 10)...(seq - keep) where old > 0 {
+        for k in 1...30 where (seq / 30 - k) > 0 {
+            let old = (seq / 30 - k) * 30
             let u = dir.appendingPathComponent("frame_\(old).jpg")
             if fm.fileExists(atPath: u.path) { try? fm.removeItem(at: u) }
         }
@@ -351,23 +408,51 @@ class SampleHandler: RPBroadcastSampleHandler {
         guard img.size.width > w else { return img }
         let scale = w / img.size.width
         let newSize = CGSize(width: w, height: (img.size.height * scale).rounded())
-        let r = UIGraphicsImageRenderer(size: newSize)
+        // ⛔⛔⛔ §2265 **必须显式 scale = 1.0** —— 这是「磁盘写入超限被系统杀」的头号元凶！
+        //
+        // ## 血案（真机 `.ips` 铁证）
+        // 系统报告 `PGShot.diskwrites_resource-2026-10-11-134852.ips`：
+        // ```
+        //   Event:         disk writes
+        //   Writes:        1073.95 MB over 719 seconds (1493.70 KB/s)
+        //   Writes limit:  1073.74 MB      ← 撞上限
+        //   Duration:      719s            ← 只跑了 12 分钟就被杀
+        // ```
+        //
+        // ## 为什么
+        // `UIGraphicsImageRenderer(size:)` **默认继承屏幕 scale（本机 = 3）**
+        // ⇒ 我写 `toWidth: 451` 以为得到 451px 宽的图，
+        //   实际得到 **451 × 3 = 1353px** 宽（`size` 是**点**，不是**像素**）。
+        // ⇒ 像素数是预期的 **9 倍**（3²），JPEG 体积也接近 9 倍。
+        //   📏 与真机帧尺寸**完全吻合**：拉出来的帧就是 **1353×2925**。
+        //
+        // ✅ 用 `UIGraphicsImageRendererFormat` 并把 `scale` 钉成 **1.0**
+        //    ⇒ `size` 就是**像素**，输出真的是 451×977 ⇒ 数据量降到 1/9。
+        let fmt = UIGraphicsImageRendererFormat.default()
+        fmt.scale = 1.0                      // ⭐ 关键：size = 像素，⛔ 不再乘 3
+        fmt.opaque = true                    // ⭐ 不透明 ⇒ 省掉 alpha 通道
+        let r = UIGraphicsImageRenderer(size: newSize, format: fmt)
         return r.image { _ in img.draw(in: CGRect(origin: .zero, size: newSize)) }
     }
 
     private func write(_ data: Data, name: String) {
         let dst = dir.appendingPathComponent(name)
-        let tmp = dir.appendingPathComponent(name + ".tmp")
+        // ⛔⛔⛔ §2265 **一次写入，⛔ 不再"写 tmp + replaceItemAt + 兜底再写一遍"**
+        //
+        // ## 为什么（写盘预算，见 `writeShared` 的血案报告）
+        // 旧写法对一个文件最多做**三次**落盘：
+        // ```
+        // try data.write(to: tmp, options: .atomic)      // ① 写到 tmp
+        // _ = try? FileManager.default.replaceItemAt(...) // ② 替换（又一次元数据/数据写）
+        // if !exists(dst) { try data.write(to: dst, ...) }// ③ 兜底再写一遍
+        // ```
+        // 而 iOS 的写入预算统计的是**被弄脏的 file-backed memory**（`Writes caused`），
+        // ⇒ 这种"多写一遍"直接翻倍计入预算。
+        //
+        // ✅ `Data.write(to:options:.atomic)` **本身**就是「写临时文件 + 原子重命名」，
+        //    ⇒ 一条语句即满足「读方永远看到完整文件」的语义，⛔ 不需要外层再包一层。
         do {
-            try data.write(to: tmp, options: .atomic)
-            // 原子替换（PC 端要么看到旧的完整帧，要么看到新的完整帧）
-            _ = try? FileManager.default.replaceItemAt(dst, withItemAt: tmp)
-            if FileManager.default.fileExists(atPath: tmp.path) {
-                try? FileManager.default.removeItem(at: tmp)
-            }
-            if !FileManager.default.fileExists(atPath: dst.path) {
-                try data.write(to: dst, options: .atomic)
-            }
+            try data.write(to: dst, options: .atomic)
         } catch {
             NSLog("PGShot 写帧失败: %@", String(describing: error))
         }
