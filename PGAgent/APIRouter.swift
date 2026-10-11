@@ -83,7 +83,8 @@ final class APIRouter {
                               "/keepalive/start", "/keepalive/stop", "/keepalive/state",
                               "/runlog", "/recogdiag",
                               "/files", "/file", "/write", "/mkdir", "/ble/scan",
-                              "/ble/connect", "/ble/connect-paired", "/blediag", "/ble/send", "/click", "/log"],
+                              "/ble/connect", "/ble/connect-paired", "/blediag", "/ble/send",
+                              "/click", "/swipe", "/settings", "/gotoapp", "/log"],
             ])
 
         // ⭐ 极简探活（⛔ 不碰文件系统、不做识别）—— 用来区分「App 挂了」和「handler 慢」
@@ -152,8 +153,61 @@ final class APIRouter {
             // ⭐ 先把保活打开（否则一切后台就被挂起，循环必然断）
             let ka = SilentKeepAlive.shared.start()
             runner.start(dest: r.query["dest"])
+
+            // ⭐⭐⭐⭐⭐ §2272 **跑之前必须"先切到目标 App"**（`?goto=1` 默认开）
+            //
+            // ## 为什么必须由 App 自己切（这是个"死结"，只能这么解）
+            // 手机端录屏录的是**当前前台**（不像 PC 抓投屏窗口恒等于手机屏）——
+            // 真机并排对照 `_var/_d1_side.png` 铁证：
+            // ```
+            //   左 iOS 真屏 = 控制台     右 App 帧 = 控制台     ⇒ 判 unknown（**判得对**）
+            // ```
+            // 而切 App 只能用 `open()`（要 App 在**前台**才有权发起），
+            // 可 `/run` 又必须**趁 App 在前台**发出来 ⇒ 从外面根本没法两全：
+            // ```
+            //   先发 /run ⇒ App 退后台 ⇒ open() 发不出去
+            //   先 open() ⇒ App 退后台 ⇒ /run 发不出去
+            // ```
+            // ✅ 唯一出路 = **App 自己在 `/run` 里把这件事做掉**（先起跑，再切）。
+            //
+            // ⚠️ 切换要**延迟 2 秒**：立刻切会把首帧录成"还没退干净的自己"。
+            let wantGoto = (r.query["goto"] ?? "1") != "0"
+            var gotoInfo: [String: Any] = ["requested": wantGoto]
+            if wantGoto {
+                let which = r.query["app"] ?? (cfgStore.cfg?.settings?.apps?.first ?? "kslite")
+                gotoInfo["name"] = which
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                    guard let self = self else { return }
+                    // ⭐ 与 `/gotoapp` 同一套逻辑（⛔ 不重复实现）
+                    let schemes: [String] = (which == "ks")
+                        ? ["kwai://", "kuaishou://"] : ["ksnebula://", "kwai://"]
+                    let bw = self.cfgStore.cfg?.settings?.base_w ?? 451
+                    let bh = self.cfgStore.cfg?.settings?.base_h ?? 977
+                    let yf = self.cfgStore.cfg?.settings?.y_fix ?? 4
+                    for s in schemes {
+                        guard let u = URL(string: s) else { continue }
+                        UIApplication.shared.open(u, options: [:]) { ok in
+                            self.log.log("gotoapp(自动) \(s) -> \(ok)")
+                            if ok {
+                                // 给确认框留出时间，再用 BLE 点「打开」（若它出现）
+                                Thread.sleep(forTimeInterval: 1.6)
+                                for c in BLEController.moveAndClick(x: 310, y: 520,
+                                                                     baseW: bw, baseH: bh,
+                                                                     yFix: yf) {
+                                    _ = self.ble.send(c)
+                                    usleep(120_000)
+                                }
+                            }
+                        }
+                        break        // 只试第一个（`open` 的完成回调里再决定要不要继续）
+                    }
+                }
+                gotoInfo["after_s"] = 2.0
+            }
+
             return .json(["ok": true, "started": true, "keepAlive": ka,
                           "dest": r.query["dest"] ?? cfgStore.cfg?.settings?.target ?? "center",
+                          "goto": gotoInfo,
                           "state": runner.snapshot()])
 
         case ("POST", "/runstop"):
@@ -402,6 +456,36 @@ final class APIRouter {
             let ok = nav.go(to: dest, img: img)
             return .json(["ok": ok, "dest": dest, "trace": trace])
 
+        // ⭐⭐⭐ §2272 **滑动**（`/swipe?x1=..&y1=..&x2=..&y2=..&ms=..`）
+        //
+        // 为什么必须补它：切 App 要在桌面上**翻页**找图标（快手极速版在第二页），
+        //   而原来**没有**滑动接口 ⇒ 只能用 `?cmd=D:...` 手工拼串口命令
+        //   ⇒ 脚本写起来易错，且拿不到"发了几条"的反馈。
+        // ⚠️ 坐标是**基准 451×977**，与 `/click` 同一套（⛔ 不是屏幕像素）。
+        case ("POST", "/swipe"):
+            guard let a1 = r.query["x1"], let b1 = r.query["y1"],
+                  let a2 = r.query["x2"], let b2 = r.query["y2"],
+                  let x1 = Double(a1), let y1 = Double(b1),
+                  let x2 = Double(a2), let y2 = Double(b2) else {
+                return .text("need ?x1=..&y1=..&x2=..&y2=..&ms=..", status: 400)
+            }
+            let bw = cfgStore.cfg?.settings?.base_w ?? 451
+            let bh = cfgStore.cfg?.settings?.base_h ?? 977
+            let yf = cfgStore.cfg?.settings?.y_fix ?? 4
+            let ms = Int(r.query["ms"] ?? "300") ?? 300
+            // 档位照 §2253：fast=100 / mid=220 / slow=2000
+            let speed: BLEController.SwipeSpeed =
+                ms <= 120 ? .fast : (ms >= 1000 ? .slow : .mid)
+            let cmd = BLEController.swipe(x1: x1, y1: y1, x2: x2, y2: y2,
+                                          speed: speed,
+                                          baseW: bw, baseH: bh, yFix: yf)
+            let ok = ble.send(cmd)
+            // ⭐ 滑完等它走完（`D:` 自带 ms 时长）⇒ 调用方紧接着抓帧才拿得到新画面
+            usleep(UInt32(min(3000, ms + 400)) * 1000)
+            return .json(["ok": ok, "cmd": cmd, "ms": ms, "speed": "\(speed)",
+                          "state": ble.state, "error": ble.lastError])
+
+        // ⭐ 直接发一条 HID 命令（诊断/特殊场景用；`?cmd=P:1,2` 之类）
         case ("POST", "/click"):
             guard let xs = r.query["x"], let ys = r.query["y"],
                   let x = Double(xs), let y = Double(ys) else {
@@ -575,6 +659,60 @@ final class APIRouter {
             _ = sem.wait(timeout: .now() + 6)
             log.log("openurl \(s) -> \(ok)")
             return .json(["ok": ok, "url": s])
+
+        // ⭐⭐⭐⭐⭐ §2272 **切到目标 App**（`POST /gotoapp?name=kslite|ks`）
+        //
+        // ## 为什么这是手机端**必需**的一步
+        // 手机端录屏录的是**当前前台**（不像 PC 抓投屏窗口）
+        // ⇒ 点「开始跑」时 App 在前台 ⇒ **录到的是 PGAgent 自己** ⇒ 判 `unknown`
+        //   （真机并排对照 `_var/_d1_side.png` 铁证：左=真屏、右=App 帧，**都是控制台**）
+        // ⇒ **必须先切到快手**，否则一轮都跑不了。
+        //
+        // ## 做法（两级，都有真机证据）
+        // ```
+        // ① 首选：URL scheme（`kwai://…`）⇒ iOS 弹「"PGAgent"想要打开"快手"」
+        //    ⚠️ 这个确认框**必须点「打开」**才真的切过去
+        //    ⭐ 而 BLE(HID) 点击**对系统弹窗有效**（§2272 实测：连点 5 次清掉排队弹窗）
+        //    ⇒ 本接口**自己把弹窗点掉**（发一条 P+C:L 到「打开」按钮）
+        // ② 兜底：回主屏 → 左滑翻页 → 点桌面图标（`/swipe` + `/click`）
+        // ```
+        // ⚠️ 两级都试是因为 scheme 各版本可能变（⛔ 不猜哪个一定对）。
+        case ("POST", "/gotoapp"):
+            let which = r.query["name"] ?? "kslite"
+            // ⭐ 「打开」确认框的按钮位置（真机 `_var/_grid.png` 量出，基准坐标）
+            let openBtn = (x: 310.0, y: 520.0)
+            let schemes: [String] = (which == "ks")
+                ? ["kwai://", "kuaishou://"]
+                : ["ksnebula://", "kwai://"]
+            let bw = cfgStore.cfg?.settings?.base_w ?? 451
+            let bh = cfgStore.cfg?.settings?.base_h ?? 977
+            let yf = cfgStore.cfg?.settings?.y_fix ?? 4
+
+            var opened: [String] = []
+            for s in schemes {
+                guard let url = URL(string: s) else { continue }
+                let sem = DispatchSemaphore(value: 0)
+                var ok = false
+                DispatchQueue.main.async {
+                    UIApplication.shared.open(url, options: [:]) { r in ok = r; sem.signal() }
+                }
+                _ = sem.wait(timeout: .now() + 5)
+                opened.append("\(s)->\(ok)")
+                if !ok { continue }
+                // ⭐ 等确认框弹出（它是异步的），再用 BLE 点「打开」
+                Thread.sleep(forTimeInterval: 1.6)
+                for c in BLEController.moveAndClick(x: openBtn.x, y: openBtn.y,
+                                                    baseW: bw, baseH: bh, yFix: yf) {
+                    _ = ble.send(c)
+                    usleep(120_000)
+                }
+                Thread.sleep(forTimeInterval: 2.0)
+            }
+            log.log("gotoapp \(which) ｜ 尝试: \(opened.joined(separator: " "))")
+            return .json(["ok": true, "name": which, "tried": opened,
+                          "openBtn": [openBtn.x, openBtn.y],
+                          "hint": "若没切过去 ⇒ 用 /swipe 翻页 + /click 点桌面图标（兜底路）",
+                          "state": ble.state, "error": ble.lastError])
 
         // ⭐⭐⭐ `POST /install-shortcut` —— **一站式：把 PGshot 推给 Safari 下载**
         //    ① App 自己确认 Documents 里有 PGshot.shortcut

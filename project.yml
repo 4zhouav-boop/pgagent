@@ -17,8 +17,8 @@ targets:
         CFBundleDisplayName: PGAgent
         # ⭐ 版本号**唯一来源**（界面标题从 Info.plist 读，见 AppVersion）
         #    发版时只改这里 ⇒ 界面/接口/包 三处自动一致（§2239 的教训）
-        CFBundleShortVersionString: "0.10.27"
-        CFBundleVersion: "28"
+        CFBundleShortVersionString: "0.10.30"
+        CFBundleVersion: "31"
         UILaunchScreen: {}
         # ⭐ 关键 1：让 App 的 Documents 暴露给「文件」App
         #   ⇒ 快捷指令「存储到文件」才能把截图写进来（这是「眼」的命门）
@@ -39,8 +39,31 @@ targets:
         # UIBackgroundModes:
         #   - bluetooth-central
         # ⭐ 关键 4：允许调快捷指令的 URL scheme
+        #
+        # ⭐⭐⭐ §2272 **补上快手的 scheme**（这是「点开始跑后录到自己」的解法）
+        #
+        # ## 为什么必须在这里声明
+        # `UIApplication.canOpenURL()` 对**未声明**的 scheme 一律返回 false
+        # ⇒ 实测：`kwai://` / `kuaishou://` / `ksnebula://` 全部 `ok:false`。
+        # ⚠️ 而 `open()` **不受**这个列表限制 ⇒ 它**能**把系统弹窗调起来
+        #   （实测弹出了「"PGAgent"想要打开"快手"」）——
+        #   所以两者的差别是：**`canOpenURL` 用来"探测"，必须声明**。
+        #
+        # ## 为什么需要"从 App 打开快手"
+        # 手机端录屏录的是**当前前台**（不像 PC 抓投屏窗口）⇒
+        #   点「开始跑」时 App 在前台 ⇒ **录到的是 PGAgent 自己** ⇒ 判 `unknown`
+        #   （真机并排对照 `_var/_d1_side.png` 铁证：两边都是控制台界面）。
+        # ⇒ 必须**自动切到快手**，否则一轮都跑不了。
+        #
+        # ⚠️ 切 App 时 iOS 会弹「想要打开」确认框，**必须点「打开」**；
+        #   而 BLE(HID) 点击**对系统弹窗有效**（§2272 实测：连点 5 次把排队弹窗全清掉）。
+        #   ⇒ 流程 = `open(scheme)` → 弹窗 → **用 BLE 点「打开」**。
         LSApplicationQueriesSchemes:
           - shortcuts
+          - kwai
+          - kuaishou
+          - ksnebula
+          - snssdk1112
         # 本地网络（iOS 14+ 需要，虽然我们走 BLE 不走网络，先留着）
         NSLocalNetworkUsageDescription: "与本地设备通信"
         # ⭐⭐⭐ 「活」—— 后台音频（§2230 实测必须）
