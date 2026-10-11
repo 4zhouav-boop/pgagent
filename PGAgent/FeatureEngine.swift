@@ -170,13 +170,49 @@ final class FeatureEngine {
             if Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH) {
                 // ── ① 先等 30~60s 随机（PC §1541 用户口径）──────────────
                 //    ⛔ 不许"进去就点 ✕"（PC 原话：「进去就点X 卡死 出去进来像傻逼一样，最后点X」）
-                //    ⚠️ 只在**倒计时还在走**时等；已到账（「已成功领取」）就不必再等 60s。
+                //
+                // ## ⛔⛔ §2278 **绝不能"盲等"**（用户令，逐字）
+                // > 「**广告结束了你不点了。**」
+                // 我上一版是 `sleepWithCancel(waitS)` —— **盲等 51 秒，期间不看画面**，
+                // 而真机 `_var/_wait1_n.png` 铁证：胶囊早已是 **`✓ 已成功领取523金币`**
+                // （广告**已结束**）却还在傻等 ⇒ **该点的时候不点**。
+                //
+                // ✅ 照 PC 的等待方式（L9849~L9856）：**边等边看顶栏**，
+                //    一旦读到「**已成功领取**」⇒ **立即跳出等待**去点 ✕。
+                //    PC 原文：
+                //    ```python
+                //    for k in range(_rounds):
+                //        ...
+                //        if "已成功领取" in top3:
+                //            print("G3 倒计时已结束（第 %d 次检查）"); break
+                //        wait(3.0)
+                //    ```
+                //    ⭐ 但**轮数是按胶囊里的 N 动态定的**（`_need = N + 20`）——
+                //       ⛔ 不是盲等固定 51 秒。
                 var cur = img
-                if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH) {
-                    let waitS = Double.random(in: 30...60)
-                    log("§adbox ⛔ 广告页 ⇒ 先等 \(Int(waitS))s（30~60 随机，照 PC §1541；⛔ 不点 ✕）")
-                    sleepWithCancel(waitS)
-                    if let im2 = grab() { cur = im2 }
+                let waitS = Double.random(in: 30...60)
+                log("§adbox ⛔ 广告页 ⇒ 先等最多 \(Int(waitS))s（30~60 随机，照 PC §1541）"
+                    + "；⭐ **边等边看顶栏**，广告一结束就立刻收奖励（⛔ 不盲等）")
+                var slept = 0.0
+                while slept < waitS, !isCancelled() {
+                    let d = min(2.0, waitS - slept)
+                    Thread.sleep(forTimeInterval: d)
+                    slept += d
+                    guard let im2 = grab() else { break }
+                    cur = im2
+                    // ⭐ 广告结束的两个信号（照 PC）：
+                    //    ① 顶栏出现「已成功领取」= 奖励已到账 ⇒ **立即去点 ✕**
+                    //    ② 顶栏**没有倒计时数字了** ⇒ 倒计时走完 ⇒ 也去点
+                    let t2 = Self.adTopText(cur, rec: rec, bw: baseW, bh: baseH)
+                    if t2.contains("已成功领取") {
+                        log("   §adbox ✅ 顶栏「已成功领取」（等了 \(Int(slept))s）"
+                            + " ⇒ **广告结束，立即收奖励**（⛔ 不再盲等）")
+                        break
+                    }
+                    if !Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH) {
+                        log("   §adbox ✅ 顶栏已无倒计时（等了 \(Int(slept))s）⇒ **倒计时走完，收奖励**")
+                        break
+                    }
                 }
 
                 // ── ② G3：**等倒计时结束**才许动手（PC L9814~L9858）────────
@@ -257,23 +293,39 @@ final class FeatureEngine {
                    Self.looksLikeAdPage(i2, rec: rec, nav: nav, bw: baseW, bh: baseH) {
                     // ⛔⛔ **必须先等倒计时结束，才许点 ✕**（用户令 + PC G3）
                     // > 「**倒计时是广告没结束 你没结束去点 不是傻逼。广告结束了你不点了。**」
+                    // ⚠️ 而且**不能盲等**（§2278）：边等边看顶栏，广告一结束就立刻去点。
                     var cur = i2
-                    if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH) {
-                        let waitS = Double.random(in: 30...60)
-                        log("§adbox ⛔ 已进广告页 ⇒ 先等 \(Int(waitS))s（30~60 随机，照 PC §1541）")
-                        sleepWithCancel(waitS)
-                        if let im3 = grab() { cur = im3 }
+                    let waitS = Double.random(in: 30...60)
+                    log("§adbox ⛔ 已进广告页 ⇒ 先等最多 \(Int(waitS))s（30~60 随机，照 PC §1541）")
+                    var slept = 0.0
+                    while slept < waitS, !isCancelled() {
+                        let d = min(2.0, waitS - slept)
+                        Thread.sleep(forTimeInterval: d)
+                        slept += d
+                        guard let im3 = grab() else { break }
+                        cur = im3
+                        let t3 = Self.adTopText(cur, rec: rec, bw: baseW, bh: baseH)
+                        if t3.contains("已成功领取") {
+                            log("   §adbox ✅ 顶栏「已成功领取」（等 \(Int(slept))s）"
+                                + " ⇒ 广告结束，立即收奖励")
+                            break
+                        }
+                        if !Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH) {
+                            log("   §adbox ✅ 倒计时已走完（等 \(Int(slept))s）⇒ 收奖励")
+                            break
+                        }
                     }
+                    // ⭐ G3 余量：倒计时若还没走完（长广告），再补等（照 PC `N+20s` 余量）
                     var waited = 0.0
                     while Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH),
-                          waited < 90, !isCancelled() {
+                          waited < 60, !isCancelled() {
                         sleep(3.0)
                         waited += 3.0
                         guard let im3 = grab() else { break }
                         cur = im3
-                        log("   §adbox G3 等倒计时结束（已等 \(Int(waited))s；⛔ 没结束不点 ✕）")
+                        log("   §adbox G3 再等倒计时（已等 \(Int(waited))s；⛔ 没结束不点 ✕）")
                     }
-                    log("§adbox G3 倒计时结束（等 \(Int(waited))s）⇒ **现在才点 ✕ 收奖励**")
+                    log("§adbox G3 倒计时结束 ⇒ **现在才点 ✕ 收奖励**")
                     for _ in 0..<6 {
                         if isCancelled() { break }
                         guard let im4 = grab() else { break }
@@ -462,6 +514,19 @@ final class FeatureEngine {
             return true
         }
         return false
+    }
+
+    /// ⭐ 读**顶栏原文**（广告胶囊那一带）—— PC `txt(img, BOX_TOP)` 的等价物
+    ///
+    /// PC `BOX_TOP = (0, 62, 451, 140)`；所有广告判据都基于它：
+    ///   · `is_ad_page`  = `("可领取" in t) or ("已成功领取" in t)`
+    ///   · 到账闸        = 还有没有 `\d+秒 / \d+s`
+    /// ⇒ 手机端统一用本函数取原文，⛔ 不各写一份（⛔ 免得判据漂移）。
+    static func adTopText(_ img: UIImage, rec: Recognizer,
+                          bw: Double, bh: Double) -> String {
+        rec.ocrRegion(img, rect: CGRect(x: 0, y: 62, width: bw, height: 78),
+                      minConfidence: 0.3)
+            .map(\.0).joined()
     }
 
     /// ⭐⭐⭐ 倒计时**还在走**吗 —— 照 PC 的「到账闸」（`_1377_ad_loop.py:4342`）**逐字**。
