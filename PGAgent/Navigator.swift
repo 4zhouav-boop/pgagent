@@ -479,6 +479,40 @@ final class Navigator {
                 continue
             }
 
+            // ⭐⭐⭐⭐⭐ §2314 **通用模态弹窗 ✕（`ModalX`）—— 它一直是死代码，现在接上**
+            //
+            // ## ⛔ 真机审计发现的漏洞（本轮）
+            // `ModalX.swift` 逐字移植了 PC 的 `find_gray_x`（暖灰圆钮 ✕，
+            // 阈值与紧凑度闸都是 PC 真机标定的），
+            // **但全项目 0 个引用** —— 它从来没被调用过。
+            // 而 PC 把这条判据当**主路**（`B2C_LEGS` 里的 `modal_x`，`_1377:3489`），
+            // 用它提代了一堆每弹窗一块 png 的打补丁做法（用户原话：
+            // 「**加你麻痹的补丁 闸口**」）。
+            // ⇒ iOS 缺这条腿，意味着**没有任何“通用”的弹窗出路**，
+            //   只能靠一个个命名模板 ⇒ 换版式就卡死。
+            //
+            // ⛔ 安全性：原地方只在**前置闸命中时**才跑（即 `require` 非空且命中），
+            //   所以不会在普通页面上乱点 ✕；且仍然只认“暖灰圆钮”这一个形态。
+            if it.element == "modal_x" {
+                if let c = ModalX.find(img) {
+                    funnelLast[it.element] = now
+                    log("   §funnel modal_x（通用暖灰圆钮 ✕）@(\(Int(c.x)),\(Int(c.y)))")
+                    tapPoint(Double(c.x), Double(c.y))
+                    return true
+                }
+                continue
+            }
+            // ⭐ 券弹窗 ✕（PC `find_coupon_x`，ROI 在屏幕中下）—— 同一个判据换 ROI
+            if it.element == "coupon_x" {
+                if let c = ModalX.findCoupon(img) {
+                    funnelLast[it.element] = now
+                    log("   §funnel coupon_x（券弹窗 ✕）@(\(Int(c.x)),\(Int(c.y)))")
+                    tapPoint(Double(c.x), Double(c.y))
+                    return true
+                }
+                continue
+            }
+
             if detect(it.element, img: img) != nil {
                 funnelLast[it.element] = now
                 // ⭐⭐ **漏斗一律用原子点击**（`Q:x,y`）—— 照电脑端 `_ext_q` 的语义
