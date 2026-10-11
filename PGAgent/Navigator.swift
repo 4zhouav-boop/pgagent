@@ -291,7 +291,8 @@ final class Navigator {
                                      speed: .mid, baseW: baseW, baseH: baseH, yFix: yFix)])
             Thread.sleep(forTimeInterval: 1.4)
             // ⭐ 翻页后同样**等新帧**
-            if let img = waitFresh(cur), let (pt, label) = findIcon(img) {
+            // ⛔ §2284: v0.10.42 编译失败的残留 —— 这里已换成 waitFrame（按"时间"等，⛔ 不按"画面变化"等）。
+            if let img = waitFrame(), let (pt, label) = findIcon(img) {
                 log("      ✅ 第 \(k) 次翻页命中「\(label)」⇒ 点 (\(Int(pt.x)),\(Int(pt.y)))")
                 hid(BLEController.moveAndClick(x: Double(pt.x), y: Double(pt.y),
                                                baseW: baseW, baseH: baseH, yFix: yFix))
