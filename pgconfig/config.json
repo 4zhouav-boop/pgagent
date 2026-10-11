@@ -1354,6 +1354,30 @@
         "  min_hits=2 on purpose: these words are generic enough that one alone could false-positive",
         "  (e.g. a game ad page). Requiring two makes it specific to this tutorial layout."
       ]
+    },
+    "draft_marker": {
+      "desc": "草稿箱页（快手拍摄的草稿箱）—— 顶栏就是「草稿箱」",
+      "roi": [
+        0,
+        55,
+        451,
+        150
+      ],
+      "match": "ocr",
+      "words": [
+        "草稿箱"
+      ],
+      "min_hits": 1,
+      "_doc": [
+        "section 2313: ported from PC (_1377_ad_loop.py:2473 draft_marker, PAGES['draft']).",
+        "  This page type was MISSING on iOS entirely -- an audit of PC PAGES vs the iOS config",
+        "  found 'draft' present in PC but absent here. Same class of bug as the livestream and",
+        "  external-landing gaps: the anchor table simply did not have the page.",
+        "  PC's detector is exact: top bar contains 草稿箱.",
+        "  Why it matters: real-device logs recorded the phone landing in 草稿箱 and then being",
+        "  unable to recover -- '点底栏首页也救不回来' / '双 App 循环断在第 2 轮' (PC section 1752).",
+        "  The page has a back arrow at top-left, so the exit leg is back_arrow."
+      ]
     }
   },
   "pages": {
@@ -1602,6 +1626,22 @@
         "section 2311: new page type for Kuaishou in-app mini-games.",
         "  Exit order: the in-page back arrow first, else the '<快手' breadcrumb, else the home tab.",
         "  The page has no top-bar nav anchors of its own, so these are the only ways out."
+      ]
+    },
+    "draft": {
+      "desc": "草稿箱页（快手拍摄的草稿箱）—— 左上有一个返回箭头",
+      "check": [
+        "draft_marker"
+      ],
+      "parent": "feed",
+      "go": "back_arrow",
+      "alts": [
+        "tab_home",
+        "breadcrumb"
+      ],
+      "_doc": [
+        "section 2313: ported from PC PAGES['draft'] (check=draft_marker, parent=feed, go=back_arrow).",
+        "  Exit: the top-left back arrow; the home tab is the fallback."
       ]
     }
   },
