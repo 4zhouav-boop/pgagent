@@ -94,7 +94,7 @@ final class FeatureEngine {
 
         var done: [String] = []
         for k in planned {
-            if isCancelled { log("§feat ⛔ 被中断"); break }
+            if isCancelled() { log("§feat ⛔ 被中断"); break }
             log("§feat ▶️ 开始【\(Self.cn(k))】")
             beat(["phase": "feat-start", "feat": k, "done": done])
 
@@ -140,7 +140,7 @@ final class FeatureEngine {
         var n = 0
         var emptyRounds = 0
         while n < count {
-            if isCancelled { log("§adbox ⛔ 被中断"); break }
+            if isCancelled() { log("§adbox ⛔ 被中断"); break }
             guard let img = grab() else { log("§adbox ⛔ 抓帧失败"); break }
             beat(["phase": "adbox-step", "n": n, "of": count])
 
@@ -198,7 +198,7 @@ final class FeatureEngine {
     private func dwellOnAd(_ seconds: Double) {
         var left = seconds
         while left > 0 {
-            if isCancelled { return }
+            if isCancelled() { return }
             let d = min(0.5, left)
             Thread.sleep(forTimeInterval: d)
             left -= d
@@ -228,7 +228,7 @@ final class FeatureEngine {
         let end = Date().addingTimeInterval(minutes * 60)
         var n = 0, hits = 0
         while Date() < end {
-            if isCancelled { log("§feed ⛔ 被中断"); break }
+            if isCancelled() { log("§feed ⛔ 被中断"); break }
             guard let img = grab() else { log("§feed ⛔ 抓帧失败"); break }
             n += 1
             beat(["phase": "feed-step", "n": n, "hits": hits,
@@ -293,7 +293,7 @@ final class FeatureEngine {
         let end = Date().addingTimeInterval(minutes * 60)
         var rounds = 0, used: [String] = []
         while Date() < end {
-            if isCancelled { log("§tag ⛔ 被中断"); break }
+            if isCancelled() { log("§tag ⛔ 被中断"); break }
             // ⛔ 不连着搜同一个词（PC 看最近 6 个）
             guard let word = pickWord(words, used: used, recent: 6) else {
                 log("§tag 词池用尽 ⇒ 结束")
@@ -342,7 +342,7 @@ final class FeatureEngine {
         let end = Date().addingTimeInterval(minutes * 60)
         var rounds = 0, used: [String] = []
         while Date() < end {
-            if isCancelled { log("§mall ⛔ 被中断"); break }
+            if isCancelled() { log("§mall ⛔ 被中断"); break }
             // ⭐ 浏览要留**时间下限**（PC L7664：进商城→打字→落中文→搜索本身 ~0.7 分钟）
             let leftMin = end.timeIntervalSinceNow / 60.0
             if leftMin < browseMin {
@@ -378,7 +378,7 @@ final class FeatureEngine {
     private func ensureInCenter(tag: String) -> Bool {
         guard let cfg = cfgStore.cfg else { return false }
         for k in 0..<8 {
-            if isCancelled { return false }
+            if isCancelled() { return false }
             guard let img = grab() else { return false }
             let here = nav.pageHere(img) ?? "unknown"
             if here == (cfg.settings?.target ?? "center") {
@@ -403,7 +403,7 @@ final class FeatureEngine {
     /// ⭐ 送到某个已知入口态（= PC `_ensure_entry_state(want:)`）
     private func ensureEntryState(want: String, tag: String) -> Bool {
         for k in 0..<3 {
-            if isCancelled { return false }
+            if isCancelled() { return false }
             guard let img = grab() else { return false }
             let here = nav.pageHere(img) ?? "unknown"
             if here == want {
@@ -420,7 +420,7 @@ final class FeatureEngine {
     /// ⭐ 进信息流（= PC `goto_feed`）
     private func gotoFeed(tag: String) -> Bool {
         for _ in 0..<3 {
-            if isCancelled { return false }
+            if isCancelled() { return false }
             guard let img = grab() else { return false }
             if nav.pageHere(img) == "feed" { return true }
             if nav.runFunnel(img) { sleep(1.0); continue }
@@ -435,7 +435,7 @@ final class FeatureEngine {
     /// ⭐ 打开搜索页（**可重入**：已在搜索/结果页 ⇒ 直接算成功）
     private func openSearch(tag: String) -> Bool {
         for _ in 0..<3 {
-            if isCancelled { return false }
+            if isCancelled() { return false }
             guard let img = grab() else { return false }
             if nav.detect("search_page", img: img) != nil { return true }
             if nav.runFunnel(img) { sleep(1.0); continue }
@@ -448,7 +448,7 @@ final class FeatureEngine {
     /// ⭐ 进小店首页（可重入）
     private func enterMall(tag: String) -> Bool {
         for _ in 0..<4 {
-            if isCancelled { return false }
+            if isCancelled() { return false }
             guard let img = grab() else { return false }
             if nav.pageHere(img) == "mall"
                 || nav.detect("mall_entry", img: img) != nil { return true }
@@ -587,7 +587,7 @@ final class FeatureEngine {
     private func browseResults(until end: Date, tag: String) {
         var n = 0
         while Date() < end {
-            if isCancelled { return }
+            if isCancelled() { return }
             guard let img = grab() else { return }
             guard let hit = nav.detect("result_card", img: img) else {
                 log("   §\(tag) 没有更多卡片 ⇒ 结束浏览")
@@ -644,7 +644,7 @@ final class FeatureEngine {
 
     private func sleepWithCancel(_ seconds: Double) {
         var left = seconds
-        while left > 0 && !isCancelled {
+        while left > 0 && !isCancelled() {
             let d = min(0.2, left)
             Thread.sleep(forTimeInterval: d)
             left -= d
