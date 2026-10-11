@@ -267,6 +267,15 @@ struct PGConfig: Codable {
         var desc: String?
         var check: [String]?
         var not: [String]?
+        /// ⭐⭐ §2275 **并列判据**（任一命中即算本页型）—— 用于**抗 OCR 错字**
+        ///
+        /// 为什么需要（真机血案）：`ad_video` 原来只认 `ad_capsule`
+        /// （词「可领取/已成功领取/金币」），而真机胶囊是 `已成功领取438金币 ×`
+        /// ⇒ OCR 读不出 ⇒ 判 `unknown` ⇒ **「广告页放行」失效** ⇒ 空转到停手。
+        /// PC 早记过同类错字（§1543：把「可领取」读成「善厨领取」）并给出对策：
+        /// 「补一条**抗错字**的判据：顶栏同时含「广告」+「金币」」。
+        /// ⇒ 这里用 `also_ok` 表达"**并列的、同样可信的**判据"。
+        var also_ok: [String]?
         var parent: String?
         var go: String?
         /// ⭐⭐ **备用出路**（§2247 移植 PC `PAGES[...]["alts"]`）

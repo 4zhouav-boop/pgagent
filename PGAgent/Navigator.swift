@@ -137,6 +137,14 @@ final class Navigator {
             guard let checks = p.check else { continue }
             var ok = true
             for c in checks where detect(c, img: img) == nil { ok = false; break }
+            // ⭐⭐ §2275 **并列判据 `also_ok`**（任一命中即算本页型）——
+            //    用于**抗 OCR 错字**（见 `ConfigStore.Page.also_ok` 的说明）。
+            //    真机血案：`ad_video` 只认 `ad_capsule`，而真机胶囊 OCR 读不出
+            //    ⇒ 判 `unknown` ⇒ **「广告页放行」失效** ⇒ 空转到停手。
+            //    ✅ 补 `ad_mark`（词「广告」，实测命中）当并列判据。
+            if !ok, let alts = p.also_ok, !alts.isEmpty {
+                ok = alts.contains { detect($0, img: img) != nil }
+            }
             if !ok { continue }
             if let nots = p.not {
                 for n in nots where detect(n, img: img) != nil { ok = false; break }
