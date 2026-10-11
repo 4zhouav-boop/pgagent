@@ -71,7 +71,16 @@ final class Navigator {
             let h = rec.findWords(img, words: words, roi: r,
                                   minHits: e.min_hits ?? 1,
                                   minConfidence: minConf)
-            if var hh = h { hh.name = name; return hh }
+            // ⭐ §2307 **否定词闸**（见 `Element.not_words`）
+            if var hh = h {
+                let ev = hh.evidence
+                if let bad = e.not_words, !bad.isEmpty,
+                   bad.contains(where: { ev.contains($0) }) {
+                    return nil
+                }
+                hh.name = name
+                return hh
+            }
             return nil
         case "template":
             let names = e.templates ?? []
@@ -105,20 +114,28 @@ final class Navigator {
     /// ## 排序规则（严格程度：**具体 → 宽泛**）
     /// ```
     /// ① center      —— 最具体（顶栏多个金币锚点）
-    /// ② mall        —— ⭐ 必须在 feed 前（PC 血案）
-    /// ③ featured / feed / msg —— 底栏各 tab
-    /// ④ deeppage / darkpage   —— 只靠一个返回键，**最宽泛 ⇒ 最后**
+    /// ② ext_landing —— ⭐ 外部落地页：靠"京东试用/试用频道"等**独有词** ⇒ 必须在 feed 前
+    /// ③ mall        —— ⭐ 必须在 feed 前（PC 血案）
+    /// ④ featured / feed / msg —— 底栏各 tab
+    /// ⑤ deeppage / darkpage   —— 只靠一个返回键，**最宽泛 ⇒ 最后**
     /// ```
+    /// ⭐ §2307 **真机血案：装了 ext_landing 后第一次验证就被 feed 抢了**
+    ///   手机停在京东试用落地页，而那页的底部分类栏**也有「首页」字样**
+    ///   ⇒ `feed`（`check:[tab_home]`）抢在前面命中 ⇒ 判成 `feed` ⇒ 走 `coin_ball`
+    ///   ⇒ 在外部页上找红包球（当然找不到）⇒ 卡死。
+    ///   ⛔ 这与 §2247 记的是**同一类**（当时是 mall 被 feed 抢："商城页也有底栏首页"）。
+    ///   📏 一句话：**底栏信号对"我在哪"没有区分度**
+    ///      ⇒ 凡靠"页面独有识别性"的页型，必须排在**只靠底栏**的页型之前。
     /// ⚠️ `ad_video` 是**孤岛**（`island:true`）⇒ 不参与"我在哪"（见下）
     static let pageOrder: [String] = [
         "center",
+        "ext_landing",   // ⭐ 必须在 feed 之前（外部页底部也有「首页」）
         "mall",          // ⭐ 必须在 feed 之前
         "featured",
         "feed",
         "msg",
         "deeppage",
         "darkpage",
-        "ext_landing",
         "draft",
         "live",
         "ad_video",      // 孤岛（会被跳过）
