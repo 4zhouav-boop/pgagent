@@ -87,8 +87,11 @@ class SampleHandler: RPBroadcastSampleHandler {
     ///    本轮**把它反过来**：**HTTP 是主路**（省预算），**落盘是兜底**（保可用）。
     ///    ⚠️ 原因就是"预算是硬的、而 App 大部分时间活着"这个事实（§2263 实测后台 HTTP 通）。
     private var lastPostOK = false
-    /// ⭐ §2266 **上次落盘的时间**（落盘兜底的硬限速用）
+    /// ⭐ §2266 **上次落盘的时间**（诊断用；⛔ 不再用它限速 ——
+    ///    见 `writeSharedFallback`：固定时间间隔不可靠，改用**字节预算**）
     private var lastDiskWrite = Date.distantPast
+    /// ⭐ 落盘记账（滑动窗口：[时间, 字节数]）—— 字节预算的账本
+    private var diskWriteLog: [(t: Date, bytes: Int)] = []
 
     /// ⭐⭐⭐⭐⭐ **复用一个 `CIContext`**（⛔⛔ 绝不每帧新建！）
     ///
@@ -315,27 +318,57 @@ class SampleHandler: RPBroadcastSampleHandler {
         }
     }
 
-    /// ⭐⭐⭐⭐⭐ §2266 **落盘兜底**（带**硬限速** ⇒ 结构上不可能撑爆预算）
+    /// ⭐⭐⭐⭐⭐ §2266 **落盘兜底** —— 用**字节预算**限速（⛔ 不是固定时间间隔）
     ///
-    /// ## 为什么必须有"硬限速"这一层（⛔ 不能只靠"POST 成功就不写"）
-    /// 「POST 成功就不写盘」只在**主 App 活着**时成立。而 §2263 实测：
-    /// App 退后台**有时**仍通、**有时**被挂起 ⇒ POST 会**时通时不通**。
-    /// ⇒ 若不做限速，POST 一失败就回到"每帧写盘" ⇒ **预算又被撑爆**（前面的血案重演）。
+    /// ## ⛔ 为什么不能用"固定 5 秒"（真机耐久观察逮到的）
+    /// 我第一版按"单帧 17.9 KB"算出 5s 间隔 ⇒ 17.9/5 = 3.6 KB/s，看着很宽裕。
+    /// 但**耐久日志**（`_var/_endurance.log`）显示真实帧大小**随画面内容剧烈变化**：
+    /// ```
+    ///   +0min  快手金币中心（大片纯色）  bytes = **17.9 KB**
+    ///   +6min  美团广告页（画面复杂）    bytes = **62.4 KB**   ← 3.5 倍！
+    /// ```
+    /// ⇒ 62.4 KB / 5s = **12.5 KB/s** —— 与预算 **12.73 KB/s** 几乎贴着，
+    ///   **余量 ≈ 0** ⇒ 只要广告页多停一会儿，**又会被杀**（回到原点）。
+    /// 📏 **教训：限速必须按"最坏帧"算，或者干脆按字节记账 —— ⛔ 不能按平均帧。**
     ///
-    /// ## 限速怎么定（算出来的，⛔ 不是拍的）
+    /// ## ✅ 做法：**滑动窗口字节预算**
     /// ```
-    ///   iOS 预算      : 1073.74 MB / 86400s = **12.73 KB/s**
-    ///   单帧（灰度）  : 实测约 **35~45 KB**（彩色的 ~1/3；真机彩色实测 65.4 KB）
-    ///   ⇒ 最小落盘间隔 T 必须满足：单帧 / T < 12.73 KB/s
-    ///        45 KB / T < 12.73  ⇒  T > 3.5s
-    ///   ⇒ 取 **T = 5s**（余量 ~1.4×）：45 KB / 5s = **9 KB/s** ✅ 进预算
+    ///   最近 windowS 秒内已写 bytesInWindow 字节
+    ///   预算预算 budgetS 秒内最多写 budgetBytes
+    ///   ⇒ 只有 (bytesInWindow + 本帧) 不超过"按时间比例摊到的额度"时才写
     /// ```
-    /// ⭐ 即**最坏情况**（HTTP 全程不通、连续跑 24h）也只用到预算的 ~70%。
-    /// ⚠️ 代价：HTTP 不通时帧龄最坏 5s ⇒ 已把 `loop_frame_max_age` 设为 **7.0s** 容纳它。
+    /// ⭐ 好处：**自适应**。大帧自动被压得更稀，小帧可以写得勤 ——
+    ///   ⛔ 不需要我去猜"单帧多大"，也⛔ 不会因为画面变复杂就爆预算。
+    ///
+    /// ## 参数（留 ~2× 余量）
+    /// ```
+    ///   iOS 预算        : 1073.74 MB / 86400s = 12.73 KB/s
+    ///   我们按预算的 50% 记账 : **6.4 KB/s**  ⇒ 余量 2×
+    ///   窗口             : 60s ⇒ 窗口额度 6.4 × 60 = **384 KB**
+    /// ```
+    /// ⇒ 62 KB 的广告帧在 60s 窗口里最多写 6 张（≈10s 一张）⇒ 约 **6.2 KB/s** ✅
+    ///   ⚠️ 代价：HTTP 全断时帧龄最坏 ~10s。
+    ///      ⇒ 那属于"降级模式"（App 挂起时本来也跑不了闭环），
+    ///        已把 `loop_frame_max_age` 的语义限定为**只在 HTTP 正常时**要求新鲜。
     private func writeSharedFallback(_ data: Data) {
         let now = Date()
-        guard now.timeIntervalSince(lastDiskWrite) >= Self.minDiskInterval else { return }
-        lastDiskWrite = now
+        // ① 滚动窗口：丢掉过期的记账
+        let cutoff = now.addingTimeInterval(-Self.budgetWindowS)
+        while let first = diskWriteLog.first, first.t < cutoff {
+            diskWriteLog.removeFirst()
+        }
+        let used = diskWriteLog.reduce(0) { $0 + $1.bytes }
+        // ② 窗口额度：**满窗口额度**（窗口内累计不超过它即可）
+        //    ⚠️ 不做"按已过去时间比例放行"的细化 —— 那会让**启动瞬间**放大帧
+        //       （窗口刚空、比例小 ⇒ 反而更容易放行大帧）。朴素窗口额度更安全、更好懂。
+        let allowance = Double(Self.budgetBytesPerWindow)
+        guard Double(used + data.count) <= allowance else {
+            NSLog("PGShot 落盘**被字节预算拦下**（窗口已用 %.0f KB + 本帧 %.0f KB > 额度 %.0f KB）⇒ 本帧不写",
+                  Double(used) / 1024.0, Double(data.count) / 1024.0, allowance / 1024.0)
+            return
+        }
+        // ③ 允许 ⇒ 写，并记账
+        diskWriteLog.append((t: now, bytes: data.count))
         write(data, name: "lastframe.jpg")
         // ⭐ 低频留档（每 30 帧一次）—— 只为事后取证，⛔ 不是每帧
         if seq % 30 == 0 {
@@ -344,8 +377,14 @@ class SampleHandler: RPBroadcastSampleHandler {
         }
     }
 
-    /// 落盘最小间隔（秒）—— 由 iOS 写入预算反推，见 `writeSharedFallback`
-    private static let minDiskInterval: Double = 5.0
+    /// ⭐ 字节预算（§2266）—— 按 iOS 写入预算的 **50%** 记账 ⇒ 留 **2×** 余量
+    ///
+    /// ```
+    ///   iOS 预算 12.73 KB/s ⇒ 我们用 6.4 KB/s
+    ///   窗口 60s ⇒ 窗口额度 = 6.4 × 60 = 384 KB
+    /// ```
+    private static let budgetWindowS: Double = 60
+    private static let budgetBytesPerWindow: Int = 384 * 1024
 
     // MARK: - 工具
 
@@ -445,7 +484,8 @@ class SampleHandler: RPBroadcastSampleHandler {
         _ = sem.wait(timeout: .now() + 1.2)
         lastPostOK = ok
         if !ok {
-            NSLog("PGShot POST 未成功 ⇒ 本帧转落盘兜底（限速 %.0fs）", Self.minDiskInterval)
+            NSLog("PGShot POST 未成功 ⇒ 本帧按**字节预算**决定是否落盘（窗口 %.0fs / 额度 %.0f KB）",
+                  Self.budgetWindowS, Double(Self.budgetBytesPerWindow) / 1024.0)
         }
     }
 
