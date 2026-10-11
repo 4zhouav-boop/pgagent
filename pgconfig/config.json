@@ -1378,6 +1378,53 @@
         "  unable to recover -- '点底栏首页也救不回来' / '双 App 循环断在第 2 轮' (PC section 1752).",
         "  The page has a back arrow at top-left, so the exit leg is back_arrow."
       ]
+    },
+    "chest_float": {
+      "desc": "金币中心右下角的宝箱浮件（⭐ 与「看广告得金币」按条轮换的另一个入口）",
+      "roi": [
+        295,
+        870,
+        451,
+        977
+      ],
+      "match": "ocr",
+      "words": [
+        "点击领",
+        "点可领",
+        "宝箱",
+        "开宝箱",
+        "立即开启"
+      ],
+      "min_hits": 1,
+      "_doc": [
+        "section 2315: ported from PC (BOX_FLOAT_BAND=(295,870,451,977), BOX_FLOAT_KEYS).",
+        "  PC measured the float at scr(392,950).",
+        "  Why it matters: the user explicitly asked for this rotation --",
+        "    'I said to rotate between the chest and the other one' -- and the iOS FeatureEngine",
+        "  was reading settings.entry ('auto') but NEVER USING IT, so the chest leg simply",
+        "  did not exist. PC click_chest_entry: tap float -> panel -> tap CTA -> ad chain.",
+        "  PC also has a shape fallback BOX_FLOAT_RX = r'\\d+\\s*金币' in the main band",
+        "  (two real frames had different wording); the literal key list is tried first."
+      ]
+    },
+    "chest_cta": {
+      "desc": "宝箱面板里的 CTA（点了才进广告链）",
+      "roi": [
+        60,
+        600,
+        430,
+        720
+      ],
+      "match": "ocr",
+      "words": [
+        "去看广告",
+        "去看视频"
+      ],
+      "min_hits": 1,
+      "_doc": [
+        "section 2315: PC BOX_CTA_BAND=(60,600,430,720), BOX_CTA_KEYS=('去看广告','去看视频').",
+        "  PC measured the panel CTA at y=661."
+      ]
     }
   },
   "pages": {
