@@ -584,6 +584,40 @@ final class Navigator {
             } else {
                 acted = tap(g, img: img)
             }
+
+            // ⭐⭐⭐⭐⭐ §2306 **直播间/视频类页面：「画面变了」不能当成功的判据**
+            //
+            // ## 真机血案（v0.10.43 实测 trace）
+            // ```
+            //   §gesture 左边缘右滑返回（B:）
+            //   §nav 在 live ⇒ back_edge **有效**（画面已变）   ← ⛔ 反复了 20+ 次
+            // ```
+            // 而手机**始终停在直播间**。根因：
+            //   直播间本身在**放视频** ⇒ 两帧永远不同
+            //   ⇒ `screenChanged()` **恒 true** ⇒ 每条腿都被认为“有效” ⇒ **永远不会换下一条/不会判失败**
+            //   ⇒ 卡死。
+            // 📏 这正是 PC 记过的同一类坑（`_1377_ad_loop.py:9474`：
+            //   “用连续两帧一模一样判页面渲染完”在动态画面上**不成立**）。
+            //
+            // ✅ 正解：对这类页型，判据要看“**目标页型是否真的消失了**”，
+            //   ⛔ 不是看“画面有没有变”。
+            let isMotionPage = (page == "live")
+            if isMotionPage {
+                let deadline2 = Date().addingTimeInterval(4.0)
+                var leftPage = false
+                while Date() < deadline2 {
+                    Thread.sleep(forTimeInterval: 0.6)
+                    guard let q = grab() else { break }
+                    if detect("live_marker", img: q) == nil { leftPage = true; break }
+                }
+                if leftPage {
+                    log("   §nav 在 \(page) ⇒ \(g) **有效**（已离开直播间）")
+                    return (true, g, true)
+                }
+                log("   §nav 在 \(page) ⇒ \(g) **没离开**（仍命中 live_marker）⇒ 记死这条腿（⛔ 不重复）")
+                markDead(page, g)
+                continue
+            }
             guard acted else {
                 log("   §nav 在 \(page) 想点 \(g) 但**没找到** ⇒ 记死这条腿")
                 markDead(page, g)
