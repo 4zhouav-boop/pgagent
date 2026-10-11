@@ -15,7 +15,7 @@
     "base_w": 451,
     "base_h": 977,
     "y_fix": 4,
-    "ocr_min_confidence": 0.5,
+    "ocr_min_confidence": 0.3,
     "template_threshold": 0.8,
     "max_steps": 12,
     "_loop_doc": [
