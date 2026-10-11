@@ -583,13 +583,35 @@ final class FeatureEngine {
                 log("   §\(tag) ✅ 已在任务中心（第 \(k + 1) 步）")
                 return true
             }
-            // ⛔ 广告页放行（用户令）—— 但**交接点**上「广告页」不等于「回中心」
+            // ⛔⛔ **广告页必须最先放行**（照 PC `ensure_in_center` L8955 `return True`）
+            //
+            // ⚠️ 顺序**不能反**：漏斗里有 `pill_x`（顶栏胶囊 ✕）⇒
+            //   若先跑漏斗，它会**把正在看的广告关掉** —— 而用户令是
+            //   「**谁让你强退的，都是跑循环广告**」（§1534）⇒ 广告页**只等时间，⛔ 不点 ✕**。
+            // ⇒ 所以：**先判广告页 ⇒ 放行**；漏斗只处理"广告之外的弹窗/盖屏"。
             if here == "ad_video" {
-                log("   §\(tag) ⛔ 停在广告页 ⇒ 等它结束（⛔ 不点 ✕）")
-                dwellOnAd(s?.ad_stay_min ?? 40)
+                log("   §\(tag) ⛔ 停在广告页 ⇒ **放行**（交给主循环等够时间、⛔ 不点 ✕）")
+                return true
+            }
+            // ⭐⭐⭐⭐⭐ §2275 **漏斗排在"前进一跳"之前**（照 PC `_nav_to_center` L2705）
+            // PC 原文：「**恢复漏斗提到导航之前**（弹窗盖屏 ⇒ 底下什么都点不到）」
+            //   「Popups appear at page_os … so must take precedence」
+            //
+            // ## 真机血案（v0.10.32 trace）
+            // 手机停在**奖励面板**上（「再看5秒可得451金币 / 继续观看」）：
+            // ```
+            //   §adbox_boot 在 unknown 找不到回中心的路（第 1..7 步）
+            //   §adbox ⛔ 回不到金币中心 ⇒ 停手
+            // ```
+            // ⛔ 而同一段日志后半段**证明 `stay_panel_btn` 能点掉它**——
+            //   只是它属于漏斗，而这里原来**先判页型、后跑漏斗**
+            //   ⇒ 面板盖屏时页型 = `unknown` ⇒ 直接掉进"找不到路"⇒ **漏斗根本没轮到**。
+            // ✅ 现在漏斗前置：面板/弹窗**先清掉**，下一轮再判页型。
+            if nav.runFunnel(img) {
+                log("   §\(tag) 漏斗处理了一层（弹窗优先，照 PC §1773d）")
+                sleep(1.0)
                 continue
             }
-            if nav.runFunnel(img) { sleep(1.0); continue }
             let r = nav.step(from: here, img: img) { [weak self] in self?.grab() }
             if r.acted { sleep(1.0); continue }
             log("   §\(tag) ⚠️ 在 \(here) 找不到回中心的路（第 \(k + 1) 步）")
