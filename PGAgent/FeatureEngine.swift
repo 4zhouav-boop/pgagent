@@ -152,35 +152,56 @@ final class FeatureEngine {
             guard let img = grab() else { log("§adbox ⛔ 抓帧失败"); break }
             beat(["phase": "adbox-step", "n": n, "of": count])
 
-            // ① ⭐⭐⭐ 已在广告页 ⇒ **先处理面板，再等时间**（⛔ 绝不"傻等"，⛔ 绝不点 ✕）
+            // ① ⭐⭐⭐⭐⭐ 广告页（视频/直播**同一条路**）—— 照 PC 分支A + G3 + G4 **逐条**
             //
-            // ⛔⛔ §2277 血案（用户令）：「**能等个屁，现在还是卡死这个界面**」
-            // 我原来这里只有 `dwellOnAd(dwell)`（纯 sleep）——
-            // 而真机 `_var/_stuck1.png` 屏幕上明摆着奖励面板
-            // **`6s后可领取399金币 / 再看6秒可得399金币 / [继续观看]`**，
-            // **倒计时不会自己走**（面板要用户点「继续观看」才补全）
-            // ⇒ "等 30 秒"等的是**永远不会自己结束**的面板 ⇒ **卡死**。
+            // ## ⛔⛔ 我上一版把**顺序搞反了**（用户令，逐字）
+            // > 「**倒计时是广告没结束 你没结束去点 不是傻逼。广告结束了你不点了。**」
+            // 而 PC 早就把这条写成了**血案**（`_1377_ad_loop.py:9814`）：
+            // > ⛔ 我一度反了：以为"要抢在倒计时走完前点 ✕"，
+            // >   结果**倒计时没走完就点 ✕ 会把广告点死**（停在「Ns后可领取X金币」+ 面板永不弹）。
+            // > ✅ 正确顺序：**必须等倒计时结束**（胶囊文案变成「已成功领取X金币 ✕」）才点 ✕。
             //
-            // ✅ 照 PC `_ad_finish`：**先点面板按钮补全 / 关面板**，⛔ 不是干等。
-            if nav.pageHere(img) == "ad_video"
-                || Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH) {
-                log("§adbox ⛔ 已在广告页 ⇒ **先处理面板**（照 PC `_ad_finish`；⛔ 不点 ✕）")
-                if finishAdPanel(img, tag: "adbox_ad\(n + 1)") {
-                    sleep(1.5)
-                    continue
+            // ## PC 的完整顺序（分支A → G3 → G4）
+            // ```
+            // ① 先等 30~60s 随机（§1541 用户口径：「等待时间还是要做个随机数字，30-60 随机」）
+            // ② G3：**等倒计时结束**（轮数按胶囊里的 N 动态定：N+20s 余量）
+            // ③ G4：倒计时结束后**才点 ✕**收奖励 ⇒ 处理弹出的面板
+            // ```
+            if Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+                // ── ① 先等 30~60s 随机（PC §1541 用户口径）──────────────
+                //    ⛔ 不许"进去就点 ✕"（PC 原话：「进去就点X 卡死 出去进来像傻逼一样，最后点X」）
+                //    ⚠️ 只在**倒计时还在走**时等；已到账（「已成功领取」）就不必再等 60s。
+                var cur = img
+                if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH) {
+                    let waitS = Double.random(in: 30...60)
+                    log("§adbox ⛔ 广告页 ⇒ 先等 \(Int(waitS))s（30~60 随机，照 PC §1541；⛔ 不点 ✕）")
+                    sleepWithCancel(waitS)
+                    if let im2 = grab() { cur = im2 }
                 }
-                // 面板与 ✕ 都不在 ⇒ 这才是"纯播放中" ⇒ 等时间
-                log("§adbox ⛔ 广告播放中（无面板）⇒ 等够 \(Int(dwell))s（⛔ 不点 ✕）")
-                var left = dwell
-                while left > 0 {
+
+                // ── ② G3：**等倒计时结束**才许动手（PC L9814~L9858）────────
+                //    ⭐ 判据 = PC 的「到账闸」（`_1377_ad_loop.py:4342`）：
+                //      **只看顶栏还有没有 `N秒` / `Ns` 倒计时** ⇒ 有就**没走完 ⇒ 不点**。
+                //      ⛔ 不能只认「已成功领取」——§1545 血案：倒计时早走完了，
+                //        但 OCR 没读到那四个字 ⇒ 若只认它，就**永远不敢点**。
+                var waited = 0.0
+                while Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH),
+                      waited < 90, !isCancelled() {
+                    sleep(3.0)
+                    waited += 3.0
+                    guard let im3 = grab() else { break }
+                    cur = im3
+                    log("   §adbox G3 等倒计时结束（已等 \(Int(waited))s；⛔ 没结束不点 ✕）")
+                }
+                log("§adbox G3 倒计时已结束（等了 \(Int(waited))s）⇒ **现在才点 ✕ 收奖励**")
+
+                // ── ③ G4：**倒计时结束后才点 ✕** + 处理面板（PC `_ad_finish`）──
+                //    ⭐ 面板/胶囊 ✕ 都归这里处理；⛔ 上一版我在**倒计时中**就调它 ⇒ 点死广告。
+                for _ in 0..<6 {
                     if isCancelled() { break }
-                    let d = min(2.0, left)
-                    Thread.sleep(forTimeInterval: d)
-                    left -= d
-                    if let im2 = grab(), finishAdPanel(im2, tag: "adbox_adw\(n + 1)") {
-                        log("   §adbox 等待中面板出现 ⇒ 已处理")
-                        break
-                    }
+                    guard let im4 = grab() else { break }
+                    if !finishAdPanel(im4, tag: "adbox_ad\(n + 1)") { break }
+                    sleep(1.5)
                 }
                 n += 1
                 _ = ensureInCenter(tag: "adbox_back\(n)")
@@ -234,20 +255,30 @@ final class FeatureEngine {
                 //    而**人其实已经进去了**（真机 trace 那几行正是这个假阴性）。
                 if let i2 = i2,
                    Self.looksLikeAdPage(i2, rec: rec, nav: nav, bw: baseW, bh: baseH) {
-                    // ⛔ 同样**不能傻等**（§2277）：先处理面板，再等时间
-                    log("§adbox ⛔ 已进广告页 ⇒ 处理面板/等够 \(Int(dwell))s（⛔ 不点 ✕）")
-                    if !finishAdPanel(i2, tag: "adbox_in\(n + 1)") {
-                        var left = dwell
-                        while left > 0 {
-                            if isCancelled() { break }
-                            let d = min(2.0, left)
-                            Thread.sleep(forTimeInterval: d)
-                            left -= d
-                            if let im3 = grab(), finishAdPanel(im3, tag: "adbox_inw\(n + 1)") {
-                                log("   §adbox 等待中面板出现 ⇒ 已处理")
-                                break
-                            }
-                        }
+                    // ⛔⛔ **必须先等倒计时结束，才许点 ✕**（用户令 + PC G3）
+                    // > 「**倒计时是广告没结束 你没结束去点 不是傻逼。广告结束了你不点了。**」
+                    var cur = i2
+                    if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH) {
+                        let waitS = Double.random(in: 30...60)
+                        log("§adbox ⛔ 已进广告页 ⇒ 先等 \(Int(waitS))s（30~60 随机，照 PC §1541）")
+                        sleepWithCancel(waitS)
+                        if let im3 = grab() { cur = im3 }
+                    }
+                    var waited = 0.0
+                    while Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH),
+                          waited < 90, !isCancelled() {
+                        sleep(3.0)
+                        waited += 3.0
+                        guard let im3 = grab() else { break }
+                        cur = im3
+                        log("   §adbox G3 等倒计时结束（已等 \(Int(waited))s；⛔ 没结束不点 ✕）")
+                    }
+                    log("§adbox G3 倒计时结束（等 \(Int(waited))s）⇒ **现在才点 ✕ 收奖励**")
+                    for _ in 0..<6 {
+                        if isCancelled() { break }
+                        guard let im4 = grab() else { break }
+                        if !finishAdPanel(im4, tag: "adbox_in\(n + 1)") { break }
+                        sleep(1.5)
                     }
                     n += 1
                     _ = ensureInCenter(tag: "adbox_back\(n)")
@@ -431,6 +462,33 @@ final class FeatureEngine {
             return true
         }
         return false
+    }
+
+    /// ⭐⭐⭐ 倒计时**还在走**吗 —— 照 PC 的「到账闸」（`_1377_ad_loop.py:4342`）**逐字**。
+    ///
+    /// ## PC 原文
+    /// > ✅ 抗错字写法：**顶栏只要还有 `\d+秒 / \d+s`** ⇒ 倒计时没走完 ⇒ **不点 X**。
+    /// > ⛔⛔ §1545 真机血案（`_var/_1544_fuli_round.log`）：倒计时**早就走完了**，
+    /// >   但 OCR 没读到「已成功领取」四个字。
+    /// >   ⇒ 若**只认那四个字**当"到账"，就会**永远不敢点** ✕ ⇒ 卡在广告页出不去。
+    /// >   ✅ 所以判据必须是「**还有没有倒计时数字**」，⛔ 不是"有没有到账字样"。
+    ///
+    /// ## ⛔⛔ 为什么不能用「已成功领取」当判据（我上一版的错）
+    /// 用户令：「**倒计时是广告没结束 你没结束去点 不是傻逼。广告结束了你不点了。**」
+    /// ⇒ 判据只有一条：**顶栏还有 `N秒`/`Ns` ⇒ 广告没结束 ⇒ ⛔ 一个键都不许点。**
+    ///
+    /// - Returns: true = **倒计时还在走**（广告没结束 ⇒ 只等，⛔ 不点）
+    static func adCountdownRunning(_ img: UIImage, rec: Recognizer,
+                                  bw: Double, bh: Double) -> Bool {
+        let items = rec.ocrRegion(img, rect: CGRect(x: 0, y: 62, width: bw, height: 78),
+                                  minConfidence: 0.3)
+        let t = items.map(\.0).joined().replacingOccurrences(of: " ", with: "")
+        // PC 正则 `\d+秒` / `\d+s`（含 `后` 的写法也一并覆盖）
+        if let re = try? NSRegularExpression(pattern: "[0-9]+\\s*(秒|s|S)") {
+            let r = NSRange(t.startIndex..<t.endIndex, in: t)
+            return re.firstMatch(in: t, range: r) != nil
+        }
+        return t.contains("秒")
     }
 
     /// PC `AD_ROW_Y_WIN = 26` —— 行内 y 容差（同一张卡片的标题与按钮落在此窗口内）
