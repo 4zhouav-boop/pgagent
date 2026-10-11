@@ -235,10 +235,23 @@ final class FeatureEngine {
                   "left_s": Int(end.timeIntervalSinceNow)])
 
             // ⭐ ① 先关评论区（PC L5131：否则滑动无效、文案读错区）
+            //
+            // ⛔⛔ §2259 修一个真 bug（两处）：
+            //   ① 判据原来与 `live_marker` **逐字相同**（都是底部「说点什么」）
+            //      ⇒ 两个元素**恒同时命中** ⇒ 没有区分度。现已改成 PC 的
+            //      `comment_panel` 判据 = **面板里的「N条评论」**（PC L4459）。
+            //   ② **关法是坐标动作，不是"找到按钮再点"**：`nav.tap("comment_close")`
+            //      原来指向一个**根本不存在**的元素 ⇒ `detect()` 直接 nil ⇒ **恒 false**
+            //      ⇒ 评论区**从来没被关掉过**。
+            //   ✅ 照 PC `close_comment_panel`（L4454）的实测最优关法：
+            //      「**点上半屏视频区 (225,150)** diff **118.62** ✅ —— 半屏面板点外部即关」
+            //      （另两种：左缘侧滑 0.89 ❌ / SWIPE_DOWN 1.80 ❌，PC 已否决）
+            //   ⚠️ PC 明确这**不是盲点固定锚**：它点的不是某个按钮，而是"面板外部"这一
+            //      通用位置，且**有前置条件**（只在 `comment_panel` 命中时才发）。
             if nav.detect("comment_panel", img: img) != nil {
-                log("§feed 先关评论区")
-                _ = nav.tap("comment_close", img: img)
-                sleep(0.8)
+                log("§feed 检测到评论区面板 ⇒ 点上半屏关掉（PC `close_comment_panel`）")
+                nav.tapPoint(225, 150)
+                sleep(1.8)
             }
             guard let img2 = grab() else { break }
 
@@ -377,6 +390,24 @@ final class FeatureEngine {
     /// ⭐ 回任务中心（= PC `ensure_in_center`）
     private func ensureInCenter(tag: String) -> Bool {
         guard let cfg = cfgStore.cfg else { return false }
+        // ⛔⛔ §2259 **每次调用都要清空"记死"表**（照 PC `_nav_to_center` L2688 `_dead = set()`）。
+        //
+        // ## 为什么这是必须的（否则"唯一的路"会被一次误判永久封死）
+        // Swift 的 `Navigator.dead` 是**对象级**状态，而 `resetDead()` **从来没有被调用过**
+        // （真机实测：全项目只有定义、没有调用点）。
+        // ⇒ 后果：「记死」是**跨整轮、永久**的：
+        //   只要 `coin_ball` 在**某一帧**上没找到球（很常见 —— 转场中/球被遮挡/加载中），
+        //   它就被 `markDead("feed|coin_ball")` ⇒ **之后所有帧都不再试它**
+        //   ⇒ 而 `coin_ball` 是**回金币中心的唯一入口** ⇒ **整轮再也回不去中心**。
+        //
+        // 📏 PC 的口径正好相反（`_1377_ad_loop.py:2688`）：
+        // ```python
+        // def _nav_to_center(img, tag="NAV", steps=8):
+        //     _dead = set()          # ← 每次调用都重开一张记死表
+        // ```
+        // ⇒ 「记死」的语义是**本轮这张表内**有效（防止在**同一帧**上反复空点同一条腿），
+        //    ⛔ 不是"这条腿永远不许用"。
+        nav.resetDead()
         for k in 0..<8 {
             if isCancelled() { return false }
             guard let img = grab() else { return false }
@@ -475,12 +506,10 @@ final class FeatureEngine {
     private func searchOneWord(_ word: String, tag: String) -> Bool {
         guard let img = grab() else { return false }
 
-        // ① 点搜索框
-        guard let box = nav.detect("search_box", img: img) else {
-            log("   §\(tag) ⛔ 找不到搜索框")
-            return false
-        }
-        nav.tapPoint(Double(box.center.x), Double(box.center.y))
+        // ① ⭐⭐ 点搜索框 —— 照 PC `ks_find_search_box`（L5682）的**两层**逻辑
+        let boxPt = searchBoxPoint(img)
+        log("   §\(tag) 点搜索框 @(\(Int(boxPt.x)),\(Int(boxPt.y)))")
+        nav.tapPoint(Double(boxPt.x), Double(boxPt.y))
         sleep(1.2)
 
         // ② 清框（PC：清框只能点**框内清除 ✕** —— 退格/⌘A 实测不吃）
@@ -513,6 +542,40 @@ final class FeatureEngine {
         }
         sleep(2.0)
         return true
+    }
+
+    /// ⭐⭐ **搜索框落点** —— 照 PC `ks_find_search_box`（`_1377_ad_loop.py:5682`）的两层逻辑
+    ///
+    /// ```python
+    /// for t, cx, cy in sorted(words(img, (0, 55, 330, 110)), key=lambda w: w[1]):
+    ///     if t.strip():
+    ///         return (cx, cy, t.strip())          # ① 框内有文案 ⇒ 用它的中心
+    /// ...
+    /// click_at(plog(0.25 * BASE_W, 0.081 * BASE_H))   # ② 没文案 ⇒ 结构性回退位
+    /// ```
+    ///
+    /// ## ⛔ PC 那条警告**必须照抄**（`_1377_ad_loop.py:5685`）
+    /// > ⚠️ **必须带下界 y>=55** —— 否则会把状态栏的 `09:41@(74,30)` 当框内文案，
+    /// >   点它就等于点 iOS 状态栏（= 回顶）⇒ 全流程跑飞（§1735d 已踩过）。
+    ///
+    /// ⇒ 所以带子是 `y ∈ [55,110]`（`search_box.roi` 同值），⛔ 不含状态栏。
+    ///
+    /// ## ⛔ 为什么不用 `nav.detect("search_box")` 的"找不到就返回 false"
+    /// 那个元素要求框内**有特定词**（`搜索`/`搜一搜`），而框内实际是
+    /// **任意占位/真文本**（可能被 OCR 读成别的）⇒ 要求命中词表会**误判成"找不到框"**
+    /// 而整轮搜不了。PC 的口径是「**有一个非空词就行**」，且**一定有回退位**（⛔ 不放弃）。
+    /// ⚠️ 回退位是**结构性位置**（框带左侧），⛔ 不是"盲点某个按钮" —— PC 原文如此。
+    private func searchBoxPoint(_ img: UIImage) -> CGPoint {
+        let roi = CGRect(x: 0, y: 55, width: 330, height: 55)
+        var items = rec.ocrRegion(img, rect: roi, minConfidence: 0.3)
+        // 照 PC：按 x 排序（`sorted(..., key=lambda w: w[1])`），取第一个**非空**词
+        items.sort { $0.1.minX < $1.1.minX }
+        for (t, r, _c) in items
+        where !t.trimmingCharacters(in: .whitespaces).isEmpty {
+            return CGPoint(x: r.midX, y: r.midY)
+        }
+        // ② PC 的结构性回退位：`(0.25*451, 0.081*977)` = **(113, 79)**
+        return CGPoint(x: 0.25 * baseW, y: 0.081 * baseH)
     }
 
     /// ⭐⭐ **落中文**（照 PC §1743 的腿序）
