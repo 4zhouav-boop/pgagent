@@ -188,6 +188,59 @@ final class APIRouter {
                           "pages": cfgStore.cfg?.pages.count ?? 0],
                          status: ok ? 200 : 500)
 
+        // ⭐⭐⭐ §2269 **保存设置**（控制台「保存设置」按钮与 PC 远程设置**同一条路**）
+        //
+        // 为什么要有 HTTP 入口（⛔ 不只是为了 PC）：
+        //   · 让「勾选功能/设时间」这条链路**可被脚本验收**（⛔ 不用靠手点 UI 去测）
+        //   · 用户在 PC 上也能改手机设置（推 config 是**整文件覆盖**，这个是**只改几个键**）
+        //
+        // 请求体：`{"features":[...],"feat_min":{...},"ad_count":6,"ad_dwell":30,...}`
+        // ⇒ 只允许写**白名单**里的键（⛔ 不让任意键污染配置）
+        case ("POST", "/settings"):
+            guard let obj = try? JSONSerialization.jsonObject(with: r.body) as? [String: Any] else {
+                return .json(["ok": false, "error": "请求体必须是 JSON 对象"], status: 400)
+            }
+            // ⭐ 白名单：⛔ 不在表里的键一律忽略（防手滑写坏配置）
+            let allowed: Set<String> = [
+                "features", "apps", "feat_min", "ad_count", "ad_dwell",
+                "entry", "tail",
+                "feed_stay_hv", "feed_stay_lv", "feed_gap_min", "feed_gap_max",
+                "tag_round_min", "mall_round_min", "mall_browse_min", "mall_min_price",
+                "live_stay", "ad_stay_min", "ad_stay_max",
+                "loop_frame_max_age", "loop_step_wait", "loop_unknown_limit",
+            ]
+            var patch: [String: Any?] = [:]
+            var ignored: [String] = []
+            for (k, v) in obj {
+                if allowed.contains(k) { patch[k] = v } else { ignored.append(k) }
+            }
+            guard !patch.isEmpty else {
+                return .json(["ok": false, "error": "没有可写的键",
+                              "ignored": ignored.sorted()], status: 400)
+            }
+            let res = cfgStore.saveSettings(patch)
+            log.log("💾 /settings 保存: \(res.ok ? "✅" : "⛔") \(res.msg)"
+                + (ignored.isEmpty ? "" : " ｜ 忽略 \(ignored.sorted().joined(separator: ","))"))
+            return .json(["ok": res.ok, "msg": res.msg,
+                          "saved": patch.keys.sorted(),
+                          "ignored": ignored.sorted(),
+                          "features": cfgStore.cfg?.settings?.features ?? [],
+                          "feat_min": cfgStore.cfg?.settings?.feat_min ?? [:]],
+                         status: res.ok ? 200 : 500)
+
+        // ⭐ 读回当前设置（给控制台/PC 看"现在是什么值"）
+        case ("GET", "/settings"):
+            let s = cfgStore.cfg?.settings
+            return .json(["ok": true,
+                          "features": s?.features ?? [],
+                          "apps": s?.apps ?? [],
+                          "feat_min": s?.feat_min ?? [:],
+                          "ad_count": s?.ad_count ?? 0,
+                          "ad_dwell": s?.ad_dwell ?? 0,
+                          "entry": s?.entry ?? "",
+                          "tail": s?.tail ?? "",
+                          "path": ConfigStore.configPath().path])
+
         case ("GET", "/config"):
             guard let c = cfgStore.cfg else {
                 return .json(["ok": false, "error": cfgStore.lastError], status: 500)
