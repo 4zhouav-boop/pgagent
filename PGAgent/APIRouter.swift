@@ -823,6 +823,24 @@ final class APIRouter {
 
     // MARK: - ⭐⭐⭐⭐⭐ §2273 切到目标 App（照 PC `ensure_app`，**全程 ESP32**）
 
+    /// ⭐ 像不像 iOS 桌面/资源库 —— 翻页前的**安全闸**（照 PC `is_homescreen`，L7921）。
+    ///
+    /// PC 原文：「⛔ 免得 HOME 万一没生效、**在 App 里乱滑**」。
+    /// 判据（PC §1642 真机定标）：
+    /// ```
+    ///   桌面每页底部都有「**搜索**」胶囊 @ ≈(226, 814)
+    ///   App 资源库页顶部是「**App 资源库**」搜索框 @ y 60~140
+    /// ```
+    static func looksLikeDesktop(_ img: UIImage, rec: Recognizer,
+                                bw: Double, bh: Double) -> Bool {
+        let a = rec.ocrRegion(img, rect: CGRect(x: 150, y: 780, width: 170, height: 80),
+                              minConfidence: 0.3)
+        if a.contains(where: { $0.0.contains("搜索") }) { return true }
+        let b = rec.ocrRegion(img, rect: CGRect(x: 0, y: 60, width: bw, height: 80),
+                              minConfidence: 0.3)
+        return b.contains(where: { $0.0.contains("资源库") })
+    }
+
     /// 把前台切到 `kslite` / `ks` —— ⛔ **不用 App 的 `open()`**（用户铁律：所有操作走 ESP32）。
     ///
     /// ## 逐条照抄 PC（`_1377_ad_loop.py`）
@@ -897,12 +915,44 @@ final class APIRouter {
             return (pt, pick.1)
         }
 
-        // ① 回主屏（PC `go_home`：底部快速上滑；`H:HOME` 兜底）
-        log.log("切换(ESP32) ① 回主屏 \(which)")
-        hid(["H:HOME\n"])
-        Thread.sleep(forTimeInterval: 2.5)
+        // ① ⭐⭐⭐ 回主屏 —— **照 PC `go_home`（L7982）逐字**：
+        //    **先「底部快速上滑」，不成再补 `H:HOME`**（⛔ 我原来只发 `H:HOME` ⇒ **永远回不去**）
+        //
+        // ## ⛔⛔ 这是 PC 早查清的元凶（§1645 / §1697d），我照抄漏了
+        // PC 原文三条铁律：
+        // ```
+        //   ① 手法 = **底部快速上滑**（不是 H:HOME）
+        //      H:HOME 的真身是 **⌘H 键盘组合键**（走 ID1 键盘通道），
+        //      ⛔ **会被前台 App 吃掉**（PC 实测 WorkBuddy 对话页 0 像素变化）⇒ 只当兜底。
+        //   ② 起点必须 **y = 971**（贴进 Home Indicator 手势区）
+        //      ⛔ 958 差这 10px 就**落在手势区外 ⇒ iOS 不认** ⇒ PC 实测 0/2；
+        //      968~971 才 2/2。📏「**起点差 10px**」= "永远回不去主屏"的元凶。
+        //   ③ 必须**快**：**120ms** 行、250ms **不行**（PC 实测 0.08% vs 31.96%）。
+        // ```
+        // ⇒ 而且上滑**直接落到第 1 页（主桌面）**，比 `H:HOME` 更准、还省掉翻页。
+        log.log("切换(ESP32) ① 回主屏（底部快速上滑，照 PC `go_home`）")
+        _ = ble.send(BLEController.swipe(x1: 225, y1: 971, x2: 225, y2: 300,
+                                         speed: .fast,      // ⭐ fast = 100ms ≈ PC 的 120ms
+                                         baseW: bw, baseH: bh, yFix: yf))
+        Thread.sleep(forTimeInterval: 1.7)
+        // 兜底：若仍不像桌面，再补 H:HOME（⌘H，可能被 App 吃）
+        if let img = frame(), !Self.looksLikeDesktop(img, rec: rec, bw: bw, bh: bh) {
+            log.log("切换(ESP32) ①b 上滑后不像桌面 ⇒ 补一发 H:HOME（⌘H 兜底）")
+            _ = ble.send("H:HOME\n")
+            Thread.sleep(forTimeInterval: 1.8)
+        }
 
-        // ② 当页找；找不到就**翻页**（PC `find_desktop_icon_paged`：先右滑回退，再左滑前进）
+        // ② 当页找；找不到就**翻页**
+        //
+        // ⭐ 照 PC `find_desktop_icon_paged`（L8001）的**顺序与安全闸**：
+        // ```
+        //   ① 先看当页
+        //   ② ⛔ **安全闸**：这页**不像 iOS 桌面**（底部没「搜索」胶囊）⇒ **不翻页**
+        //      （PC 原文：「免得**在 App 里乱滑**」）
+        //   ③ **先右滑**回退（第 1 页在最左端）→ ④ 再**左滑**前进
+        // ```
+        // ⛔ 我上一版**只左滑**、而且**没有安全闸** ⇒ 一路滑进「App 资源库」
+        //    （真机 `_var/_sf1_n.png` 铁证：停在资源库页，所以永远找不到图标）。
         if let img = frame(), let (pt, label) = findIcon(img) {
             log.log("切换(ESP32) ② 当页命中「\(label)」⇒ 点 (\(Int(pt.x)),\(Int(pt.y)))")
             hid(BLEController.moveAndClick(x: Double(pt.x), y: Double(pt.y),
@@ -910,24 +960,40 @@ final class APIRouter {
             Thread.sleep(forTimeInterval: 6.0)      // 照 PC `wait(6.5)`
             return true
         }
-        log.log("切换(ESP32) ② 当页没有「\(which)」⇒ 翻页找（最多 6 页）")
-        let deskSwipeMS = 400                        // PC `DESK_SWIPE_MS`
-        for k in 1...6 {
-            // ⭐ 左滑前进一页（PC: `dlog(380,500, 60,500, DESK_SWIPE_MS)`）
-            hid([BLEController.swipe(x1: 380, y1: 500, x2: 60, y2: 500,
-                                     speed: .mid, baseW: bw, baseH: bh, yFix: yf)])
-            _ = deskSwipeMS
-            Thread.sleep(forTimeInterval: 1.4)
-            guard let img = frame() else { continue }
+        // ⛔ 安全闸（照 PC）：不像桌面就**不翻页**（否则会在 App 里乱滑）
+        if let img = frame(), !Self.looksLikeDesktop(img, rec: rec, bw: bw, bh: bh) {
+            log.log("切换(ESP32) ⛔ 这一页**不像 iOS 桌面**（底部没「搜索」胶囊）"
+                    + " ⇒ **不翻页**（照 PC，免得在 App 里乱滑）")
+            return false
+        }
+        // ③ 先**右滑**回退到第 1 页，再 ④ **左滑**前进（PC 同序）
+        var tried = 0
+        func tryPage(_ desc: String) -> Bool {
+            guard let img = frame() else { return false }
             if let (pt, label) = findIcon(img) {
-                log.log("切换(ESP32) ③ 第 \(k) 次翻页命中「\(label)」⇒ 点 (\(Int(pt.x)),\(Int(pt.y)))")
+                log.log("切换(ESP32) ③ \(desc) 命中「\(label)」⇒ 点 (\(Int(pt.x)),\(Int(pt.y)))")
                 hid(BLEController.moveAndClick(x: Double(pt.x), y: Double(pt.y),
                                                baseW: bw, baseH: bh, yFix: yf))
                 Thread.sleep(forTimeInterval: 6.0)
                 return true
             }
+            return false
         }
-        log.log("切换(ESP32) ⛔ 翻了 6 页都没找到「\(which)」图标 ⇒ **不放枪**（铁律②）")
+        for k in 1...6 {                                   // 右滑（回退）
+            hid([BLEController.swipe(x1: 60, y1: 500, x2: 380, y2: 500,
+                                     speed: .mid, baseW: bw, baseH: bh, yFix: yf)])
+            Thread.sleep(forTimeInterval: 1.3)
+            tried += 1
+            if tryPage("右滑第 \(k) 次") { return true }
+        }
+        for k in 1...8 {                                   // 左滑（前进）
+            hid([BLEController.swipe(x1: 380, y1: 500, x2: 60, y2: 500,
+                                     speed: .mid, baseW: bw, baseH: bh, yFix: yf)])
+            Thread.sleep(forTimeInterval: 1.3)
+            tried += 1
+            if tryPage("左滑第 \(k) 次") { return true }
+        }
+        log.log("切换(ESP32) ⛔ 翻了 \(tried) 页都没找到「\(which)」图标 ⇒ **不放枪**（铁律②）")
         return false
     }
 }
