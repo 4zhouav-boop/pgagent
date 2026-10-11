@@ -1236,6 +1236,72 @@
         "  => this element matches only the livestream-flavoured X, and only on the live page.",
         "Template gate: std=49.44 >> 6.0 OK; two live frames score 1.000, a feed frame None."
       ]
+    },
+    "ext_landing_marker": {
+      "desc": "外部 App/H5 落地页（京东/美团/天猫试用等）—— ⛔ 整页没有快手的页型锚点",
+      "roi": [
+        0,
+        55,
+        260,
+        150
+      ],
+      "match": "ocr",
+      "words": [
+        "京东试用",
+        "试用频道",
+        "去首页完成领取",
+        "离开试用频道",
+        "淘宝",
+        "美团",
+        "天猫",
+        "拼多多",
+        "支付宝",
+        "下载链接",
+        "官方正版",
+        "扫码下载",
+        "点击下载",
+        "打开APP",
+        "打开App"
+      ],
+      "min_hits": 1,
+      "_doc": [
+        "section 2307: the config was MISSING this whole page type (real-device stall at 03:01).",
+        "  The phone was parked on a JD (京东试用) external landing page and the app reported page=unknown;",
+        "  every leg then ran 'unknown page rescue' 3x and stopped => 刷视频/搜索/商城 all failed.",
+        "  Real recording frame (451x975, the frame recognition actually sees) reads:",
+        "     y=75  '京东试用'",
+        "     y=129 '<快手'          <- the breadcrumb back to Kuaishou, exactly PC's anchor",
+        "     y=874 '去首页完成领取'    <- the page's own CTA",
+        "     y=919 '离开试用频道'      <- an exit affordance",
+        "  PC has had this page type all along (_1377_ad_loop.py:2463 ext_landing_marker + :1334 find_breadcrumb);",
+        "  the iOS port simply never carried it over.",
+        "  ROI covers the title row (y 55..150) so it does not collide with the status bar."
+      ]
+    },
+    "breadcrumb": {
+      "desc": "状态栏/页面左上「<快手」返回面包屑 —— 外部 App 落地页的唯一出路",
+      "roi": [
+        0,
+        100,
+        120,
+        160
+      ],
+      "match": "ocr",
+      "words": [
+        "快手"
+      ],
+      "not_words": [
+        "极速版"
+      ],
+      "min_hits": 1,
+      "_doc": [
+        "section 2307: taps '<快手' to walk back from an external landing page into Kuaishou.",
+        "  Measured on the real recording frame: '<快手' at base (4,129).",
+        "  PC's invariant (find_breadcrumb, _1377_ad_loop.py:1380): the true breadcrumb hugs the LEFT edge",
+        "  (x < 0.20 x width); the App's own status-bar watermark sits right/centre (x ~ 226).",
+        "  So the ROI is clamped to x<120 on purpose -- it structurally cannot hit the watermark.",
+        "  '极速版' is excluded because that is the screen-mirroring app-name label, not the breadcrumb."
+      ]
     }
   },
   "pages": {
@@ -1452,6 +1518,21 @@
       "_go_doc": [
         "⛔ 用户令：「谁让你强退的，都是跑循环广告，你他妈一个广告就点X」",
         "⇒ 广告页**只等时间**，⛔ 绝不点 ✕。"
+      ]
+    },
+    "ext_landing": {
+      "desc": "外部 App/H5 落地页（京东试用/美团/天猫等）—— 出路是点「<快手」面包屑",
+      "check": [
+        "ext_landing_marker"
+      ],
+      "parent": "feed",
+      "go": "breadcrumb",
+      "alts": [
+        "back_arrow"
+      ],
+      "_doc": [
+        "section 2307: new page type ported from PC (_1377_ad_loop.py:154 PAGES['ext_landing']).",
+        "  Exit = tap the '<快手' breadcrumb; PC recorded that a blind edge-swipe does not work here."
       ]
     }
   },
