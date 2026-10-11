@@ -58,6 +58,48 @@ final class ConfigStore: ObservableObject {
             return false
         }
     }
+
+    // MARK: - ⭐⭐⭐⭐⭐ §2269 保存（控制台改设置用）
+
+    /// ⭐ **在手机上直接改设置并落盘**（照 PC 控制台的语义：勾功能 + 设时间）
+    ///
+    /// ## 为什么必须"改原 JSON 对象"而不是"重新编码整个 PGConfig"
+    /// `PGConfig` 是 `Codable`，但它**只声明了程序要用到的字段**；
+    /// 而 `config.json` 里有大量**注释键**（`_doc` / `_go_doc` / `_alts_doc` / `_feat_doc` …）
+    /// 和未来可能新增的字段。
+    /// ⛔ 若"解码成结构体 → 改 → 整体重编码"，**所有注释和未知字段都会被抹掉**
+    ///   ⇒ 配置里辛苦写的取证记录**全丢**。
+    /// ✅ 做法：**读原始 JSON 字典 → 只改 `settings` 下那几个键 → 写回**
+    ///   ⇒ 其余内容**逐字保持**（包括注释键）。
+    ///
+    /// - Parameter patch: 要写入 `settings` 的键值对（值用 `Any`，nil = 删除该键）
+    /// - Returns: (是否成功, 说明)
+    @discardableResult
+    func saveSettings(_ patch: [String: Any?]) -> (ok: Bool, msg: String) {
+        Self.ensureDirs()
+        let p = Self.configPath()
+        do {
+            let data = try Data(contentsOf: p)
+            guard var root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return (false, "根不是对象")
+            }
+            var s = (root["settings"] as? [String: Any]) ?? [:]
+            for (k, v) in patch {
+                if let v = v { s[k] = v } else { s.removeValue(forKey: k) }
+            }
+            root["settings"] = s
+            // ⭐ `.prettyPrinted` + `.withoutEscapingSlashes`：与手写配置风格一致，且中文不被转义
+            let out = try JSONSerialization.data(
+                withJSONObject: root,
+                options: [.prettyPrinted, .withoutEscapingSlashes, .sortedKeys])
+            try out.write(to: p, options: .atomic)
+            // 写完立刻重载，让 Runner 马上用上新值
+            _ = reload()
+            return (true, "已保存")
+        } catch {
+            return (false, "保存失败: \(error)")
+        }
+    }
 }
 
 // MARK: - 配置数据模型（与 config.json 一一对应）

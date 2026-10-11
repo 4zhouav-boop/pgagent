@@ -181,112 +181,67 @@ struct ContentView: View {
     @State private var router: APIRouter?
     @State private var started = false
     @State private var port: UInt16 = 0
-    /// ⭐ 自主循环的运行状态（UI 显示）
-    @State private var runState = "-"
-    /// ⭐ 循环实例（boot 里创建，UI 按钮用）
+    /// ⭐ 循环实例（boot 里创建，控制台用）
     @State private var runnerRef: Runner?
 
     var body: some View {
         NavigationView {
             VStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("HTTP 127.0.0.1:\(port == 0 ? "…" : "\(port)")")
-                        .font(.system(size: 13, weight: .bold, design: .monospaced))
-                    Text("BLE: \(ble.state)")
-                        .font(.system(size: 12, design: .monospaced))
-                    Text("Documents: \(DocsScanner.docPath())")
-                        .font(.system(size: 10, design: .monospaced))
-                        .lineLimit(2)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(8)
-
-                HStack(spacing: 6) {
-                    Button("扫 BLE") { ble.scan { _ in } }
-                    Button("停扫") { ble.stopScan() }
-                    // ⭐⭐ 连已配对（§2249）—— 板子已连时不广播，只能这样连
-                    Button("连板子") {
-                        let n = ble.connectPaired()
-                        store.log("连已配对外设: \(n) 个  state=\(ble.state)")
+                // ⭐⭐⭐ §2269 **控制台**（照 PC `_1665_pg_console.py` 的用法）
+                //   用户令：「**你把控制台搞好 太混乱了。也没有我PG控制台那么好控制
+                //            勾选功能和设置时间**」
+                //   ⇒ 三层信息架构（运行 / 设置 / 日志），⛔ 不再把按钮和日志糊成一堆。
+                //
+                // ⚠️ `runnerRef` 在 `boot()` 里创建 ⇒ 未就绪时回退到「启动中」提示
+                //    （⛔ 不能强解包：那样首帧会崩）。
+                if let runner = runnerRef {
+                    ConsoleView(cfgStore: cfgStore, broadcaster: broadcaster,
+                                ble: ble, store: store, runner: runner)
+                } else {
+                    VStack(spacing: 8) {
+                        ProgressView()
+                        Text("正在启动…").font(.system(size: 13))
                     }
-                    Button("清日志") { store.clear() }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-                .padding(.horizontal, 8)
 
-                // ⭐⭐⭐⭐ 「眼」正路 —— 录屏广播（⛔ 不用快捷指令、⛔ 不用人手点）
-                HStack(spacing: 6) {
-                    Button("🔴 开录屏") {
-                        let ok = broadcaster.start()
-                        store.log("▶️ 启动录屏广播: \(ok ? "✅ 已触发" : "⛔ \(broadcaster.lastError)")")
-                    }
-                    Text("帧 \(broadcaster.frames)")
-                        .font(.system(size: 10, design: .monospaced))
-                }
-                .padding(.horizontal, 8)
-                .padding(.top, 4)
-
-                // 「眼」备选 —— 快捷指令截图
-                HStack(spacing: 6) {
-                    Button("📷 抓一帧") {
-                        store.log("▶️ 手动抓帧（快捷指令 \(grabber.shortcutName)）")
-                        grabber.grab(timeout: 10) { u, e in
-                            if let u = u {
-                                store.log("✅ 抓到 \(u.lastPathComponent)")
-                            } else {
-                                store.log("⛔ 抓帧失败：\(e)")
+                // ── 「眼」的备用路 + 保活 + 诊断（低频用，收在底部一条）──
+                //   ⭐ 常用操作都在上面的控制台里；这里只放**排查用**的次要按钮。
+                DisclosureGroup("更多（保活 / 快捷指令 / 诊断）") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 8) {
+                            Button("🖼 开画中画") {
+                                let ok = pip.start()
+                                store.log("▶️ 启动画中画保活: \(ok ? "✅ 已发起" : "⛔ \(pip.lastError)")")
+                            }
+                            Button("关") { pip.stop() }
+                            Text(pip.active ? "PiP 活" : "PiP 停")
+                                .font(.system(size: 10, design: .monospaced))
+                        }
+                        HStack(spacing: 8) {
+                            Button("📷 抓一帧") {
+                                store.log("▶️ 手动抓帧（快捷指令 \(grabber.shortcutName)）")
+                                grabber.grab(timeout: 10) { u, e in
+                                    if let u = u { store.log("✅ 抓到 \(u.lastPathComponent)") }
+                                    else { store.log("⛔ 抓帧失败：\(e)") }
+                                }
+                            }
+                            Button("扫 BLE") { ble.scan { _ in } }
+                            Button("连板子") {
+                                let n = ble.connectPaired()
+                                store.log("连已配对外设: \(n) 个  state=\(ble.state)")
                             }
                         }
+                        Text("HTTP 127.0.0.1:\(port == 0 ? "…" : "\(port)")")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
                     }
-                    Button("只触发") {
-                        let ok = grabber.triggerShortcut()
-                        store.log("触发快捷指令: \(ok ? "✅ 已发起" : "⛔ \(grabber.lastError)")")
-                    }
+                    .padding(.top, 4)
                 }
-                .padding(.horizontal, 8)
-                .padding(.top, 4)
-
-                // ⭐⭐⭐⭐ 「活」—— 画中画保活（照荔枝的做法）
-                HStack(spacing: 6) {
-                    Button("🖼 开画中画") {
-                        let ok = pip.start()
-                        store.log("▶️ 启动画中画保活: \(ok ? "✅ 已发起" : "⛔ \(pip.lastError)")")
-                    }
-                    Button("关") { pip.stop() }
-                    Text(pip.active ? "PiP 活" : "PiP 停")
-                        .font(.system(size: 10, design: .monospaced))
-                }
-                .padding(.horizontal, 8)
-                .padding(.top, 4)
-
-                // ⭐⭐⭐ 自主循环 —— App 自己在手机上跑（⛔ 不需要 PC / USB / 开发者模式）
-                HStack(spacing: 6) {
-                    Button("▶️ 开始跑") {
-                        store.log("▶️ 手动启动自主循环")
-                        runnerRef?.start(dest: nil)
-                    }
-                    Button("⛔ 停") { runnerRef?.stop() }
-                    Text(runState)
-                        .font(.system(size: 10, design: .monospaced))
-                        .lineLimit(1)
-                }
-                .padding(.horizontal, 8)
-                .padding(.top, 4)
-
-                // ⛔⛔ **不要**在这里调 `store.snapshot()`：
-                //   它会**加锁 + 全量拷贝**，而本 body 每次重绘都会执行
-                //   ⇒ 主线程卡在锁上 ⇒ 看门狗 SIGKILL（§2212 崩溃日志实证）
-                //   ✅ 改为读 `store.recentLines` —— 由 LogStore 节流推送（无锁、定长）
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(store.recentLines.enumerated()), id: \.offset) { _, l in
-                            Text(l).font(.system(size: 10, design: .monospaced))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
-                    .padding(6)
-                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 6)
             }
-            .navigationTitle("PGAgent v\(AppVersion.display)")
+            .navigationTitle("PG 控制台 v\(AppVersion.display)")
             .onAppear(perform: boot)
         }
         .navigationViewStyle(.stack)
@@ -319,15 +274,11 @@ struct ContentView: View {
             store.log(s)
         }
         runnerRef = runner
-        // 每秒刷新一次 UI 上的循环状态
+        // ⭐ §2269 每秒把状态同步到画中画（荔枝的做法：PiP 里显示进度）
+        //   ⛔ 不再用这个 timer 维护 UI 文本 —— 控制台直接读 `Runner` 的
+        //      `@Published`（`running`/`step`/`lastPage`/`lastAction`）⇒ SwiftUI 自动刷新，
+        //      比"每秒手动赋值给 @State"更准、更省。
         Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-            let s = runner.snapshot()
-            let running = (s["running"] as? Bool) ?? false
-            let step = (s["step"] as? Int) ?? 0
-            let page = (s["page"] as? String) ?? "-"
-            let reason = (s["stopReason"] as? String) ?? "-"
-            runState = running ? "跑中 步\(step) \(page)" : "停 \(reason)"
-            // ⭐ 把状态同步到画中画（荔枝的做法：PiP 里显示进度）
             if pip.active { pip.text = runner.pipLine() }
         }
 
