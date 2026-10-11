@@ -82,7 +82,13 @@ public final class SilentKeepAlive {
     /// 重播静音（幂等：已在播就什么都不做）
     private func resume() {
         guard let p = player, !p.isPlaying else { return }
-        do { try AVAudioSession.sharedInstance().setActive(true) } catch {}
+        // ⛔ 重播前**重新声明 `.mixWithOthers`**：中断（如接电话/别的 App 抢会话）
+        //    后系统可能把类别恢复成默认值 ⇒ 不重声明就又会被中断。
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default,
+                                                            options: [.mixWithOthers])
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {}
         let ok = p.play()
         resumptions += 1
         NSLog("PGAgent KeepAlive: 自愈重播 ok=%@ 第%d次", ok ? "是" : "否", resumptions)
@@ -128,9 +134,24 @@ public final class SilentKeepAlive {
 
         // ① 音频会话：`.playback`（后台可播）+ 激活
         //    ⛔ 不要 `.mixWithOthers`（会让系统认为我们不是主会话）
+        // ⭐⭐⭐⭐⭐ §2302 **必须 `.mixWithOthers`（真机血案推出来的）**
+        //
+        // ## 现象
+        // 以前用**独占** `.playback`（options: []）：只要前台换成**有声 App**（快手/快手极速版都在放视频），
+        // iOS 会把我们的静音播放**中断掉** ⇒ 扫地程序一旦不再播音频，
+        // `UIBackgroundModes:[audio]` 就**不再保护**这个 App ⇒ iOS 挂起它。
+        // 真机铁证：点开快手后 **5 分钟一步都走不动**（HTTP 8899 断，只能靠把 App 拉回前台才恢复）。
+        //
+        // ⛔ 上一版的推理是错的（原注释：“不要 .mixWithOthers，会让系统认为我们不是主会话”）——
+        //   “主会话”这个概念对我们**无用**：我们要的只是“**一直有音频在播**”而已。
+        //
+        // ## 为什么 `.mixWithOthers` 就对
+        // 它告诉系统：**我不抢声音，可以和别人一起放** ⇒ 快手放它的，我放我的静音，
+        // **不会互相中断** ⇒ 我们的“有音频在播”这个事实一直成立 ⇒ 后台保护持续生效。
+        // 📏 这也是很多“后台常驻 + 不干扰音乐”类 App 的标准做法。
         let sess = AVAudioSession.sharedInstance()
         do {
-            try sess.setCategory(.playback, mode: .default, options: [])
+            try sess.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             try sess.setActive(true)
         } catch {
             lastError = "音频会话失败: \(error)"
