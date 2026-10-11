@@ -1737,6 +1737,32 @@
         "📏 它在**色彩判据**下命中（`ColorBlob.findCoinBall`），",
         "   ⛔ 不是 OCR —— 所以放在漏斗里也能被 `detect` 之外的路径处理。"
       ]
+    },
+    {
+      "element": "modal_x",
+      "interval": 1,
+      "desc": "通用模态弹窗 ✕（暖灰圆钮，PC find_gray_x 判据）—— 兜底：任何叫不出名字的弹窗",
+      "_doc": [
+        "section 2314: appended as a LATE fallback on purpose.",
+        "  ModalX.swift was a verbatim port of PC find_gray_x (warm-grey round button, thresholds",
+        "  and compactness gate all measured on real devices), but had ZERO references anywhere --",
+        "  dead code that had never once been called.",
+        "  PC treats it as a main leg (B2C_LEGS includes modal_x, _1377:3489) and it replaced a pile",
+        "  of one-template-per-popup patches (user: 'stop adding fucking patches').",
+        "  Ordering: put it AFTER the named handlers so specific popups keep their own legs, and",
+        "  this catches whatever has no name yet.",
+        "  Safety: ModalX only matches a warm-grey compact round blob (channel 118..142, spread<=16,",
+        "  side 18..42, fill>=0.45) -- it is not a blind tap."
+      ]
+    },
+    {
+      "element": "coupon_x",
+      "interval": 1,
+      "desc": "券弹窗 ✕（同一判据换 ROI，位置在屏幕中下）",
+      "_doc": [
+        "section 2314: same detector, ROI at the coupon sheet (PC find_coupon_x).",
+        "  Keep last so it cannot shadow the named legs."
+      ]
     }
   ],
   "_funnel_doc": [
