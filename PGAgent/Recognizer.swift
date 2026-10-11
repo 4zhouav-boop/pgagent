@@ -99,21 +99,47 @@ final class Recognizer {
     func ocrRegion(_ img: UIImage,
                    rect: CGRect?,
                    minConfidence: Double = 0.5) -> [(String, CGRect, Double)] {
-        let base = norm(img)                    // ① 归一到 451×977（§2241）
-        let baseW = base.size.width, baseH = base.size.height
+        // ⭐⭐⭐⭐⭐ §2281 **必须用"原始帧"裁 ROI，⛔ 不是先压到 451 再裁**
+        //
+        // ## ⛔⛔ 我原来的错（用户点破的）
+        // > 用户原话：「**识别不清我感觉是压缩了识别的图片分辨率。应该直接用原图可能就不存在识别不了**」
+        // 旧代码第一行就是 `let base = norm(img)` —— 把 1353×2925 的帧
+        // **压到 451×977**，然后才裁 ROI、才放大 2× 给 Vision。
+        // ⇒ **细节在压缩那一步就已经丢了**，后面放大只是把糊掉的图放大（⛔ 救不回来）。
+        //
+        // 📏 对照**荔枝**（`_note_2010` L64/L66，「**输入 448x960**」是它的 OCR 网络输入尺寸）：
+        //    荔枝是**分区域 OCR** —— 每个区域**单独裁出来**再送网络，
+        //    ⛔ 不是"整屏压到 448×960 再识别"。区域裁出来后，同样的网络
+        //    **每单位面积拿到的原始像素多得多**。
+        //
+        // ## ✅ 现在的做法（同一套坐标契约，⛔ 调用方零改动）
+        // ```
+        // ① 在**原始帧**上按「基准 ROI × 原图/基准 的比例」裁出原始像素块
+        // ② 把这个原始块**放大 ocrScale 倍**给 Vision
+        // ③ 识别结果坐标 → 除以 (原图到基准的比例) ⇒ **仍是基准像素绝对坐标**
+        // ```
+        // ⇒ 调用方（Navigator/Runner/FeatureEngine）**一行都不用改**：
+        //    输入是基准像素 ROI，输出还是基准像素坐标。
+        let baseW = FrameNormalizer.baseW, baseH = FrameNormalizer.baseH
+        lastRawSize = img.size
+        guard let cgAll = img.cgImage else { return [] }
 
-        // ② 决定裁剪框（基准像素，夹在图像内）
-        var crop = CGRect(x: 0, y: 0, width: baseW, height: baseH)
+        // ① 原图 → 基准 的比例（本机 1353/451 ≈ 3.0；⛔ 不再是 1.0）
+        let sx = CGFloat(cgAll.width) / max(baseW, 1)
+        let sy = CGFloat(cgAll.height) / max(baseH, 1)
+
+        // ② 基准 ROI ⇒ 原图裁剪框（⛔ 先钳制到原图内 —— PC §1627 越界血案）
+        var cropBase = CGRect(x: 0, y: 0, width: baseW, height: baseH)
         if let r = rect {
-            crop = r.intersection(crop)
-            if crop.width < 2 || crop.height < 2 { return [] }
+            cropBase = r.intersection(cropBase)
+            if cropBase.width < 2 || cropBase.height < 2 { return [] }
         }
-        guard let cgAll = base.cgImage else { return [] }
-        // 基准 451×977 与 cg 像素的比（norm 已强制 scale=1 ⇒ 通常 1:1）
-        let px = CGFloat(cgAll.width) / max(baseW, 1)
-        let cropPx = CGRect(x: crop.minX * px, y: crop.minY * px,
-                            width: crop.width * px, height: crop.height * px)
-        guard let cgCrop = cgAll.cropping(to: cropPx) else { return [] }
+        let cropPx = CGRect(x: cropBase.minX * sx, y: cropBase.minY * sy,
+                            width: cropBase.width * sx, height: cropBase.height * sy)
+            .integral
+        guard cropPx.width >= 2, cropPx.height >= 2,
+              let cgCrop = cgAll.cropping(to: cropPx) else { return [] }
+        lastNormSize = CGSize(width: baseW, height: baseH)   // 兼容旧诊断字段
 
         // ③ ⭐ 放大 ocrScale 倍（照电脑端 LANCZOS 语义；CoreGraphics 高质量插值）
         let outW = Int(cropPx.width * Self.ocrScale)
@@ -140,7 +166,8 @@ final class Recognizer {
         do { try handler.perform([req]) } catch { return [] }
         guard let obs = req.results else { return [] }
 
-        // ⑤ 坐标换算：Vision 归一化(左下原点) → 放大图像素 → 除回放大 → 加裁剪偏移
+        // ⑤ 坐标换算：Vision 归一化(左下原点) → 放大图像素 → 除回放大
+        //    → 再**除以 原图/基准 的比例** ⇒ **基准像素绝对坐标**（⛔ 契约不变）
         let sc = Self.ocrScale
         var out: [(String, CGRect, Double)] = []
         for o in obs {
@@ -153,11 +180,11 @@ final class Recognizer {
             let y = (1.0 - bb.maxY) * h
             let bw = bb.width * w
             let bh = bb.height * h
-            // ⭐ 除回放大倍数 + 加裁剪偏移 ⇒ **基准像素绝对坐标**
-            let r = CGRect(x: crop.minX + x / sc,
-                           y: crop.minY + y / sc,
-                           width: bw / sc,
-                           height: bh / sc)
+            // ⭐ 除回放大倍数 ⇒ 原图像素；再除比例 ⇒ 基准像素；加 ROI 偏移
+            let r = CGRect(x: cropBase.minX + x / sc / sx,
+                           y: cropBase.minY + y / sc / sy,
+                           width: bw / sc / sx,
+                           height: bh / sc / sy)
             out.append((top.string, r, Double(top.confidence)))
         }
         return out
