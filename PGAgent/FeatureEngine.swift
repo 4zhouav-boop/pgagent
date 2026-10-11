@@ -148,6 +148,7 @@ final class FeatureEngine {
         var n = 0
         var emptyRounds = 0
         var scrollTries = 0          // ⭐ §2309 任务列表翻页次数
+        var adEntryToggle = 0        // ⭐ §2315 入口轮换计数（宝箱 ↔ 看广告得金币）
         while n < count {
             if isCancelled() { log("§adbox ⛔ 被中断"); break }
             guard let img = grab() else { log("§adbox ⛔ 抓帧失败"); break }
@@ -272,6 +273,55 @@ final class FeatureEngine {
             // ⛔ 铁律②：`看广告得金币` 是**唯一**目标；它不可用就**放弃本腿**，
             //    ⛔ **绝不"跳到下一行"**（用户 2026-10-06 明确纠正过：
             //    「你搞到刷广告得金币干什么 说了 是错的」）。
+            // ⭐⭐⭐⭐⭐ §2315 **宝箱入口与“看广告得金币”逐条轮换（用户令）**
+            //
+            // ## 用户原话（逐字，本段就是规格）
+            // > 「**说了要宝箱和他轮换呢**」
+            //
+            // ## ⛔ 本轮审计发现：iOS 读了 `settings.entry` 但**从来没用过**
+            // `FeatureEngine` 打印了 `入口=\(s?.entry ?? "auto")`，然后就**直接走按行腿**
+            // ⇒ `entry` 设置（auto/fuli/chest）形同虚设，宝箱轮换**根本没实现**。
+            // 📏 PC 的 `AISJ_ENTRY=auto` 是「宝箱 ↔ 看广告得金币 逐条轮换」（不是分两轮跑）。
+            //
+            // 出路共用：点宝箱浮件 ⇒ 出面板 ⇒ 点 CTA「去看广告」⇒ 进广告链。
+            // ⛔ 铁律②：任一步没定位到锚 ⇒ **什么都不做**，落回按行腿。
+            let entryMode = (s?.entry ?? "auto")
+            let wantChest: Bool = {
+                if entryMode == "chest" { return true }
+                if entryMode == "fuli" { return false }
+                // auto ⇒ 逐条轮换（照 PC `_ENTRY_TOGGLE[0] % 2 == 0`）
+                adEntryToggle += 1
+                return adEntryToggle % 2 == 0
+            }()
+            if wantChest, let c = nav.detect("chest_float", img: img)?.center {
+                log("§adbox 【入口=auto 轮换】本条走**宝箱**入口 ⇒ 浮件 @(\(Int(c.x)),\(Int(c.y)))")
+                nav.tapPoint(Double(c.x), Double(c.y))
+                // 等一张新帧（面板出来了才能找 CTA）
+                if let ip = grabFresh(since: img, maxWait: maxFrameAgeCfg + 3.0),
+                   let cta = nav.detect("chest_cta", img: ip)?.center {
+                    log("§adbox 宝箱面板 CTA @(\(Int(cta.x)),\(Int(cta.y))) ⇒ 进广告链")
+                    nav.tapPoint(Double(cta.x), Double(cta.y))
+                    // 进了广告链 ⇒ 交给下一轮循环的“广告页”分支处理
+                    if let i3 = grabFresh(since: ip, maxWait: maxFrameAgeCfg + 3.0),
+                       Self.looksLikeAdPage(i3, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+                        for _ in 0..<6 {
+                            if isCancelled() { break }
+                            guard let im4 = grab() else { break }
+                            if !finishAdPanel(im4, tag: "adbox_chest\(n + 1)") { break }
+                            sleep(1.5)
+                        }
+                        n += 1
+                        scrollTries = 0
+                        emptyRounds = 0
+                        _ = ensureInCenter(tag: "adbox_chestback\(n)")
+                        continue
+                    }
+                    log("§adbox 点了宝箱 CTA 但没进广告页 ⇒ 落回按行腿")
+                } else {
+                    log("§adbox 宝箱面板上没找到 CTA ⇒ 不放枪，落回按行腿")
+                }
+            }
+
             if let btn = findAdRowButton(img) {
                 log("§adbox 按行定位到「看广告得金币」行 ⇒ 按钮 \(btn.evidence) @(\(Int(btn.point.x)),\(Int(btn.point.y)))")
                 nav.tapPoint(Double(btn.point.x), Double(btn.point.y))
