@@ -186,6 +186,44 @@ final class Runner: ObservableObject {
         writeTraceLine("=== 开始 目标=\(target) 最大步数=\(maxSteps) ===")
         writeHeartbeat(["phase": "start", "target": target, "maxSteps": maxSteps])
 
+        // ⭐⭐⭐⭐⭐ §2282 **第一步：自动切到目标 App**（用户令 —— 这是脚本**必须自己**做的）
+        //
+        // ## 用户原话（逐字，这条就是本段的规格）
+        // > 「**我手动启动会打开录屏，然后点击启动后 他需要自动回桌面，然后自己进快手。**」
+        // > 「**老子原来都跑通了的。**」
+        // > 「**脚本启动都不会自动回桌面 自动进快手。**」
+        //
+        // ## ⛔ 为什么原来跑不通（我漏了这一步）
+        // 手机端的录屏**录的是"当前前台"**（不像 PC 抓投屏窗口恒等于手机屏）⇒
+        // 点「开始跑」时**前台是 PGAgent 自己** ⇒ 录到的是控制台界面 ⇒ 全部 `unknown`。
+        // 真机并排对照铁证（`_var/_d1_side.png`）：左=真屏、右=App 帧，**两边都是控制台**。
+        // ⇒ **必须先回桌面、再点快手图标**，否则一轮都跑不了。
+        //
+        // ## ✅ 做法：全程 ESP32（⛔ 不碰 `UIApplication.open`、⛔ 不碰开发者功能）
+        // 照 PC `ensure_app`（`_1377_ad_loop.py:8508`）的两步：
+        // ```
+        // ① 回主屏  = **底部快速上滑**（起点 y=971 贴进 Home Indicator；120ms 才有效）
+        //             ⛔ `H:HOME`（⌘H）会被前台 App 吃掉 ⇒ 只当兜底
+        // ② 点图标  = OCR 找「快手/快手极速版」标签 ⇒ 点**标签上方 0.055 屏高**
+        //             （PC `find_desktop_icon` 的落点算法）
+        // ```
+        // ⇒ 本函数自包含：**发现不在目标 App 就自己切过去**，⛔ 不依赖 PC 脚本。
+        let apps = cfg.settings?.apps ?? []
+        let which = apps.first ?? "kslite"
+        let wantSwitch = (cfg.settings?.auto_goto_app ?? true)
+        if wantSwitch {
+            log("§run ⭐ 自动切 App（照 PC `ensure_app`；全程 ESP32）：\(which)")
+            let ok = Navigator.switchToApp(named: which, rec: rec, ble: ble,
+                                           frame: { [weak self] in self?.grabSync() },
+                                           baseW: cfg.settings?.base_w ?? 451,
+                                           baseH: cfg.settings?.base_h ?? 977,
+                                           yFix: cfg.settings?.y_fix ?? 4,
+                                           log: { [weak self] s in self?.append(s) })
+            log("§run 切 App \(ok ? "✅ 已完成" : "⛔ 未确认（继续跑，可能仍在非目标 App）")")
+            // ⭐ 切完**等界面稳定**再抓帧（照 PC `wait(6.5)`）
+            Thread.sleep(forTimeInterval: 2.5)
+        }
+
         // ⭐⭐⭐ §2255 **有勾选功能 ⇒ 走 FeatureEngine 的一轮闭环**
         //
         // 为什么这样分流（照 PC L9360~9395 的语义）：

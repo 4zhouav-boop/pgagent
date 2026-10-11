@@ -203,7 +203,11 @@
       "⭐ OCR 找不到时的兜底（荔枝有 YOLOv8）。",
       "我们暂用「模板池」当兜底，这里配它的阈值。"
     ],
-    "fallback_template_threshold": 0.72
+    "fallback_template_threshold": 0.72,
+    "auto_goto_app": true,
+    "apps": [
+      "kslite"
+    ]
   },
   "rois": {
     "top_bar": [

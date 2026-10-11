@@ -154,6 +154,117 @@ final class Navigator {
         return nil
     }
 
+    // MARK: - ⭐⭐⭐⭐⭐ §2282 切到目标 App（**App 自己做**，全程 ESP32）
+
+    /// 把前台切到 `kslite` / `ks` —— 照 PC `ensure_app`（`_1377_ad_loop.py:8508`）**逐字**。
+    ///
+    /// ## ⛔⛔ 为什么必须由 App 自己做（用户令）
+    /// > 「**脚本启动都不会自动回桌面 自动进快手。**」
+    /// > 「**我手动启动会打开录屏，然后点击启动后 他需要自动回桌面，然后自己进快手。**」
+    ///
+    /// 手机端录屏录的是**当前前台** ⇒ 点「开始跑」时前台是 PGAgent 自己 ⇒
+    /// 录到控制台 ⇒ 全 `unknown`（真机并排 `_var/_d1_side.png` 铁证）。
+    ///
+    /// ## 两步（照 PC，⛔ 不用 `UIApplication.open`）
+    /// ```
+    /// ① 回主屏 = **底部快速上滑**（起点 y=971；120ms）
+    ///     ⛔ `H:HOME` 是 ⌘H 键盘组合，**会被前台 App 吃掉**（PC 实测 0 像素）⇒ 只当兜底
+    /// ② 点图标 = OCR 找标签 ⇒ 点**标签上方 0.055 屏高**（PC `FH(0.055)`）
+    ///     ⛔ 一键不写死坐标（PC 换版式踩过坑）
+    /// ```
+    @discardableResult
+    static func switchToApp(named which: String, rec: Recognizer, ble: BLEController,
+                            frame: () -> UIImage?,
+                            baseW: Double, baseH: Double, yFix: Double,
+                            log: @escaping (String) -> Void) -> Bool {
+        func hid(_ cmds: [String], gapUS: UInt32 = 130_000) {
+            for c in cmds { _ = ble.send(c); usleep(gapUS) }
+        }
+        // ① ⭐ 回主屏：**底部快速上滑**（PC `HOME_FLING = (225, 971, 225, 300, 120)`）
+        //    ⛔ 起点必须 y=971（958 差 10px 就落在 Home Indicator 手势区外 ⇒ iOS 不认）
+        //    ⛔ 必须快（120ms；250ms 实测无效）
+        log("   ① 回主屏（底部快速上滑 y=971 / 120ms，照 PC `go_home`）")
+        hid([BLEController.swipe(x1: 225, y1: 971, x2: 225, y2: 300,
+                                 speed: .fast, baseW: baseW, baseH: baseH, yFix: yFix)])
+        Thread.sleep(forTimeInterval: 2.0)
+        // 兜底：⌘H（可能被 App 吃，但聊胜于无）
+        hid(["H:HOME\n"])
+        Thread.sleep(forTimeInterval: 1.5)
+
+        // ② ⭐ OCR 找图标标签 ⇒ 点标签上方
+        //    照 PC `find_desktop_icon`（L7856）的三条**排除闸**（⛔ 不照抄会把弹窗句子当图标）
+        //    真机血案 `_var/_1755_stab_{1..4}.log`：iOS 弹「"快手"想访问相机。」（整句含"快手"）
+        //      ⇒ 旧判据把它当图标 ⇒ **点了 8 次弹窗、4/4 全废**。
+        func findIcon(_ img: UIImage) -> (CGPoint, String)? {
+            let ws = rec.ocrRegion(img, rect: CGRect(x: 0, y: 60, width: baseW, height: baseH - 60),
+                                   minConfidence: 0.3)
+            var cands: [(CGPoint, String)] = []
+            for (t, r, _c) in ws {
+                let s = t.trimmingCharacters(in: .whitespaces)
+                if s.isEmpty || !s.contains("快手") { continue }
+                if s.count > 6 { continue }                                  // ① 图标名短
+                if s.contains(where: { "“”。？！，,".contains($0) }) { continue }  // ② 带标点=句子
+                if ["想访问", "允许", "用于", "录制", "拍照", "直播"]
+                    .contains(where: { s.contains($0) }) { continue }         // ③ 弹窗语义词
+                if which == "kslite" {
+                    if s.contains("极速") { cands.append((CGPoint(x: r.midX, y: r.midY), s)) }
+                } else {
+                    if !s.contains("极速") { cands.append((CGPoint(x: r.midX, y: r.midY), s)) }
+                }
+            }
+            guard !cands.isEmpty else { return nil }
+            // 取**最上、再最左**（照 PC `sorted(key=(round(y/40), x))`）
+            let pick = cands.sorted {
+                let ra = (Double($0.0.y) / 40.0).rounded(), rb = (Double($1.0.y) / 40.0).rounded()
+                return ra != rb ? ra < rb : $0.0.x < $1.0.x
+            }[0]
+            // ⭐ 图标在**标签上方 0.055 屏高**（PC `FH(0.055)`）
+            return (CGPoint(x: pick.0.x, y: pick.0.y - baseH * 0.055), pick.1)
+        }
+
+        func frameOf() -> UIImage? { frame() }
+
+        log("   ② 在桌面上找「\(which)」图标（OCR 标签 → 点标签上方 0.055 屏高）")
+        if let img = frameOf(), let (pt, label) = findIcon(img) {
+            log("      ✅ 命中标签「\(label)」⇒ 点 (\(Int(pt.x)),\(Int(pt.y)))")
+            hid(BLEController.moveAndClick(x: Double(pt.x), y: Double(pt.y),
+                                           baseW: baseW, baseH: baseH, yFix: yFix))
+            Thread.sleep(forTimeInterval: 6.0)      // 照 PC `wait(6.5)`
+            return true
+        }
+        log("      ⚠️ 第一页没找到（或拿不到帧）⇒ 左滑翻页再找（照 PC `find_desktop_icon_paged`）")
+        for k in 1...4 {
+            // ⛔ 安全闸：不像桌面就**不翻页**（PC 原文：「免得在 App 里乱滑」）
+            if let img = frameOf(), !looksLikeDesktop(img, rec: rec, baseW: baseW, baseH: baseH) {
+                log("      ⛔ 这一页不像 iOS 桌面 ⇒ 不翻页")
+                break
+            }
+            hid([BLEController.swipe(x1: 380, y1: 500, x2: 60, y2: 500,
+                                     speed: .mid, baseW: baseW, baseH: baseH, yFix: yFix)])
+            Thread.sleep(forTimeInterval: 1.4)
+            if let img = frameOf(), let (pt, label) = findIcon(img) {
+                log("      ✅ 第 \(k) 次翻页命中「\(label)」⇒ 点 (\(Int(pt.x)),\(Int(pt.y)))")
+                hid(BLEController.moveAndClick(x: Double(pt.x), y: Double(pt.y),
+                                               baseW: baseW, baseH: baseH, yFix: yFix))
+                Thread.sleep(forTimeInterval: 6.0)
+                return true
+            }
+        }
+        log("      ⛔ 翻页也没找到 ⇒ 不放枪（铁律②）")
+        return false
+    }
+
+    /// 像不像 iOS 桌面/资源库 —— 照 PC `is_homescreen`（L7921）的**安全闸**
+    static func looksLikeDesktop(_ img: UIImage, rec: Recognizer,
+                                 baseW: Double, baseH: Double) -> Bool {
+        let a = rec.ocrRegion(img, rect: CGRect(x: 150, y: 780, width: 170, height: 80),
+                              minConfidence: 0.3)
+        if a.contains(where: { $0.0.contains("搜索") }) { return true }
+        let b = rec.ocrRegion(img, rect: CGRect(x: 0, y: 60, width: baseW, height: 80),
+                              minConfidence: 0.3)
+        return b.contains(where: { $0.0.contains("资源库") })
+    }
+
     // MARK: - 动作
 
     /// ⭐⭐ 点击时序（照电脑端 `ks_io.py::tap` 的**实测值**）
