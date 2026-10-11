@@ -207,6 +207,20 @@
     "auto_goto_app": true,
     "apps": [
       "kslite"
+    ],
+    "_ocr_conf_doc": [
+      "section 2308: why 0.3 and not 0.5 (real-device measurement, 2026-10-12).",
+      "  Apple Vision does NOT report a continuous confidence -- it emits three tiers:",
+      "    0.3 / 0.5 / 1.0   (measured histogram over two real frames).",
+      "  RapidOCR on the PC reports a continuous score (mean 0.96, min 0.74 on the same frames),",
+      "  so the two engines cannot share one threshold constant.",
+      "  A 0.5 cut keeps the 0.5 and 1.0 tiers and silently discards the whole 0.3 tier:",
+      "    JD landing page : 15 of 34 words dropped (44%)",
+      "    task-centre page: 16 of 54 words dropped (30%)",
+      "  The words thrown away are exactly the small ones we need -- the livestream anchor",
+      "  (说点什么), the breadcrumb (<快手) and the external-page title (京东试用) are all 0.3.",
+      "  Verified no regression: page verdicts on 7 real frames are IDENTICAL at 0.5 and 0.3,",
+      "  with zero new element hits -- the looser cut only recovers text we were dropping."
     ]
   },
   "rois": {
@@ -1302,6 +1316,44 @@
         "  So the ROI is clamped to x<120 on purpose -- it structurally cannot hit the watermark.",
         "  '极速版' is excluded because that is the screen-mirroring app-name label, not the breadcrumb."
       ]
+    },
+    "game_page_marker": {
+      "desc": "快手 App 内置小游戏页（斗地主/麻将等）—— ⛔ 没有任何快手导航锚点",
+      "roi": [
+        0,
+        130,
+        451,
+        620
+      ],
+      "match": "ocr",
+      "words": [
+        "规则介绍",
+        "牌型学习",
+        "实战训练",
+        "我是老手",
+        "我是新手",
+        "快速开始",
+        "全新玩法",
+        "经典模式",
+        "快速教学"
+      ],
+      "min_hits": 2,
+      "_doc": [
+        "section 2311: added after a real-device stall on 2026-10-12.",
+        "  The adbox scroll leg found the '斗地主赢金币' task row and tapped it, which opened a",
+        "  Kuaishou in-app mini-game. The app reported page=unknown, ran 'unknown page rescue' twice",
+        "  and stopped, so feed/tag/mall all failed afterwards.",
+        "  So 'tapping a task can land you in some third-party or built-in page' is a general",
+        "  situation, and the anchor table was still missing this whole class.",
+        "  Measured on the real recording frame (451x975 -- the frame recognition actually sees;",
+        "  note go-ios screenshot returns this page sideways as 2532x1170, which norm_base then",
+        "  mis-crops, so anchors must be measured on the RECORDING frame):",
+        "     y=220 '全新玩法'   y=421 '地主快速教学'   y=426 '经典模式'",
+        "     y=471 '实战训练'   y=481 '牌型学习'       y=492 '规则介绍'",
+        "     y=384 '我是老手'   y=547 '我是新手'       y=723 '快速开始'",
+        "  min_hits=2 on purpose: these words are generic enough that one alone could false-positive",
+        "  (e.g. a game ad page). Requiring two makes it specific to this tutorial layout."
+      ]
     }
   },
   "pages": {
@@ -1533,6 +1585,23 @@
       "_doc": [
         "section 2307: new page type ported from PC (_1377_ad_loop.py:154 PAGES['ext_landing']).",
         "  Exit = tap the '<快手' breadcrumb; PC recorded that a blind edge-swipe does not work here."
+      ]
+    },
+    "game_page": {
+      "desc": "快手内置小游戏页（斗地主等）—— 出路是右上角 ✕ / 返回",
+      "check": [
+        "game_page_marker"
+      ],
+      "parent": "feed",
+      "go": "back_arrow",
+      "alts": [
+        "breadcrumb",
+        "tab_home"
+      ],
+      "_doc": [
+        "section 2311: new page type for Kuaishou in-app mini-games.",
+        "  Exit order: the in-page back arrow first, else the '<快手' breadcrumb, else the home tab.",
+        "  The page has no top-bar nav anchors of its own, so these are the only ways out."
       ]
     }
   },
