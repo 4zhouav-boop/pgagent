@@ -65,9 +65,12 @@ final class Navigator {
         switch e.match {
         case "ocr":
             let words = e.words ?? []
+            // ⭐ §2304 本元素可自带阈值（见 `Element.min_conf` 的血案）：
+            //   直播间锚点「说点什么」可靠 Vision 只给 0.3 ⇒ 用全局 0.5 会被误杀。
+            let minConf = e.min_conf ?? cfg.settings?.ocr_min_confidence ?? 0.5
             let h = rec.findWords(img, words: words, roi: r,
                                   minHits: e.min_hits ?? 1,
-                                  minConfidence: cfg.settings?.ocr_min_confidence ?? 0.5)
+                                  minConfidence: minConf)
             if var hh = h { hh.name = name; return hh }
             return nil
         case "template":
