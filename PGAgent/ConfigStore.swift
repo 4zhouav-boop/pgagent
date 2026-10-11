@@ -272,6 +272,17 @@ struct PGConfig: Codable {
         var words: [String]?
         var min_hits: Int?
         var target_pos: String?
+        /// ⭐⭐ §2304 **本元素自己的 OCR 置信度下限**（可选，不给则用 `settings.ocr_min_confidence`）。
+        ///
+        /// ## 为什么必须有它（真机血案）
+        /// 直播间的唯一性锚点「说点什么」，
+        /// **Vision 读出来了但只给 conf=0.3**（`/ocr` 真机回读：`y=909 x=74 conf=0.3 说点什么⋯`），
+        /// 而全局阈值是 **0.5** ⇒ 这条**被过滤掉** ⇒ `live_marker` 恒 miss
+        /// ⇒ 直播间判 `unknown` ⇒ 卡死（用户原话：“刚刚那不是直播间么 你识别成未知”）。
+        ///
+        /// ⛔ **不能靠调全局阈值解决**：那会让**所有** OCR 判据都变松
+        /// （其他页型的误判风险都上升）。只有这一条锚点需要放宽。
+        var min_conf: Double?
     }
 
     struct Page: Codable {
