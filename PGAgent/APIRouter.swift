@@ -84,7 +84,7 @@ final class APIRouter {
                               "/runlog", "/recogdiag",
                               "/files", "/file", "/write", "/mkdir", "/ble/scan",
                               "/ble/connect", "/ble/connect-paired", "/blediag", "/ble/send",
-                              "/click", "/swipe", "/settings", "/gotoapp", "/log"],
+                              "/click", "/swipe", "/settings", "/log"],
             ])
 
         // ⭐ 极简探活（⛔ 不碰文件系统、不做识别）—— 用来区分「App 挂了」和「handler 慢」
@@ -154,52 +154,48 @@ final class APIRouter {
             let ka = SilentKeepAlive.shared.start()
             runner.start(dest: r.query["dest"])
 
-            // ⭐⭐⭐⭐⭐ §2272 **跑之前必须"先切到目标 App"**（`?goto=1` 默认开）
+            // ⭐⭐⭐⭐⭐ §2273 **切到目标 App —— ⛔ 一律走 ESP32（用户铁律）**
             //
-            // ## 为什么必须由 App 自己切（这是个"死结"，只能这么解）
-            // 手机端录屏录的是**当前前台**（不像 PC 抓投屏窗口恒等于手机屏）——
-            // 真机并排对照 `_var/_d1_side.png` 铁证：
-            // ```
-            //   左 iOS 真屏 = 控制台     右 App 帧 = 控制台     ⇒ 判 unknown（**判得对**）
-            // ```
-            // 而切 App 只能用 `open()`（要 App 在**前台**才有权发起），
-            // 可 `/run` 又必须**趁 App 在前台**发出来 ⇒ 从外面根本没法两全：
-            // ```
-            //   先发 /run ⇒ App 退后台 ⇒ open() 发不出去
-            //   先 open() ⇒ App 退后台 ⇒ /run 发不出去
-            // ```
-            // ✅ 唯一出路 = **App 自己在 `/run` 里把这件事做掉**（先起跑，再切）。
+            // ## ⛔⛔ 我上一版（v0.10.30）在这里犯的错
+            // 我用 `UIApplication.shared.open("ksnebula://")` 做跳转 ——
+            // **那是"用 App 自己的能力跳转"，违反用户铁律**：
+            // > 「**所有操作用 ESP32 控制**」（§2249 逐字）
+            // > 「**你现在还是全程用开发者权限，说了不要用开发者。所有操作用 ESP32 控制。**」
             //
-            // ⚠️ 切换要**延迟 2 秒**：立刻切会把首帧录成"还没退干净的自己"。
+            // ## ✅ 照抄 PC `ensure_app`（`_1377_ad_loop.py:8508`）
+            // ```python
+            // go_home(tag)                                  # ① 回主屏（底部上滑）
+            // _d, _p = find_desktop_icon_paged(tag, TARGET)  # ② 桌面找图标（**会翻页**）
+            // click_at(plog(_p[0], _p[1]))                  # ③ 点它
+            // ```
+            // ⇒ PC **全程只用 ESP32**（点图标），⛔ 从不调 App 自己的跳转。
+            //    手机端必须**同款**。
+            //
+            // ## ⚠️ 为什么不能"从外面用脚本切"
+            // 手机端录屏录的是**当前前台** ⇒ `/run` 必须趁 App 在前台发出来；
+            // 而"切 App"如果靠 App 的 `open()`，就又把控制权交给了 App 自己。
+            // ⇒ 唯一合规做法：**App 里发 ESP32 命令**（回主屏 + 点图标），
+            //    这与 PC 的语义**逐字一致**（PC 也是脚本发串口命令）。
             let wantGoto = (r.query["goto"] ?? "1") != "0"
-            var gotoInfo: [String: Any] = ["requested": wantGoto]
+            var gotoInfo: [String: Any] = ["requested": wantGoto, "via": "ESP32"]
             if wantGoto {
                 let which = r.query["app"] ?? (cfgStore.cfg?.settings?.apps?.first ?? "kslite")
                 gotoInfo["name"] = which
+                // ⛔⛔ §2273 **必须丢到后台队列跑**，⛔ 不能在主线程上 `Thread.sleep`
+                //
+                // 血案（§2212 同类，崩溃日志实证）：主线程**长时间阻塞** ⇒
+                //   SwiftUI 的看门狗直接 `SIGKILL` 整个 App。
+                // 而 `switchApp` 里有一串"发命令 + 等界面反应"的 `Thread.sleep`
+                //   （回主屏 2.5s + 翻页 1.4s×N + 点击后 6s）⇒ **轻松超过 10 秒**。
+                // ⇒ 这里**先用 `asyncAfter` 保证 App 还活着**（起跑后 2 秒），
+                //   再**立刻转后台队列**执行真正的切换。
+                // ⚠️ `ble.send` / `microphone` 与 `LogStore.log` 都是**线程安全**的
+                //   （前者内部串行、后者有锁）⇒ 后台调用安全。
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                    guard let self = self else { return }
-                    // ⭐ 与 `/gotoapp` 同一套逻辑（⛔ 不重复实现）
-                    let schemes: [String] = (which == "ks")
-                        ? ["kwai://", "kuaishou://"] : ["ksnebula://", "kwai://"]
-                    let bw = self.cfgStore.cfg?.settings?.base_w ?? 451
-                    let bh = self.cfgStore.cfg?.settings?.base_h ?? 977
-                    let yf = self.cfgStore.cfg?.settings?.y_fix ?? 4
-                    for s in schemes {
-                        guard let u = URL(string: s) else { continue }
-                        UIApplication.shared.open(u, options: [:]) { ok in
-                            self.log.log("gotoapp(自动) \(s) -> \(ok)")
-                            if ok {
-                                // 给确认框留出时间，再用 BLE 点「打开」（若它出现）
-                                Thread.sleep(forTimeInterval: 1.6)
-                                for c in BLEController.moveAndClick(x: 310, y: 520,
-                                                                     baseW: bw, baseH: bh,
-                                                                     yFix: yf) {
-                                    _ = self.ble.send(c)
-                                    usleep(120_000)
-                                }
-                            }
-                        }
-                        break        // 只试第一个（`open` 的完成回调里再决定要不要继续）
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        guard let self = self else { return }
+                        let ok = self.switchApp(named: which)
+                        self.log.log("切换(ESP32) \(which) ⇒ \(ok ? "✅ 已发出点图标" : "⛔ 没找到图标")")
                     }
                 }
                 gotoInfo["after_s"] = 2.0
@@ -660,59 +656,11 @@ final class APIRouter {
             log.log("openurl \(s) -> \(ok)")
             return .json(["ok": ok, "url": s])
 
-        // ⭐⭐⭐⭐⭐ §2272 **切到目标 App**（`POST /gotoapp?name=kslite|ks`）
-        //
-        // ## 为什么这是手机端**必需**的一步
-        // 手机端录屏录的是**当前前台**（不像 PC 抓投屏窗口）
-        // ⇒ 点「开始跑」时 App 在前台 ⇒ **录到的是 PGAgent 自己** ⇒ 判 `unknown`
-        //   （真机并排对照 `_var/_d1_side.png` 铁证：左=真屏、右=App 帧，**都是控制台**）
-        // ⇒ **必须先切到快手**，否则一轮都跑不了。
-        //
-        // ## 做法（两级，都有真机证据）
-        // ```
-        // ① 首选：URL scheme（`kwai://…`）⇒ iOS 弹「"PGAgent"想要打开"快手"」
-        //    ⚠️ 这个确认框**必须点「打开」**才真的切过去
-        //    ⭐ 而 BLE(HID) 点击**对系统弹窗有效**（§2272 实测：连点 5 次清掉排队弹窗）
-        //    ⇒ 本接口**自己把弹窗点掉**（发一条 P+C:L 到「打开」按钮）
-        // ② 兜底：回主屏 → 左滑翻页 → 点桌面图标（`/swipe` + `/click`）
-        // ```
-        // ⚠️ 两级都试是因为 scheme 各版本可能变（⛔ 不猜哪个一定对）。
-        case ("POST", "/gotoapp"):
-            let which = r.query["name"] ?? "kslite"
-            // ⭐ 「打开」确认框的按钮位置（真机 `_var/_grid.png` 量出，基准坐标）
-            let openBtn = (x: 310.0, y: 520.0)
-            let schemes: [String] = (which == "ks")
-                ? ["kwai://", "kuaishou://"]
-                : ["ksnebula://", "kwai://"]
-            let bw = cfgStore.cfg?.settings?.base_w ?? 451
-            let bh = cfgStore.cfg?.settings?.base_h ?? 977
-            let yf = cfgStore.cfg?.settings?.y_fix ?? 4
-
-            var opened: [String] = []
-            for s in schemes {
-                guard let url = URL(string: s) else { continue }
-                let sem = DispatchSemaphore(value: 0)
-                var ok = false
-                DispatchQueue.main.async {
-                    UIApplication.shared.open(url, options: [:]) { r in ok = r; sem.signal() }
-                }
-                _ = sem.wait(timeout: .now() + 5)
-                opened.append("\(s)->\(ok)")
-                if !ok { continue }
-                // ⭐ 等确认框弹出（它是异步的），再用 BLE 点「打开」
-                Thread.sleep(forTimeInterval: 1.6)
-                for c in BLEController.moveAndClick(x: openBtn.x, y: openBtn.y,
-                                                    baseW: bw, baseH: bh, yFix: yf) {
-                    _ = ble.send(c)
-                    usleep(120_000)
-                }
-                Thread.sleep(forTimeInterval: 2.0)
-            }
-            log.log("gotoapp \(which) ｜ 尝试: \(opened.joined(separator: " "))")
-            return .json(["ok": true, "name": which, "tried": opened,
-                          "openBtn": [openBtn.x, openBtn.y],
-                          "hint": "若没切过去 ⇒ 用 /swipe 翻页 + /click 点桌面图标（兜底路）",
-                          "state": ble.state, "error": ble.lastError])
+        // ⛔⛔ §2273 **`/gotoapp` 已删除**（我上一版在这里用 `UIApplication.open` 跳转，
+        //    违反用户铁律「**所有操作用 ESP32**」，§2249 逐字）。
+        // ✅ 正确做法（照 PC `ensure_app`，`_1377_ad_loop.py:8508`）已在 `/run` 里实现：
+        //    **回主屏 → 翻页 → 点桌面图标**，全程 ESP32。
+        // ⛔ 不要在这里加回任何"用 App 自己能力跳转"的接口。
 
         // ⭐⭐⭐ `POST /install-shortcut` —— **一站式：把 PGshot 推给 Safari 下载**
         //    ① App 自己确认 Documents 里有 PGshot.shortcut
@@ -871,5 +819,115 @@ final class APIRouter {
 
         addDir(root, depth: 0)
         return out.sorted { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
+    }
+
+    // MARK: - ⭐⭐⭐⭐⭐ §2273 切到目标 App（照 PC `ensure_app`，**全程 ESP32**）
+
+    /// 把前台切到 `kslite` / `ks` —— ⛔ **不用 App 的 `open()`**（用户铁律：所有操作走 ESP32）。
+    ///
+    /// ## 逐条照抄 PC（`_1377_ad_loop.py`）
+    /// ```
+    /// ensure_app()                    # L8508
+    ///   go_home(tag)                  # ① 回主屏（底部快速上滑 / H:HOME 兜底）
+    ///   find_desktop_icon_paged(...)  # ② 桌面找图标（**会翻页**，L8001）
+    ///   click_at(plog(_p[0], _p[1]))  # ③ 点它
+    /// ```
+    /// 而 `find_desktop_icon`（L7856）的判据是 **OCR 标签 + 点标签上方**：
+    /// ```python
+    /// cands ⇒ sorted(最上、再最左)[0]
+    /// return (cx, cy - FH(0.055), s)     # ⭐ **图标在标签文字上方 0.055 屏高**
+    /// ```
+    /// ⛔ 我一开始想**写死图标坐标** —— 那正是 PC 反复踩过的坑
+    ///    （换页数/换版式就失效）。✅ 改成**识别标签再算落点**。
+    ///
+    /// ## ⛔ PC 记过的三条**排除闸**（必须照抄，否则会把弹窗句子当图标）
+    /// 真机血案 `_var/_1755_stab_{1..4}.log`：iOS 弹
+    /// 「"快手"想访问相机。」（**整句含"快手"**）⇒ 旧判据把它当图标 ⇒
+    /// **点了 8 次弹窗、一次没点到真图标** ⇒ 4/4 全废。
+    /// ⇒ ① 标签长 ≤6 字 ② 不带引号/句号/问号 ③ 不含弹窗语义词
+    ///
+    /// - Returns: true = 已发出"点图标"命令（⛔ 不代表真的切过去了）
+    @discardableResult
+    func switchApp(named which: String) -> Bool {
+        let bw = cfgStore.cfg?.settings?.base_w ?? 451
+        let bh = cfgStore.cfg?.settings?.base_h ?? 977
+        let yf = cfgStore.cfg?.settings?.y_fix ?? 4
+        let rec = makeRecognizer()
+
+        func hid(_ cmds: [String], gapUS: UInt32 = 130_000) {
+            for c in cmds { _ = ble.send(c); usleep(gapUS) }
+        }
+        /// 抓当前帧（优先内存帧；没有就轮询一次）
+        func frame() -> UIImage? {
+            if let d = broadcaster.lastFrame, let im = UIImage(data: d) { return im }
+            broadcaster.pollFrame()
+            if let d = broadcaster.lastFrame, let im = UIImage(data: d) { return im }
+            return nil
+        }
+        /// PC `find_desktop_icon`：OCR 找标签，返回**图标落点**（标签上方 0.055 屏高）
+        func findIcon(_ img: UIImage) -> (CGPoint, String)? {
+            let ws = rec.ocrRegion(img, rect: CGRect(x: 0, y: 60, width: bw, height: bh - 60),
+                                    minConfidence: 0.3)
+            var cands: [(CGPoint, String)] = []
+            for (t, r, _c) in ws {
+                let s = t.trimmingCharacters(in: .whitespaces)
+                if s.isEmpty || !s.contains("快手") { continue }
+                // ⛔ 排除闸①：图标名短（弹窗句子长）
+                if s.count > 6 { continue }
+                // ⛔ 排除闸②：带标点 ⇒ 是句子
+                if s.contains(where: { "“”。？！，,".contains($0) }) { continue }
+                // ⛔ 排除闸③：弹窗语义词
+                if ["想访问", "允许", "用于", "录制", "拍照", "直播"].contains(where: { s.contains($0) }) {
+                    continue
+                }
+                if which == "kslite" {
+                    if s.contains("极速") { cands.append((CGPoint(x: r.midX, y: r.midY), s)) }
+                } else {
+                    if !s.contains("极速") { cands.append((CGPoint(x: r.midX, y: r.midY), s)) }
+                }
+            }
+            guard !cands.isEmpty else { return nil }
+            // 取**最上、再最左**（照 PC `sorted(key=(round(y/40), x))`）
+            let pick = cands.sorted {
+                let ra = (Double($0.0.y) / 40.0).rounded(), rb = (Double($1.0.y) / 40.0).rounded()
+                return ra != rb ? ra < rb : $0.0.x < $1.0.x
+            }[0]
+            // ⭐ 图标在**标签上方 0.055 屏高**（PC `FH(0.055)`）
+            let pt = CGPoint(x: pick.0.x, y: pick.0.y - bh * 0.055)
+            return (pt, pick.1)
+        }
+
+        // ① 回主屏（PC `go_home`：底部快速上滑；`H:HOME` 兜底）
+        log.log("切换(ESP32) ① 回主屏 \(which)")
+        hid(["H:HOME\n"])
+        Thread.sleep(forTimeInterval: 2.5)
+
+        // ② 当页找；找不到就**翻页**（PC `find_desktop_icon_paged`：先右滑回退，再左滑前进）
+        if let img = frame(), let (pt, label) = findIcon(img) {
+            log.log("切换(ESP32) ② 当页命中「\(label)」⇒ 点 (\(Int(pt.x)),\(Int(pt.y)))")
+            hid(BLEController.moveAndClick(x: Double(pt.x), y: Double(pt.y),
+                                           baseW: bw, baseH: bh, yFix: yf))
+            Thread.sleep(forTimeInterval: 6.0)      // 照 PC `wait(6.5)`
+            return true
+        }
+        log.log("切换(ESP32) ② 当页没有「\(which)」⇒ 翻页找（最多 6 页）")
+        let deskSwipeMS = 400                        // PC `DESK_SWIPE_MS`
+        for k in 1...6 {
+            // ⭐ 左滑前进一页（PC: `dlog(380,500, 60,500, DESK_SWIPE_MS)`）
+            hid([BLEController.swipe(x1: 380, y1: 500, x2: 60, y2: 500,
+                                     speed: .mid, baseW: bw, baseH: bh, yFix: yf)])
+            _ = deskSwipeMS
+            Thread.sleep(forTimeInterval: 1.4)
+            guard let img = frame() else { continue }
+            if let (pt, label) = findIcon(img) {
+                log.log("切换(ESP32) ③ 第 \(k) 次翻页命中「\(label)」⇒ 点 (\(Int(pt.x)),\(Int(pt.y)))")
+                hid(BLEController.moveAndClick(x: Double(pt.x), y: Double(pt.y),
+                                               baseW: bw, baseH: bh, yFix: yf))
+                Thread.sleep(forTimeInterval: 6.0)
+                return true
+            }
+        }
+        log.log("切换(ESP32) ⛔ 翻了 6 页都没找到「\(which)」图标 ⇒ **不放枪**（铁律②）")
+        return false
     }
 }
