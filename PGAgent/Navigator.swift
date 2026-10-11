@@ -502,6 +502,29 @@ final class Navigator {
                 }
                 continue
             }
+            // ⭐⭐⭐⭐⭐ §2316 **底部弹窗（亮度闸 + 消极项按钮 OCR）—— 用户令**
+            //
+            // ## 用户原话（逐字）
+            // > 「**这种页面弹窗你就点击一下就行了啊 看弹窗亮度分析就行了**」
+            //
+            // ## ⛔ PC 记下的两次失败（⛔ 别再犯）
+            // v1「下半屏连续全宽纯白」 ⇒ **误判 4/6**（草稿箱/商城/结果页本来就是白底）
+            // v2「白卡片顶边一行跃变」 ⇒ **误判 5/6**
+            // ⇒ 根因：**“白”不是弹窗的特征**（快手很多页本来就白底）
+            // ✅ 本机实测双信号区分度 **6/6 零误判**：
+            //    ① 亮度闸（下半屏中段有 12+ 行纯白 >=240）
+            //    ② OCR 闸（底部出现**消极项**文案：我知道了/取消/以后再说…）
+            //    两者 **AND** ⇒ 误报率相乘。点哪里：用 **OCR 给的坐标**（比亮度推算准）。
+            // ⛔ 铁律④：**只点消极项**，⛔ 不点右侧主按钮（词表故意只收消极项）。
+            if it.element == "bottom_popup" {
+                if let hit = Self.findBottomPopup(img, rec: rec, bw: baseW) {
+                    funnelLast[it.element] = now
+                    log("   §funnel bottom_popup（底部弹窗 “\(hit.tag)”）@(\(Int(hit.x)),\(Int(hit.y)))")
+                    tapPoint(Double(hit.x), Double(hit.y))
+                    return true
+                }
+                continue
+            }
             // ⭐ 券弹窗 ✕（PC `find_coupon_x`，ROI 在屏幕中下）—— 同一个判据换 ROI
             if it.element == "coupon_x" {
                 if let c = ModalX.findCoupon(img) {
@@ -528,6 +551,61 @@ final class Navigator {
             }
         }
         return false
+    }
+
+
+    // MARK: - ⭐⭐ 底部弹窗（亮度闸 + 消极项按钮 OCR）
+
+    /// ⭐⭐⭐ 底部弹窗两级判据 —— 逐字照 PC `find_bottom_popup`（`_1377_ad_loop.py:5391）。
+    ///
+    /// ## 为什么是“亮度 + OCR”两级（而不是只看亮度）
+    /// PC 注释里记了它自己的两次失败：
+    /// ```
+    ///   v1「下半屏连续全宽纯白」 ⇒ 误判 4/6（草稿箱/商城/结果页本来就白底）
+    ///   v2「白卡片顶边一行跃变」 ⇒ 误判 5/6
+    /// ```
+    /// ⇒ 根因：**“白”不是弹窗的特征**。只能当“宽泛闸”。
+    /// ✅ 双信号 **AND** ⇒ 区分度 6/6 零误判（PC 本机实测）。
+    ///
+    /// - Returns: 命中则返回消极项按钮的**基准像素**中心与文案；否则 nil（⛔ 不放枪）。
+    static func findBottomPopup(_ img: UIImage, rec: Recognizer, bw: Double)
+        -> (x: Double, y: Double, tag: String)? {
+        // ── ① 亮度闸（宽泛）：下半屏**中段**存在“白卡片” ──
+        //    ⛔ 只看中段 x ∈ [0.35W, 0.65W]（避开左右边缘的圆角/阴影）
+        let base = FrameNormalizer.normalize(img)
+        guard let g = rec.gray(base) else { return nil }
+        let H = g.h, W = g.w
+        let x0 = Int(Double(W) * 0.35), x1 = Int(Double(W) * 0.65)
+        guard x1 > x0, H > 10 else { return nil }
+        var whiteRows = 0
+        let yFrom = Int(Double(H) * 0.45)
+        for y in yFrom..<H {
+            var sum = 0
+            for x in x0..<x1 { sum += Int(g.p[y * W + x]) }
+            let mean = Double(sum) / Double(max(1, x1 - x0))
+            if mean >= 240 { whiteRows += 1 }      // PC POPUP_WHITE = 240
+        }
+        if whiteRows < 12 { return nil }           // PC POPUP_MIN_ROWS = 12
+        // ── ② OCR 闸（严）：底部出现**消极项**文案 ──
+        //    PC 只认下半屏 y >= 0.82H 那一带
+        let band = CGRect(x: 0, y: Double(H) * 0.82, width: bw, height: Double(H) * 0.18)
+        let ws = rec.ocrRegion(base, rect: band, minConfidence: 0.3)
+        var best: (Double, Double, String)?
+        for (t, r, _c) in ws {
+            let s = t.trimmingCharacters(in: .whitespaces)
+            // ⛔ 词表故意**只收消极项**（照 PC POPUP_BTN_KEYS）：
+            //    “设置提示音/立即开通/去开启”这类**主按钮绝不能进来**
+            let keys = ["我知道了", "知道了", "取消", "以后再说", "暂不", "暂不开启",
+                        "跳过", "下次再说", "不再提示", "关闭"]
+            if keys.contains(where: { s.contains($0) }) {
+                // 取**最靠下**那个（弹窗按钮在最底部）
+                if best == nil || r.midY > best!.1 {
+                    best = (Double(r.midX), Double(r.midY), s)
+                }
+            }
+        }
+        guard let b = best else { return nil }
+        return (b.0, b.1, b.2)
     }
 
     // MARK: - 到目的地（①②③④ 主循环）
