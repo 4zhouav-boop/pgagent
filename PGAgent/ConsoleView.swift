@@ -255,7 +255,14 @@ private struct SettingsPane: View {
                             HStack {
                                 Toggle(cn, isOn: Binding(
                                     get: { feats.contains(key) },
-                                    set: { $0 ? feats.insert(key) : feats.remove(key) }))
+                                    // ⛔ 不能用 `$0 ? feats.insert(key) : feats.remove(key)` 的三元式：
+                                    //   `Set.insert` 返回 `(inserted:memberAfterInsert:)`、
+                                    //   `remove` 返回 `String?` ⇒ **两个分支类型不一致** ⇒ 编译错
+                                    //   （CI 实测：`result values in '? :' expression have mismatching types`）。
+                                    // ✅ 改成显式语句。
+                                    set: { on in
+                                        if on { feats.insert(key) } else { feats.remove(key) }
+                                    }))
                                 // ⭐ 时间就在勾选项右边（照 PC 控制台的布局）
                                 TextField("分", value: Binding(
                                     get: { mins[key] ?? dflt },
@@ -298,7 +305,10 @@ private struct SettingsPane: View {
                         ForEach(Self.appOpts, id: \.1) { (cn, key) in
                             Toggle(cn, isOn: Binding(
                                 get: { apps.contains(key) },
-                                set: { $0 ? apps.insert(key) : apps.remove(key) }))
+                                // ⛔ 同上：`insert`/`remove` 返回值类型不同，⛔ 不能写三元式
+                                set: { on in
+                                    if on { apps.insert(key) } else { apps.remove(key) }
+                                }))
                         }
                         Text("⭐ 两个都勾 ⇒ **交替循环**（跑完一个 App 的 4 个功能，换另一个）")
                             .font(.system(size: 10)).foregroundColor(.secondary)
