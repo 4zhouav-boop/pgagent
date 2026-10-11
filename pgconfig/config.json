@@ -447,17 +447,30 @@
     },
 
     "featured": {
-      "desc": "精选 tab（⭐ 金币悬浮球在这里）",
+      "desc": "精选 tab（⭐⭐ 红包/金币悬浮球在这里 —— 回金币中心的唯一入口）",
       "check": ["tab_featured"],
       "parent": "center",
-      "go": "center_marker",
+      "go": "coin_ball",
       "_go_doc": [
-        "⭐ 点「金币悬浮球」进金币中心。",
-        "⚠️ PC 用的是专门的 `coin_ball` 元素；我们先用 `center_marker` 的 ROI 近似",
-        "   （它是顶栏「我的金币/话费充值/金币商城」的 OCR 锚点）。",
-        "⚠️ 待补：真正的悬浮球模板（PC `_dev/assets` 里应有对应模板）"
+        "⭐⭐⭐ **照电脑端 PC `_1760_2round_d.log` L402→L407 的铁证**：",
+        "  L402: App底栏(首页/精选/消息) 上**没悬浮球** ⇒ 先**切底栏『精选』**@scr(136,911)",
+        "  L407: App 页面（App底栏）⇒ 点左上「红包/金币」悬浮球 @scr(50,154) ✅",
+        "⇒ **悬浮球在「精选」tab 上，不在「首页」tab 上**。",
+        "⇒ 所以整条回中心的路是**两步**：`feed → tab_featured → coin_ball`。",
+        "",
+        "⛔ `coin_ball` **不是元素**（`elements` 里没有它）—— 它是**色彩判据动作**：",
+        "   `ColorBlob.findCoinBall` 照 PC `find_coin_entry` 找**红色圆角块**",
+        "   （`COIN_ROI=(35,120,115,235)`、`r>180 && r-g>100 && r-b>100`、",
+        "    膨胀 2 次、尺寸 20~55、**fill ∈ [0.68,0.88]**）。",
+        "   PC **全量 1706 帧验证**：POS 12/12 命中、NEG 1694 帧 0 命中。",
+        "⛔ 为什么不能用 OCR 近似：悬浮球**纯图形、没有文字** ⇒ Vision 认不出。"
       ],
-      "alts": ["back_arrow"]
+      "alts": ["center_marker", "back_arrow"],
+      "_alts_doc": [
+        "备用出路：",
+        "  · `center_marker` —— 万一已在中心页（顶栏 OCR 命中），直接算到达",
+        "  · `back_arrow`    —— 退一层再想办法"
+      ]
     },
 
     "mall": {
@@ -543,6 +556,17 @@
     },
     {"element": "pill_x",         "interval": 1.0, "desc": "顶栏胶囊 ✕"},
     {"element": "float_x",        "interval": 1.0, "desc": "悬浮球 ✕"},
+    {"element": "coin_ball",      "interval": 1.0,
+     "desc": "⭐⭐ 红包悬浮球（⛔ 不是弹窗，是**回金币中心的入口**）",
+     "_doc": [
+       "⭐ 照 PC `_1377_ad_loop.py:2479` 的说明：",
+       "   「走 coin_ball ⇒ 兜底『切首页』⇒ 原地踏步 8 步」",
+       "⇒ PC 确实把 `coin_ball` 放进导航/漏斗里当**恢复腿**之一。",
+       "📏 它在**色彩判据**下命中（`ColorBlob.findCoinBall`），",
+       "   ⛔ 不是 OCR —— 所以放在漏斗里也能被 `detect` 之外的路径处理。",
+       "⚠️ 顺序：放在弹窗 ✕ 之后、返回键之前 ——",
+       "   弹窗盖屏时先关弹窗，再考虑『是不是能直接回中心』。"
+     ]},
     {"element": "back_arrow",     "interval": 1.0, "desc": "左上 〈"},
     {"element": "back_circle",    "interval": 1.0, "desc": "左上圆钮"},
     {"element": "white_chevron",  "interval": 1.0, "desc": "白色 〈"}

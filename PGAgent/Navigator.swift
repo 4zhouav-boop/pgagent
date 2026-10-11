@@ -230,6 +230,30 @@ final class Navigator {
         return true
     }
 
+    /// ⭐⭐⭐ **点「红包/金币」悬浮球**（回金币中心的**唯一入口**）
+    ///
+    /// ## 为什么必须有它（§2256 实测卡点）
+    /// 手机端跑到 adbox 第一步「回金币中心」就卡死（trace 铁证）：
+    /// ```
+    /// §adbox_boot ⚠️ 在 unknown 找不到回中心的路（第 1 步）…（8 步全废）
+    /// ```
+    /// **根因**：悬浮球是**纯图形、没有文字** ⇒ **OCR 认不出**。
+    ///
+    /// ✅ 用 PC 的**色彩判据**（`find_coin_entry`，全量 1706 帧验证：
+    ///    POS 12/12 命中、NEG 1694 帧 0 命中）。
+    ///
+    /// ⛔ 铁律②：**找不到就不点**（返回 false，调用方什么都不做）。
+    @discardableResult
+    func tapCoinBall(img: UIImage) -> Bool {
+        guard let c = ColorBlob.findCoinBall(img) else {
+            log("   §coin 没找到红包悬浮球（⛔ 不盲点）")
+            return false
+        }
+        log("   §coin 找到红包球 @(\(Int(c.x)),\(Int(c.y))) ⇒ 点击")
+        tapPoint(Double(c.x), Double(c.y))
+        return true
+    }
+
     // MARK: - 漏斗（② 步）
 
     func runFunnel(_ img: UIImage) -> Bool {
@@ -248,6 +272,23 @@ final class Navigator {
             if let req = it.require, detect(req, img: img) == nil {
                 continue
             }
+
+            // ⭐⭐⭐ **色彩判据类恢复腿**（`coin_ball`）—— ⛔ 它不是 OCR/模板元素
+            //
+            // 照 PC `_1377_ad_loop.py:2479`：PC 把 `coin_ball` 当**恢复腿**用
+            // （「走 coin_ball ⇒ 兜底『切首页』」）。
+            // 它由 `ColorBlob.findCoinBall` 的**红色块判据**决定，
+            // 所以**不能**走 `detect()`（那查的是 `elements` 表）。
+            if it.element == "coin_ball" {
+                if let c = ColorBlob.findCoinBall(img) {
+                    funnelLast[it.element] = now
+                    log("   §funnel coin_ball（\(it.desc ?? "")）@(\(Int(c.x)),\(Int(c.y)))")
+                    tapPoint(Double(c.x), Double(c.y))
+                    return true
+                }
+                continue
+            }
+
             if detect(it.element, img: img) != nil {
                 funnelLast[it.element] = now
                 // ⭐⭐ **漏斗一律用原子点击**（`Q:x,y`）—— 照电脑端 `_ext_q` 的语义
@@ -360,11 +401,14 @@ final class Navigator {
         for g in cands where !isDead(page, g) {
             // ① 点之前抓一帧
             let pre = img
-            // ⭐ **手势类出路**（不是"找到再点"，而是直接发一条手势命令）
-            //    `back_edge` = 左边缘右滑返回（B:）—— 沉浸式页面唯一出路
+            // ⭐ **手势/色彩类出路**（⛔ 不是"找到元素再点"，而是专门的动作）
+            //    · `back_edge` = 左边缘右滑返回（B:）—— 沉浸式页面唯一出路
+            //    · `coin_ball` = 点红包悬浮球（**色彩判据**，OCR 认不出它）
             let acted: Bool
             if g == "back_edge" {
                 acted = backEdge()
+            } else if g == "coin_ball" {
+                acted = tapCoinBall(img: img)
             } else {
                 acted = tap(g, img: img)
             }
