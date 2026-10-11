@@ -255,6 +255,21 @@ final class Runner: ObservableObject {
             //    连续 `unknownLimit` 次才认输。
             if page == "unknown" {
                 unknownStreak += 1
+                // ⭐⭐⭐⭐ §2263 **先把"死帧"和"真认不出"分开** —— 这是本轮最重要的分流。
+                //
+                // ⛔ 我原来的病：广播死了 ⇒ 一直喂死帧 ⇒ 一直 `unknown` ⇒
+                //   日志只写「画面认不出」⇒ **我照着日志去改识别**（ROI/判据/模板），
+                //   而真病在"眼"（根本没拿到当前画面）。**在错的轴上努力了好几轮。**
+                //
+                // ✅ 现在：帧龄超上限 ⇒ **明确报"画面是旧的"**，⛔ 不再伪装成识别问题。
+                if let b = broadcaster, let age = b.lastFrameAge(), age > maxFrameAge {
+                    let msg = String(format: "⛔ 画面是**旧帧**（帧龄 %.1fs > %.1fs）⇒ 录屏已停，"
+                                     + "⛔ 不是识别问题（去点「开录屏」→ 系统面板「开始直播」）",
+                                     age, maxFrameAge)
+                    log("§run \(msg)")
+                    finish(msg)
+                    return
+                }
                 DispatchQueue.main.async { self.lastAction = "unknown-retry(\(unknownStreak))" }
                 log("§run ⚠️ 画面认不出（第 \(unknownStreak)/\(unknownLimit) 次）⇒ 重抓再看")
                 // 顺手试试漏斗：弹窗盖屏时**底下**的页面判不出来，
@@ -391,17 +406,35 @@ final class Runner: ObservableObject {
         if let b = broadcaster {
             for _ in 0..<max(1, ocrMaxTries / 10) {
                 if cancelFlag { return nil }
-                if let d = b.lastFrame, let im = UIImage(data: d) {
+                // ⭐⭐⭐⭐ §2263 **只要「新鲜」的帧** —— 照荔枝
+                //   （`_note_2010` L62 / `_note_2011` L253：「⏳ 等待截图文件生成…(第10次检查)」、
+                //     「📝 截图文件存在但大小不足: 0 bytes，继续等待…」⇒ **绝不把旧图当当前画面**）
+                //
+                // ⛔ 我原来的病：**直接 `return UIImage(data: d)`，从不问这一帧多旧**。
+                //   ⇒ 广播一停，`lastFrame` 里那张**死帧**被反复送去识别 ⇒ 永远 `unknown`
+                //   ⇒ 我把它误判成"识别不行"，去改 ROI/判据（**错的轴**，浪费大量时间）。
+                //
+                // 真机并排对照铁证（`_var/_cmp_side.png`，同一时刻取两张）：
+                //   左 iOS 截图 13:22 = 「所有快捷指令」+「直播已停止」弹窗
+                //   右 App 帧    13:15 = PGAgent 自己的界面  ← ⛔ 7 分钟前的死帧
+                if let age = b.lastFrameAge(), age <= maxFrameAge,
+                   let d = b.lastFrame, let im = UIImage(data: d) {
                     return im
                 }
-                // 没帧就去读一次文件（扩展是异步写的）
+                // 帧太旧（或还没有）⇒ 主动读一次文件，再等
                 b.pollFrame()
-                if let d = b.lastFrame, let im = UIImage(data: d) {
+                if let age = b.lastFrameAge(), age <= maxFrameAge,
+                   let d = b.lastFrame, let im = UIImage(data: d) {
                     return im
                 }
                 Thread.sleep(forTimeInterval: 0.5)
             }
-            log("   §grab 录屏帧没等到，退回快捷指令")
+            // ⛔ 等不到新鲜帧 ⇒ **明确报出来**（⛔ 不拿旧帧糊弄下游）
+            let age = b.lastFrameAge()
+            log("   §grab ⛔ 等不到**新鲜**录屏帧（最新帧龄 "
+                + (age.map { String(format: "%.1fs", $0) } ?? "无帧")
+                + " > 上限 \(String(format: "%.1fs", maxFrameAge))）"
+                + " ⇒ 录屏多半已停（去点「开录屏」→ 系统面板「开始直播」）")
         }
 
         // ② 快捷指令截图（兜底）
@@ -422,6 +455,15 @@ final class Runner: ObservableObject {
             }
         }
         return nil
+    }
+
+    /// ⭐ 帧**新鲜度**上限（秒）—— 超过就**不算"当前画面"**（照荔枝"只认新截图"）
+    ///
+    /// 扩展按 2fps 写帧 ⇒ 正常帧龄 **< 0.5s**。
+    /// 给到 `loop_frame_max_age`（默认 **3s**）⇒ 容忍几帧抖动，
+    /// 但**一定**能把"广播已死"和"广播在跑"分开。
+    private var maxFrameAge: Double {
+        cfgStore.cfg?.settings?.loop_frame_max_age ?? 3.0
     }
 
     /// 画面签名：用极小的灰度缩略图做指纹

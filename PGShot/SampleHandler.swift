@@ -52,6 +52,25 @@ class SampleHandler: RPBroadcastSampleHandler {
     /// ⭐ 复用 URLSession（扩展存活期内一直用）
     private var session: URLSession?
 
+    /// ⭐⭐⭐⭐⭐ **复用一个 `CIContext`**（⛔⛔ 绝不每帧新建！）
+    ///
+    /// ## 为什么（§2263 —— 「录屏老是自己停」的真根因）
+    /// 我原来在 `processSampleBuffer` 里**每帧**都写：
+    /// ```swift
+    /// let ctx = CIContext(options: [.useSoftwareRenderer: false])   // ⛔ 每帧一个
+    /// ```
+    /// `CIContext` 会携带 **Metal/OpenGL 上下文 + 缓存**，构造一次的开销与内存都很大。
+    /// 广播扩展跑在一个**内存限额很紧**的独立进程里，2fps 每帧都新建 ⇒
+    /// **内存/句柄持续增长 ⇒ 被系统杀掉** ⇒ 表现就是"录屏跑一会儿自己停了"
+    /// （用户看到的现象）+ 之后 App 一直喂**死帧** ⇒ `unknown`。
+    ///
+    /// 📏 苹果与业界一致口径：`CIContext` **创建昂贵，应长期复用**
+    ///   （Core Image 文档："Creating a CIContext is expensive… reuse it"）。
+    ///   荔枝能做到长时间连续录屏（`_note_2010`），正是因为它不这么干。
+    ///
+    /// ⇒ 提到实例属性，**全程一个**。
+    private lazy var ciContext = CIContext(options: [.useSoftwareRenderer: false])
+
     /// ⭐⭐⭐ 本扩展**自己的** Documents（仅在 App Group 不可用时兜底）
     private var ownDir: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
@@ -210,8 +229,8 @@ class SampleHandler: RPBroadcastSampleHandler {
         // ③ 出图
         guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let ci = CIImage(cvPixelBuffer: pb)
-        let ctx = CIContext(options: [.useSoftwareRenderer: false])
-        guard let cg = ctx.createCGImage(ci, from: ci.extent) else { return }
+        // ⭐⭐⭐ §2263 **复用实例级 `ciContext`**（⛔ 原来每帧新建 ⇒ 扩展被杀 ⇒ "录屏自己停"）
+        guard let cg = ciContext.createCGImage(ci, from: ci.extent) else { return }
         let img = UIImage(cgImage: cg)
 
         // ④ 降采样（省 IO，识别够用）
@@ -240,10 +259,36 @@ class SampleHandler: RPBroadcastSampleHandler {
     ///
     /// 目录由 `dir` 决定（共享可用即共享，否则本容器）。
     /// 同时更新 `lastframe.jpg`（主 App 轮询它）并按序号留档。
+    ///
+    /// ## ⭐⭐ §2263 为什么**每帧都留一个带序号的档**（照荔枝"新文件"语义）
+    /// 荔枝的取帧是「**等新截图文件出现**」（`_note_2011` L253：
+    /// 「⏳ 等待截图文件生成... (第10次检查)」），所以它**天生**能分辨
+    /// "扩展还在写" 与 "扩展已死" —— 因为**死的时候不会有新文件**。
+    ///
+    /// 我原来 `seq % 10 == 0` 才留档 ⇒ 文件清单**稀疏且滞后**，
+    /// 光看目录**分不出**"扩展还活着"（主 App 只能靠 mtime，而 mtime 属于覆盖写的
+    /// `lastframe.jpg`，一旦扩展死掉它就**冻在那里**，看不出是死的）。
+    ///
+    /// ⇒ 改成**每帧都写 `frame_<seq>.jpg`**，并**只保留最近 `keepFrames` 个**
+    ///   （避免把共享容器写爆 —— 每帧约 100~400KB，2fps）。
+    ///   ⚠️ 主 App 侧仍然优先用内存里的 `lastFrame` + **帧龄**判据（§2263），
+    ///      这个序号档是**给文件通道/诊断用的第二重证据**。
     private func writeShared(_ data: Data) {
         write(data, name: "lastframe.jpg")
-        if seq % 10 == 0 {
-            write(data, name: "frame_\(seq).jpg")
+        // ⭐ 每帧都留档（照荔枝"新文件"语义）⇒ 目录本身就是"扩展还活着"的证据
+        write(data, name: "frame_\(seq).jpg")
+        trimOldFrames()
+    }
+
+    /// 只保留最近 `keepFrames` 个 `frame_*.jpg`（⛔ 别把共享容器写爆）
+    private func trimOldFrames() {
+        let keep = 40
+        guard seq > keep else { return }
+        let fm = FileManager.default
+        // 只扫最近这一小段（⛔ 不全目录遍历，省 IO）
+        for old in (seq - keep - 10)...(seq - keep) where old > 0 {
+            let u = dir.appendingPathComponent("frame_\(old).jpg")
+            if fm.fileExists(atPath: u.path) { try? fm.removeItem(at: u) }
         }
     }
 

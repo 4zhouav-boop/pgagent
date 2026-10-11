@@ -353,6 +353,41 @@ final class BroadcastStarter: ObservableObject {
         return _lastFrame != nil
     }
 
+    /// ⭐⭐⭐⭐ **这一帧有多旧**（秒）；没有帧 ⇒ nil
+    ///
+    /// ## 为什么必须有它（§2263 —— 荔枝的作业，我抄漏了最关键的一条）
+    ///
+    /// 荔枝的日志里有这一串（`_note_2010` / `_note_2011` 扒出来的）：
+    /// ```
+    /// "⏳ 等待截图文件生成... (第10次检查)"
+    /// "📝 截图文件存在但大小不足: 0 bytes，继续等待..."
+    /// ```
+    /// ⇒ **它只认「新鲜」的帧**：等**新文件**出现、还查**大小**，
+    ///    ⛔ 绝不把一张旧图当"当前画面"。
+    ///
+    /// ## 我原来的病（真机血案 `_var/_cmp_side.png` 并排对照图）
+    /// `grabSync()` **直接返回 `_lastFrame`，从不问它有多旧**。
+    /// ⇒ 广播一停（半死会话/被系统收掉），`_lastFrame` 里那张**死帧**
+    ///   就被**反复**送去识别 ⇒ 永远 `unknown`。
+    ///
+    /// 真机并排对照（同一时刻取两张）：
+    /// ```
+    /// 左：iOS 真实截图  13:22  = 「所有快捷指令」页 + 「直播已停止」弹窗
+    /// 右：App 喂识别的帧 13:15  = PGAgent 自己的界面      ← ⛔ 7 分钟前的死帧！
+    /// ```
+    /// ⇒ 判 `unknown` **是对的** —— 因为**根本没拿到正确画面**。
+    ///   而日志把它表现成"识别不行"，我差点又去改识别（错的轴）。
+    ///
+    /// ⚠️ 与 `framesVerified` 的区别：那个是**启动时**的一次性结论，
+    ///    这个是**每一帧**都要问的（广播随时可能死）。
+    func lastFrameAge() -> Double? {
+        frameLock.lock(); defer { frameLock.unlock() }
+        guard _lastFrame != nil else { return nil }
+        let at = lastFrameReceivedAt
+        guard let t = at else { return nil }
+        return Date().timeIntervalSince(t)
+    }
+
     // MARK: - ⭐⭐ 启动**并验证**（§2240）
 
     /// ⭐ 启动录屏，然后**确认帧真的开始进**；不进行就重试。
