@@ -72,6 +72,14 @@ final class FeatureEngine {
     private var baseH: Double { s?.base_h ?? 977 }
     private var yFix: Double { s?.y_fix ?? 4 }
 
+    /// ⭐ 帧新鲜度上限（秒）—— 与 `Runner.maxFrameAge` **同一个配置项**
+    ///
+    /// ⚠️ 为什么这里也要有一份：`grabFresh(since:maxWait:)` 需要按
+    ///    「一个写盘周期有多长」来决定等多久（§2265：节拍 1帧/4s ⇒ 上限 7s）。
+    ///    `Runner` 里那份是 `private`，本类取不到 ⇒ 各自读**同一个** `config.json` 字段，
+    ///    ⛔ 不硬编码两处不同的数（否则又是一处"改了 A 忘了 B"）。
+    private var maxFrameAgeCfg: Double { s?.loop_frame_max_age ?? 7.0 }
+
     // MARK: - ⭐ 对外入口：跑**一轮完整闭环**
 
     /// 跑一轮：按 `order` 依次跑「勾到的」功能。
@@ -193,7 +201,7 @@ final class FeatureEngine {
                 //
                 // ✅ 用 `grabFresh(since: img)` 等一张**与点击前不同**的帧；
                 //    画面真没变 ⇒ 等满预算才判失败（结论仍对）。
-                let i2 = grabFresh(since: img, maxWait: maxFrameAge + 3.0)
+                let i2 = grabFresh(since: img, maxWait: maxFrameAgeCfg + 3.0)
                 if let i2 = i2, nav.pageHere(i2) == "ad_video" {
                     log("§adbox ⛔ 已进广告页 ⇒ 放行待够 \(Int(dwell))s")
                     dwellOnAd(dwell)
