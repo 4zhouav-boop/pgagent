@@ -39,44 +39,26 @@ class SampleHandler: RPBroadcastSampleHandler {
 
     private var seq = 0
     private var lastWrite = Date.distantPast
-    /// ⭐ 写盘频率（帧/秒）—— §2265 **按 iOS 写入预算反推**
+    /// ⭐⭐ 抓帧频率（帧/秒）—— §2266 **现在放宽到 1 fps**
     ///
-    /// ## 预算（系统报告铁证，见 `writeShared` 的注释）
+    /// ## ⛔⛔ 为什么它可以放宽了（§2266 的结构性改变）
+    /// §2265 时它是 **1帧/4s** —— 因为**当时帧必须落盘**，而写盘预算只有 12.73 KB/s。
+    /// §2266 把主路改成 **HTTP POST**（回环 socket，**⛔ 不占磁盘预算**）：
     /// ```
-    ///   Writes limit:  1073.74 MB / 86400s  ⇒ 平均 **12.43 KB/s**
+    ///   常态（App 活着，§2263 实测退后台仍通）: POST 成功 ⇒ **完全不写盘**
+    ///   ⇒ 磁盘写入 ≈ 0 ⇒ 「写盘预算」**不再是约束** ⇒ 抓帧频率可以回到正常
     /// ```
-    /// ⇒ 想**长期**不被杀，长期平均写入必须压到 **~12 KB/s** 以下。
+    /// ⇒ 取 **1 fps**（1帧/1s）：帧龄 ≤1s，`Runner` 每步（1.5s）都能拿到**新鲜**画面。
     ///
-    /// ## ⭐⭐ 用**实测**定参数（⛔ 我第一版是估算的，差点又埋雷）
-    /// 在真机帧上实测 451×977 的 JPEG 体积（`_dev/_2265_write_budget.py` 可复跑）：
-    /// ```
-    ///   q0.7 = 43.4~48.6 KB   ⇒ 1帧/3s = 14.5~16.2 KB/s   ⛔ 超预算
-    ///   q0.5 = 33.8~38.2 KB   ⇒ 1帧/3s = 11.3~12.7 KB/s   ⚠️ **正好卡在预算线（12.73）**
-    ///   q0.4 = 30.3~34.2 KB   ⇒ 1帧/4s =  7.6~8.6 KB/s   ✅ 有余量
-    /// ```
-    /// 📏 **教训**：我原以为单帧只有 22~35 KB，实测是 **34~49 KB** ——
-    ///   快手界面**文字密集**，JPEG 压缩率远比自然图像差。
-    ///   ⇒ ⛔ 参数**必须实测**，⛔ 不能按经验系数估（我这次估偏了 ~40%）。
+    /// ## ⚠️ 那"预算"由谁兜住
+    /// 由 **`writeSharedFallback` 的硬限速（5s）** 兜 ——
+    /// 即**最坏情况**（HTTP 全程不通）也只有 ~9 KB/s，仍在 12.73 KB/s 内。
+    /// ⇒ 两条路各管一头：
+    ///    · 正常：HTTP 高频（1fps）、磁盘零写
+    ///    · 异常：HTTP 不通 ⇒ 磁盘降频（≥5s/帧）但仍**不会撑爆预算**
     ///
-    /// ## 最终取值（两项一起调，把余量拉到 ~1.5×）
-    /// | 参数 | 值 | 平均写入 | 对预算(12.73 KB/s) |
-    /// |---|---|---|---|
-    /// | 原始 | 2fps / q0.7 / 2文件 / 1353px | **1530 KB/s** | ⛔ **120×**（12 分钟被杀）|
-    /// | 仅修 bug（①②③） | 2fps / q0.7 | ~150 KB/s | ⛔ 12× |
-    /// | 第一版估算 | 1帧/3s / q0.5 | 11.3~12.7 KB/s | ⚠️ **≈1.0×（无余量）** |
-    /// | **最终** | **1帧/4s / q0.4** | **7.6~8.6 KB/s** | ✅ **~1.5×** |
-    ///
-    /// ## 够用性（帧龄上限**必须跟着调**，已在 §2265 同时改）
-    /// `Runner` 每步 `loop_step_wait`（默认 **1.5s**）抓一帧；
-    /// 1帧/4s ⇒ 帧龄在 **0~4s** 波动，
-    /// 而 `loop_frame_max_age` 已放宽到 **5.0s**
-    /// （⚠️ 若仍写 3.0s，4s 节拍会**必然超限** ⇒ 每帧都误判"画面是旧帧"）。
-    ///
-    /// ⚠️ **诚实的边界**：预算是 **1073 MB / 24h**，
-    ///    本配置理论可撑 **~35 小时**连续录屏 —— 够一次长跑，⛔ **不是无限**。
-    ///    ⛔ 真 7×24 不间断须改成「**按需取帧**」（App 要帧时扩展才写）——
-    ///    结构性改动，留到确认本轮修复能稳定长跑之后。
-    private let fps = 1.0 / 4.0
+    /// 📏 实测复核见 `_dev/_2266_writes_live.py`（⛔ 不再靠估：本轮已被实测否决两次）。
+    private let fps = 1.0
     /// ⭐ 降采样后的宽度（**像素**！见 `downscale` 的 scale 修正）
     private let outWidth: CGFloat = 451
 
@@ -87,6 +69,26 @@ class SampleHandler: RPBroadcastSampleHandler {
     private let port: UInt16 = 8899
     /// ⭐ 复用 URLSession（扩展存活期内一直用）
     private var session: URLSession?
+    /// ⭐⭐⭐⭐ §2266 **上一帧 HTTP POST 成功了没有** —— 决定"要不要写盘"
+    ///
+    /// ## 这是「直播一直停止」的**结构性正解**
+    /// 实测（§2265/§2266，真机数字）：
+    /// ```
+    ///   iOS 给扩展的磁盘写入预算 : 1073.74 MB / 86400s = **12.73 KB/s**
+    ///   真机单帧体积              : **65.4 KB**（451×975 直播画面，文字密集）
+    ///   ⇒ 就算 1帧/4s 也是 16.4 KB/s ⛔ 仍超预算
+    ///   ⇒ **连续定时写盘在结构上就走不通**（⛔ 不是我参数没调好）
+    /// ```
+    /// ✅ 但**帧有两条路**，而 `post()`（HTTP 到 `127.0.0.1:8899/frame`）
+    ///    **⛔ 完全不占磁盘写入预算**（走的是回环 socket，不是 file-backed 写）。
+    /// ⇒ 策略：**POST 成功 ⇒ ⛔ 不写盘**；只有 POST 失败（App 不在/挂起）才落盘兜底。
+    ///
+    /// 📏 这与既有注释的分工一致（`post` 的 docstring：「App Group 是主路，HTTP 是兜底」）——
+    ///    本轮**把它反过来**：**HTTP 是主路**（省预算），**落盘是兜底**（保可用）。
+    ///    ⚠️ 原因就是"预算是硬的、而 App 大部分时间活着"这个事实（§2263 实测后台 HTTP 通）。
+    private var lastPostOK = false
+    /// ⭐ §2266 **上次落盘的时间**（落盘兜底的硬限速用）
+    private var lastDiskWrite = Date.distantPast
 
     /// ⭐⭐⭐⭐⭐ **复用一个 `CIContext`**（⛔⛔ 绝不每帧新建！）
     ///
@@ -274,29 +276,76 @@ class SampleHandler: RPBroadcastSampleHandler {
         //    scale=3 ⇒ "451 宽"实际输出 **1353px**（像素数 9×）⇒ 磁盘写入超限 ⇒
         //    扩展被系统杀 ⇒「**直播一直停止**」。已在 `downscale` 里钉 `scale = 1.0`。
         let scaled = downscale(img, toWidth: outWidth)
-        // ⭐ 质量 0.7 → **0.4**：⭐ 这是**实测**定的（⛔ 不是估的）。
-        //    真机帧实测 451×977：q0.7=43~49KB、q0.5=34~38KB、q0.4=30~34KB。
-        //    q0.5 + 1帧/3s 恰好卡在预算线（12.7 KB/s）⇒ 无余量；
-        //    **q0.4 + 1帧/4s ⇒ 7.6~8.6 KB/s ⇒ ~1.5× 余量**（见 `fps` 的对账表）。
-        //    ⚠️ 识别用的是 OCR 二值化 + 模板灰度，q0.4 的压缩噪声影响极小
-        //      （§2263 实测：q0.7 与缩放后的帧在真机上判页/命中都正常）。
+        // ⑤ 编码 JPEG
+        //
+        // ## ⚠️ 为什么**不能**转灰度（§2266 判决性实验）
+        // 我一度想"灰度省 1/3 体积"，但**实测否决**：
+        // ```
+        //   彩色帧 ⇒ ColorBlob 命中 (51.5, 163.8)  ✅
+        //   灰度帧 ⇒ None                          ⛔ 永远不可能命中
+        // ```
+        // `ColorBlob` 找**红包球**的判据是 `r>180 && r-g>100 && r-b>100`
+        // ⇒ 灰度后 `r=g=b` ⇒ **判据恒 false** ⇒ 而红包球是**回金币中心的唯一入口**
+        //   （纯图形、无 OCR 文字）⇒ **整轮再也回不去中心**。
+        // 📏 教训：**别为了体积牺牲判据依赖的信息**；"识别全在灰度上跑"只对
+        //    OCR/模板成立，对**色彩判据不成立**。
+        //
+        // ## 质量 0.4 是**实测**定的（⛔ 不是估的）
+        // 真机 451×975 实测：**彩色的单帧约 65.4 KB**（ql≈0.7 DC 量化值 9）。
+        // ⚠️ Apple 的 `compressionQuality` 与 libjpeg 的 quality **不等价**
+        //    （我实测 DC=9 对应 libjpeg 约 70~75）⇒ 以**真机字节数**为准。
         guard let jpg = scaled.jpegData(compressionQuality: 0.4) else { return }
 
         seq += 1
 
-        // ⑤ ⭐⭐⭐ 帧落到**两边都能看见的地方**（按可靠性排序）：
+        // ⑥ ⭐⭐⭐⭐⭐ §2266 **先 POST（不占磁盘预算）；POST 成功就⛔ 不写盘**
         //
-        // ⚠️⚠️ **关键实测（§2200）**：扩展的 Documents **不是主 App 的 Documents**！
-        //   · 扩展容器: run.pgagent.PGAgent.8W9ZSMW4UW.PGShot/Documents  ⇒ 实测 128 个帧文件
-        //   · 主 App 容器: run.pgagent.PGAgent.8W9ZSMW4UW/Documents        ⇒ 只有 pgconfig
-        //
-        // ⇒ ① ⭐⭐⭐ **App Group 共享容器** `<group>/Documents/frames/`（§2210 新增）
-        //       ⇒ 主 App 直接读，⛔ 不依赖前台、⛔ 不依赖 HTTP、⛔ 不依赖本扩展存活
-        //    ② ⭐ HTTP POST 到主 App `127.0.0.1:8899/frame`（主 App 活着时最快）
-        //    （共享容器不可用时 `dir` 自动退回本扩展 Documents —— 仅调试用）
-        writeShared(jpg)
+        // ## 为什么这个顺序是「直播一直停止」的正解
+        // 实测：预算 **12.73 KB/s**、单帧 **65.4 KB** ⇒ 连续写盘**结构上不可能**进预算
+        //   （1帧/4s 都要 16.4 KB/s ⇒ 仍被杀）。
+        // 而 HTTP POST 走**回环 socket**，**⛔ 不计入 file-backed 写入预算**。
+        // ⇒ 主 App 活着时（§2263 实测退后台仍通）**完全不用写盘**
+        //   ⇒ 磁盘写入 ≈ 0 ⇒ **扩展不会被写入预算杀掉**。
+        // ⇒ 只有 POST **失败**时（App 被杀/挂起/端口没起）才落盘兜底，
+        //   那种情况本来也跑不了闭环，写盘只为"恢复后还能拿到画面"。
         post(jpg, seq: seq)
+        if !lastPostOK {
+            // 兜底：POST 不通 ⇒ 落盘（⛔ 且**带硬限速**，见 `writeSharedFallback`）
+            writeSharedFallback(jpg)
+        }
     }
+
+    /// ⭐⭐⭐⭐⭐ §2266 **落盘兜底**（带**硬限速** ⇒ 结构上不可能撑爆预算）
+    ///
+    /// ## 为什么必须有"硬限速"这一层（⛔ 不能只靠"POST 成功就不写"）
+    /// 「POST 成功就不写盘」只在**主 App 活着**时成立。而 §2263 实测：
+    /// App 退后台**有时**仍通、**有时**被挂起 ⇒ POST 会**时通时不通**。
+    /// ⇒ 若不做限速，POST 一失败就回到"每帧写盘" ⇒ **预算又被撑爆**（前面的血案重演）。
+    ///
+    /// ## 限速怎么定（算出来的，⛔ 不是拍的）
+    /// ```
+    ///   iOS 预算      : 1073.74 MB / 86400s = **12.73 KB/s**
+    ///   单帧（灰度）  : 实测约 **35~45 KB**（彩色的 ~1/3；真机彩色实测 65.4 KB）
+    ///   ⇒ 最小落盘间隔 T 必须满足：单帧 / T < 12.73 KB/s
+    ///        45 KB / T < 12.73  ⇒  T > 3.5s
+    ///   ⇒ 取 **T = 5s**（余量 ~1.4×）：45 KB / 5s = **9 KB/s** ✅ 进预算
+    /// ```
+    /// ⭐ 即**最坏情况**（HTTP 全程不通、连续跑 24h）也只用到预算的 ~70%。
+    /// ⚠️ 代价：HTTP 不通时帧龄最坏 5s ⇒ 已把 `loop_frame_max_age` 设为 **7.0s** 容纳它。
+    private func writeSharedFallback(_ data: Data) {
+        let now = Date()
+        guard now.timeIntervalSince(lastDiskWrite) >= Self.minDiskInterval else { return }
+        lastDiskWrite = now
+        write(data, name: "lastframe.jpg")
+        // ⭐ 低频留档（每 30 帧一次）—— 只为事后取证，⛔ 不是每帧
+        if seq % 30 == 0 {
+            write(data, name: "frame_\(seq).jpg")
+            trimOldFrames()
+        }
+    }
+
+    /// 落盘最小间隔（秒）—— 由 iOS 写入预算反推，见 `writeSharedFallback`
+    private static let minDiskInterval: Double = 5.0
 
     // MARK: - 工具
 
@@ -328,15 +377,6 @@ class SampleHandler: RPBroadcastSampleHandler {
     ///   `Runner` 用的是**内存帧 + 帧龄**判据（§2263 `lastFrameAge`），
     ///   ⛔ 不靠扫目录。
     /// ⚠️ 保留**低频**留档（每 30 帧 ≈ 15 秒一张）供**事后取证**，成本可忽略。
-    private func writeShared(_ data: Data) {
-        write(data, name: "lastframe.jpg")
-        // ⭐ 低频留档（每 30 帧一次 ≈ 15s 一张）—— 只为事后取证，⛔ 不是每帧
-        if seq % 30 == 0 {
-            write(data, name: "frame_\(seq).jpg")
-            trimOldFrames()
-        }
-    }
-
     /// 只保留最近几个 `frame_*.jpg`（⛔ 别把共享容器写爆）
     private func trimOldFrames() {
         let keep = 6
@@ -349,41 +389,64 @@ class SampleHandler: RPBroadcastSampleHandler {
         }
     }
 
-    /// ⭐⭐ 把帧 **POST 给主 App**（`http://127.0.0.1:8899/frame`）—— **兜底路**。
+    /// ⭐⭐⭐⭐⭐ 把帧 **POST 给主 App**（`http://127.0.0.1:8899/frame`）—— §2266 **现在是主路**
     ///
-    /// ## 为什么还要留着它（§2210）
-    /// 主路已经是 **App Group 共享容器**（`writeShared` ⇒ 两边同目录）。
-    /// 但万一某次签名后**扩展拿不到 app group**，这条 HTTP 路还能救：
-    ///   · 同一台设备，`127.0.0.1` 回环可达
-    ///   · ⚠️ 前提：主 App **活着**且 HTTP（8899）在听
+    /// ## ⛔⛔ 为什么它从"兜底"升成"主路"（这是「直播一直停止」的正解）
+    /// 实测（§2265/§2266，真机数字）：
+    /// ```
+    ///   iOS 给扩展的磁盘写入预算 : 1073.74 MB / 86400s = **12.73 KB/s**
+    ///   真机单帧体积（彩色）      : **65.4 KB**
+    ///   ⇒ 连续写盘**结构上不可能**进预算：
+    ///        1帧/2s = 32.7 KB/s  ⛔ 2.6×      1帧/4s = 16.4 KB/s  ⛔ 1.3×
+    ///        1帧/8s =  8.2 KB/s  ✅ 但帧龄 8s ⇒ 判据全废
+    /// ```
+    /// ⇒ **只要还在"定时写盘"，就必然在"被杀"与"帧太旧"之间二选一。**
     ///
-    /// ## ⛔ 曾经的错误结论（已更正）
-    /// 老注释写「免费 Apple ID **没有 App Group**」—— **不对**。
-    /// 真机实测：装上后主 App 的 entitlements **确实有**
-    /// `group.run.pgagent.PGAgent.8W9ZSMW4UW`，且该容器**可读写**。
-    /// ⇒ 共享容器才是正路，HTTP 只是保险。
+    /// ✅ 而 **HTTP POST 走回环 socket，⛔ 不计入 file-backed 写入预算**。
+    ///   §2263 实测：主 App 退后台后 `127.0.0.1:8899` **仍然通**（静音保活 + PiP）
+    ///   ⇒ **常态下完全不写盘** ⇒ 磁盘写入 ≈ 0 ⇒ **扩展不会被预算杀掉**。
+    ///
+    /// ## 分工（⛔ 与旧注释正好相反，理由见上）
+    /// | 路 | 现在的角色 | 占预算吗 |
+    /// |---|---|---|
+    /// | **HTTP POST** | ⭐ **主路** | ⛔ 不占 |
+    /// | App Group 落盘 | 兜底（POST 不通时，且**硬限速 5s**）| ✅ 占 |
+    ///
+    /// ## ⭐ 必须**同步**判成功，否则"兜底"永远不触发
+    /// ⛔ 旧实现用 `dataTask(with:completionHandler:)`（**异步**）⇒
+    ///   调用方**当场**读不到结果 ⇒ `lastPostOK` 永远是初始值 ⇒
+    ///   要么"永远不落盘"（POST 真挂了也没兜底），要么"永远落盘"（白写）。
+    /// ✅ 改用 `semaphore` 同步等（最多 ~1s）—— 本扩展 1 帧/2s，等待代价可接受。
     private func post(_ data: Data, seq: Int) {
         guard let url = URL(string: "http://127.0.0.1:\(port)/frame?seq=\(seq)") else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
         req.httpBody = data
-        req.timeoutInterval = 2
+        req.timeoutInterval = 1
         if session == nil {
             let cfg = URLSessionConfiguration.ephemeral
-            cfg.timeoutIntervalForRequest = 2
-            cfg.timeoutIntervalForResource = 2
+            cfg.timeoutIntervalForRequest = 1
+            cfg.timeoutIntervalForResource = 1
             cfg.waitsForConnectivity = false
             // ⛔ 不要走系统代理（会卡死；`_note_2090` 踩过）
             cfg.connectionProxyDictionary = [:]
             session = URLSession(configuration: cfg)
         }
-        session?.dataTask(with: req) { _, _, err in
-            if let err = err {
-                // 主 App 不在前台时会失败，属正常（帧已本地留档）
-                NSLog("PGShot frame post: %@", String(describing: err))
+        // ⭐ 同步等结果（见 docstring：异步会让"兜底"失效）
+        let sem = DispatchSemaphore(value: 0)
+        var ok = false
+        session?.dataTask(with: req) { _, resp, err in
+            if err == nil, let h = resp as? HTTPURLResponse, h.statusCode == 200 {
+                ok = true
             }
+            sem.signal()
         }.resume()
+        _ = sem.wait(timeout: .now() + 1.2)
+        lastPostOK = ok
+        if !ok {
+            NSLog("PGShot POST 未成功 ⇒ 本帧转落盘兜底（限速 %.0fs）", Self.minDiskInterval)
+        }
     }
 
     /// ⭐ 正常结束广播（⛔ 不报错）。
@@ -428,6 +491,26 @@ class SampleHandler: RPBroadcastSampleHandler {
         //
         // ✅ 用 `UIGraphicsImageRendererFormat` 并把 `scale` 钉成 **1.0**
         //    ⇒ `size` 就是**像素**，输出真的是 451×977 ⇒ 数据量降到 1/9。
+        //
+        // ⛔⛔ §2266 **绝不能转灰度！**（我一度想省 1/3 体积，**验证后发现会毁掉整条链**）
+        //
+        // ## 判决性实验（`_dev/_2257_coin_verify.py` 可复跑，真机 feed 帧）
+        // ```
+        //   彩色帧 ⇒ ColorBlob 命中 (51.5, 163.8)  ✅ 与 PC 全量标定吻合
+        //   灰度帧 ⇒ None                          ⛔ **永远不可能命中**
+        // ```
+        // ## 为什么（这是**色彩判据**，不是亮度判据）
+        // `ColorBlob.findCoinBall` 找的是**红包球**，判据**逐字**是：
+        // ```
+        //   r > 180  &&  (r - g) > 100  &&  (r - b) > 100
+        // ```
+        // ⇒ 灰度化后 **r = g = b** ⇒ `r-g = 0` ⇒ **判据恒 false**。
+        //
+        // ## 而红包球是**回金币中心的唯一入口**（§2256/§2259）
+        // 它**没有任何 OCR 文字**（纯图形）⇒ 一旦它认不出，
+        // `ensureInCenter` 就**永远回不去中心** ⇒ 整轮废掉。
+        // 📏 **教训：优化"体积"之前，先确认没有哪个判据依赖被优化掉的信息。**
+        //    （"识别全在灰度上跑"这句话**只对 OCR/模板成立**，对**色彩判据不成立**。）
         let fmt = UIGraphicsImageRendererFormat.default()
         fmt.scale = 1.0                      // ⭐ 关键：size = 像素，⛔ 不再乘 3
         fmt.opaque = true                    // ⭐ 不透明 ⇒ 省掉 alpha 通道
@@ -439,7 +522,7 @@ class SampleHandler: RPBroadcastSampleHandler {
         let dst = dir.appendingPathComponent(name)
         // ⛔⛔⛔ §2265 **一次写入，⛔ 不再"写 tmp + replaceItemAt + 兜底再写一遍"**
         //
-        // ## 为什么（写盘预算，见 `writeShared` 的血案报告）
+        // ## 为什么（写盘预算，见 `writeSharedFallback` 的血案报告）
         // 旧写法对一个文件最多做**三次**落盘：
         // ```
         // try data.write(to: tmp, options: .atomic)      // ① 写到 tmp
