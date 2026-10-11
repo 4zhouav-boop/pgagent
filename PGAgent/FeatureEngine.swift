@@ -152,10 +152,36 @@ final class FeatureEngine {
             guard let img = grab() else { log("§adbox ⛔ 抓帧失败"); break }
             beat(["phase": "adbox-step", "n": n, "of": count])
 
-            // ① 已经在广告页？⇒ **放行**（⛔ 不点 ✕，用户令）
-            if nav.pageHere(img) == "ad_video" {
-                log("§adbox ⛔ 广告页 ⇒ 放行（待够 \(Int(dwell))s，⛔ 不点 ✕）")
-                dwellOnAd(dwell)
+            // ① ⭐⭐⭐ 已在广告页 ⇒ **先处理面板，再等时间**（⛔ 绝不"傻等"，⛔ 绝不点 ✕）
+            //
+            // ⛔⛔ §2277 血案（用户令）：「**能等个屁，现在还是卡死这个界面**」
+            // 我原来这里只有 `dwellOnAd(dwell)`（纯 sleep）——
+            // 而真机 `_var/_stuck1.png` 屏幕上明摆着奖励面板
+            // **`6s后可领取399金币 / 再看6秒可得399金币 / [继续观看]`**，
+            // **倒计时不会自己走**（面板要用户点「继续观看」才补全）
+            // ⇒ "等 30 秒"等的是**永远不会自己结束**的面板 ⇒ **卡死**。
+            //
+            // ✅ 照 PC `_ad_finish`：**先点面板按钮补全 / 关面板**，⛔ 不是干等。
+            if nav.pageHere(img) == "ad_video"
+                || Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+                log("§adbox ⛔ 已在广告页 ⇒ **先处理面板**（照 PC `_ad_finish`；⛔ 不点 ✕）")
+                if finishAdPanel(img, tag: "adbox_ad\(n + 1)") {
+                    sleep(1.5)
+                    continue
+                }
+                // 面板与 ✕ 都不在 ⇒ 这才是"纯播放中" ⇒ 等时间
+                log("§adbox ⛔ 广告播放中（无面板）⇒ 等够 \(Int(dwell))s（⛔ 不点 ✕）")
+                var left = dwell
+                while left > 0 {
+                    if isCancelled() { break }
+                    let d = min(2.0, left)
+                    Thread.sleep(forTimeInterval: d)
+                    left -= d
+                    if let im2 = grab(), finishAdPanel(im2, tag: "adbox_adw\(n + 1)") {
+                        log("   §adbox 等待中面板出现 ⇒ 已处理")
+                        break
+                    }
+                }
                 n += 1
                 _ = ensureInCenter(tag: "adbox_back\(n)")
                 continue
@@ -208,8 +234,21 @@ final class FeatureEngine {
                 //    而**人其实已经进去了**（真机 trace 那几行正是这个假阴性）。
                 if let i2 = i2,
                    Self.looksLikeAdPage(i2, rec: rec, nav: nav, bw: baseW, bh: baseH) {
-                    log("§adbox ⛔ 已进广告页 ⇒ 放行待够 \(Int(dwell))s")
-                    dwellOnAd(dwell)
+                    // ⛔ 同样**不能傻等**（§2277）：先处理面板，再等时间
+                    log("§adbox ⛔ 已进广告页 ⇒ 处理面板/等够 \(Int(dwell))s（⛔ 不点 ✕）")
+                    if !finishAdPanel(i2, tag: "adbox_in\(n + 1)") {
+                        var left = dwell
+                        while left > 0 {
+                            if isCancelled() { break }
+                            let d = min(2.0, left)
+                            Thread.sleep(forTimeInterval: d)
+                            left -= d
+                            if let im3 = grab(), finishAdPanel(im3, tag: "adbox_inw\(n + 1)") {
+                                log("   §adbox 等待中面板出现 ⇒ 已处理")
+                                break
+                            }
+                        }
+                    }
                     n += 1
                     _ = ensureInCenter(tag: "adbox_back\(n)")
                     continue
@@ -239,9 +278,33 @@ final class FeatureEngine {
             // PC 判据（L3609）是**顶栏原文子串**：`("可领取" in t) or ("已成功领取" in t)`
             // ⇒ ⛔ 不经过元素表 ⇒ 不受 OCR 词表/阈值影响。
             if Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH) {
-                log("§adbox ⛔ 已在**广告页**（胶囊含「可领取/已成功领取/秒+金币」）"
-                    + " ⇒ **放行待够 \(Int(dwell))s**（⛔ 绝不点 ✕ —— 用户令）")
-                dwellOnAd(dwell)
+                // ⛔⛔⛔ §2277 **绝不能只"傻等"**（我 v0.10.35 的错：用户令「**能等个屁**」）
+                //
+                // 真机 `_var/_stuck1.png`：屏幕上明摆着奖励面板
+                // **`6s后可领取399金币 / 再看6秒可得399金币 / [继续观看]`**，
+                // 而**倒计时不会自己走**（面板要用户点「继续观看」才补全）
+                // ⇒ "等 30 秒"等的是**永远不会自己结束**的面板 ⇒ 卡死。
+                //
+                // ✅ 正解 = 照 PC `_ad_finish` **主动推进状态**：
+                //    先点面板按钮（补全）→ 面板没了才点胶囊 ✕
+                if finishAdPanel(img, tag: "adbox_ad\(n + 1)") {
+                    sleep(1.5)
+                    continue        // ⭐ 处理了一层 ⇒ 重抓帧再判（⛔ 不在这儿 sleep 30s）
+                }
+                // 面板与 ✕ 都没有 ⇒ 这才是"纯广告播放中" ⇒ **等时间**（⛔ 不点 ✕）
+                log("§adbox ⛔ 广告播放中（无面板/无关闭键）⇒ 等够 \(Int(dwell))s（⛔ 不点 ✕）")
+                var left = dwell
+                while left > 0 {
+                    if isCancelled() { break }
+                    let d = min(2.0, left)
+                    Thread.sleep(forTimeInterval: d)
+                    left -= d
+                    // ⭐ 等待期间**持续看有没有面板冒出来**（面板会在倒计时中途出现）
+                    if let im2 = grab(), finishAdPanel(im2, tag: "adbox_adw\(n + 1)") {
+                        log("   §adbox 等待中面板出现 ⇒ 已处理")
+                        break
+                    }
+                }
                 n += 1
                 _ = ensureInCenter(tag: "adbox_back\(n)")
                 continue
@@ -312,6 +375,61 @@ final class FeatureEngine {
         if t.contains("秒") && t.contains("金币") { return true }
         // ③ 兜底：胶囊 ✕ 模板（纯像素；`ad/pill_x.png`）
         if nav.detect("pill_x", img: img) != nil { return true }
+        return false
+    }
+
+    /// ⭐⭐⭐⭐⭐ §2277 **收尾**：处理广告页的面板/弹窗 —— 照 PC `_ad_finish` 腿序
+    ///
+    /// ## ⛔⛔ 我上一版（v0.10.35）在这里犯的错：**只"傻等"，没处理面板**
+    /// 我写成：
+    /// ```swift
+    /// log("放行待够 \(dwell)s"); dwellOnAd(dwell)     // ⛔ 只是 sleep
+    /// ```
+    /// 而真机 `_var/_stuck1.png` 铁证：屏幕上明摆着
+    /// **`6s后可领取399金币 / 再看6秒可得399金币 / [继续观看]`** 面板，
+    /// **倒计时根本不会自己走**（面板在等用户点「继续观看」才能补全）
+    /// ⇒ 我"等 30 秒"等的是一个**永远不会自己结束**的面板
+    /// ⇒ 表面日志在刷"放行待够30s"，实则**卡死不动**（用户原话：「**能等个屁**」）。
+    ///
+    /// ## ✅ PC 的正解：`_ad_finish(tag)`（`_1377_ad_loop.py:4849`）**腿序**
+    /// ```python
+    /// ① click_stay_panel(img)   # 「继续观看/再看N秒」⇒ **点它补全**（让倒计时走完）
+    /// ② _find_panel_x(img)      # ⭐ **面板自己右上角的小 ✕**（ROI 330,352,382,406）
+    /// ③ click_toast_x(img)      # 顶栏 toast ✕（⛔ 只在**没有面板**时才轮到它）
+    /// ④ 「真的要离开吗」⇒ 点消极项「离开」
+    /// ⑤ 「放弃奖励/以后再说」⇒ 点消极项
+    /// ```
+    ///
+    /// ## ⚠️ PC 的两条**腿序血案**（必须照抄，⛔ 顺序不能改）
+    /// > ⛔ 旧代码只点**顶栏 toast ✕** —— 顶栏那个 ✕ **关不掉这张卡片**
+    /// >   ⇒ 页面**一动不动** ⇒ 交接/收尾/goto_feed 反复"在广告页 ⇒ 收尾 ⇒ 还在广告页"
+    /// >   **空转到停手**（用户看到的"突然停止"就是它）。
+    /// > ⛔ **面板自己的 ✕ 必须排在 toast ✕ 之前** —— 面板在时，先关面板才是正解。
+    /// 📏 这正是我 v0.10.35 的翻版（我是"只等"，PC 是"只点toast"），**同一个病**：
+    ///    ⛔ 没做"**在广告页上主动推进状态**"这件事。
+    ///
+    /// - Returns: true = 已点掉一层（调用方应重抓帧再判）
+    private func finishAdPanel(_ img: UIImage, tag: String) -> Bool {
+        // ① 挽留面板「继续观看 / 再看N秒」⇒ **点它补全**
+        //    （`stay_panel_btn` 的词表 = PC `PANEL_KEYS`：领取奖励/继续观看/…）
+        if nav.detect("stay_panel_title", img: img) != nil,
+           nav.detect("stay_panel_btn", img: img) != nil {
+            log("   §\(tag) 挽留面板 ⇒ 点「继续观看/领取奖励」**补全**（照 PC `click_stay_panel`）")
+            _ = nav.tap("stay_panel_btn", img: img, atomic: true)
+            return true
+        }
+        // ② ⭐ **面板自己右上角的小 ✕**（⛔ 必须排在 toast ✕ 之前 —— PC 腿序血案）
+        if nav.detect("panel_close_x", img: img) != nil {
+            log("   §\(tag) 面板右上小 ✕ ⇒ 点它（照 PC `_find_panel_x`）")
+            _ = nav.tap("panel_close_x", img: img, atomic: true)
+            return true
+        }
+        // ③ 顶栏 toast ✕（⚠️ 只在**没有面板**时才轮到这里）
+        if nav.detect("pill_x", img: img) != nil {
+            log("   §\(tag) 顶栏胶囊 ✕（面板已不在）⇒ 点它")
+            _ = nav.tap("pill_x", img: img, atomic: true)
+            return true
+        }
         return false
     }
 
