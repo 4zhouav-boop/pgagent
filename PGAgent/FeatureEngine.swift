@@ -147,6 +147,7 @@ final class FeatureEngine {
 
         var n = 0
         var emptyRounds = 0
+        var scrollTries = 0          // ⭐ §2309 任务列表翻页次数
         while n < count {
             if isCancelled() { log("§adbox ⛔ 被中断"); break }
             guard let img = grab() else { log("§adbox ⛔ 抓帧失败"); break }
@@ -240,6 +241,7 @@ final class FeatureEngine {
                     sleep(1.5)
                 }
                 n += 1
+                scrollTries = 0          // ⭐ §2309 每成功拿下一条，重置翻页预算
                 _ = ensureInCenter(tag: "adbox_back\(n)")
                 continue
             }
@@ -333,6 +335,7 @@ final class FeatureEngine {
                         sleep(1.5)
                     }
                     n += 1
+                    scrollTries = 0          // ⭐ §2309 重置翻页预算
                     _ = ensureInCenter(tag: "adbox_back\(n)")
                     continue
                 }
@@ -399,6 +402,47 @@ final class FeatureEngine {
                 sleep(1.0)
                 continue
             }
+            // ⭐⭐⭐⭐⭐ §2309 **任务列表要能"往下翻"（⛔ 上一版直接放弃了）**
+            //
+            // ## 真机血案（03:0x 真机 trace + 同帧 `/ocr`）
+            // 手机明明在**金币中心**（`center_marker` 命中、`adbox_boot` 第 1 步就到），
+            // 而 `findAdRowButton` 报「本屏没有「看广告得金币」这道任务行」
+            // ⇒ 连续 3 轮 ⇒ 收手 ⇒ **整个 adbox 跑了 2 条就结束**。
+            // 同帧 `/ocr` 铁证：任务列表里只有 分享作品/送朋友/看短剧/金币大挑战…
+            // ⇒ **目标行还在屏幕下方（没滚出来）**，而我们**没有一条腿会去滚**。
+            //
+            // ✅ 正解：在放弃之前，**先上滑让任务列表往下走**，再找一次。
+            //    ⛔ 但仍守铁律②：只认「看广告得金币」那一行，换行一律不点。
+            //    滚动也不是盲动：它是"把已知列表继续翻页"，不是"点某个固定坐标"。
+            var found = false
+            if scrollTries < 3 {
+                scrollTries += 1
+                log("§adbox ⬇ 本屏没有目标行 ⇒ 上滑任务列表再找（第 \(scrollTries)/3 次）")
+                swipeUpList(baseW: baseW, baseH: baseH)
+                if let img2 = grabFresh(since: img, maxWait: maxFrameAgeCfg + 3.0) {
+                    if let btn2 = findAdRowButton(img2) {
+                        log("§adbox ⬇ 翻到了目标行 ⇒ 按钮 \(btn2.evidence) @(\(Int(btn2.point.x)),\(Int(btn2.point.y)))")
+                        nav.tapPoint(Double(btn2.point.x), Double(btn2.point.y))
+                        if let i3 = grabFresh(since: img2, maxWait: maxFrameAgeCfg + 3.0),
+                           Self.looksLikeAdPage(i3, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+                            for _ in 0..<6 {
+                                if isCancelled() { break }
+                                guard let im4 = grab() else { break }
+                                if !finishAdPanel(im4, tag: "adbox_scroll\(n + 1)") { break }
+                                sleep(1.5)
+                            }
+                            n += 1
+                            emptyRounds = 0
+                            _ = ensureInCenter(tag: "adbox_scrollback\(n)")
+                        }
+                        found = true
+                    }
+                }
+                // 找到了 ⇒ 回到循环头（拍完广告后 n 已加）；
+                // 没找到 ⇒ 也回到循环头继续翻（⛔ 不累计 emptyRounds，否则三次翻页就会被当成“找不到”而收手）
+                _ = found
+                continue
+            }
             log("§adbox ⚠️ 找不到广告任务按钮（第 \(n + 1)/\(count) 条）⇒ 回中心再找")
             if !ensureInCenter(tag: "adbox_re\(n)") {
                 log("§adbox ⛔ 也回不了中心 ⇒ 停手")
@@ -417,6 +461,7 @@ final class FeatureEngine {
     }
 
     // MARK: - ⭐⭐⭐ 广告页拦阻（照 PC `is_ad_page`，⛔ 独立于页型表）
+
 
     /// ⭐⭐⭐ 是不是**视频广告页** —— 照 PC `is_ad_page`（`_1377_ad_loop.py:3609`）**逐字**。
     ///
@@ -1327,6 +1372,21 @@ final class FeatureEngine {
         let a = min(gapMin, gapMax), b = max(gapMin, gapMax)
         let g = b > a ? Double.random(in: a...b) : a
         sleepWithCancel(g)
+    }
+
+    /// ⭐⭐ §2309 **任务列表翻页**（往下看）—— 与「刷视频上滑」**有意分开**。
+    ///
+    /// 为什么单独一个函数：刷视频的上滑要**_快_**（模拟用户划走），
+    /// 而任务列表翻页要**_慢一点_**（让列表真的滚动到下一屏，⛔ 不是当成“划走”丢出去）。
+    /// 距离也短一些（半屏），避免一下子飞到列表底部错过目标行。
+    private func swipeUpList(baseW bw: Double, baseH bh: Double) {
+        let midX = bw / 2.0
+        let yBot = bh * 0.78          // 起点靠下（但避开底栏）
+        let yTop = bh * 0.40          // 止于中部 ⇒ 半屏滚动
+        let cmd = BLEController.swipe(x1: midX, y1: yBot, x2: midX, y2: yTop,
+                                      speed: .mid, baseW: bw, baseH: bh, yFix: yFix)
+        ble.send(cmd)
+        sleepWithCancel(1.6)
     }
 
     /// ⭐ 可中断的等待（⛔ 不用裸 `Thread.sleep`，否则「停止」要等很久才生效）
