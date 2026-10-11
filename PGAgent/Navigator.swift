@@ -130,6 +130,7 @@ final class Navigator {
     static let pageOrder: [String] = [
         "center",
         "ext_landing",   // ⭐ 必须在 feed 之前（外部页底部也有「首页」）
+        "game_page",     // ⭐ 内置小游戏页：靠“规则介绍/牌型学习/战战训练”等独有词（§2311）
         "mall",          // ⭐ 必须在 feed 之前
         "featured",
         "feed",
