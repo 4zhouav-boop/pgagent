@@ -1810,6 +1810,23 @@
         "section 2314: same detector, ROI at the coupon sheet (PC find_coupon_x).",
         "  Keep last so it cannot shadow the named legs."
       ]
+    },
+    {
+      "element": "bottom_popup",
+      "interval": 1.0,
+      "desc": "底部弹窗（亮度闸 + 消极项 OCR）⇒ 点消极项",
+      "_doc": [
+        "section 2316: ported from PC find_bottom_popup (_1377_ad_loop.py:5391, used at :8854).",
+        "  User instruction: \"just click such a page popup, brightness analysis is enough\".",
+        "  PC recorded two failed versions (full-width-white: 4/6 false positives;",
+        "  white-card-edge: 5/6) because \"white\" is NOT a popup feature -- many Kuaishou",
+        "  pages are white anyway. The working judge is two signals ANDed:",
+        "    (1) brightness gate: >=12 rows of pure white (>=240) in the lower-half middle band",
+        "    (2) OCR gate: a NEGATIVE-option button text near the bottom",
+        "  6/6 separation, zero false positives on PC real frames.",
+        "  Iron rule 4: only negative options are tapped; the word list deliberately",
+        "  excludes primary buttons like 设置提示音 / 立即开通 / 去开启."
+      ]
     }
   ],
   "_funnel_doc": [
