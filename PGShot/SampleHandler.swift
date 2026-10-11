@@ -51,7 +51,7 @@ class SampleHandler: RPBroadcastSampleHandler {
     /// ⇒ 取 **1 fps**（1帧/1s）：帧龄 ≤1s，`Runner` 每步（1.5s）都能拿到**新鲜**画面。
     ///
     /// ## ⚠️ 那"预算"由谁兜住
-    /// 由 **`writeSharedFallback` 的硬限速（5s）** 兜 ——
+    /// 由 **`writeShared` 的硬限速（5s）** 兜 ——
     /// 即**最坏情况**（HTTP 全程不通）也只有 ~9 KB/s，仍在 12.73 KB/s 内。
     /// ⇒ 两条路各管一头：
     ///    · 正常：HTTP 高频（1fps）、磁盘零写
@@ -79,16 +79,7 @@ class SampleHandler: RPBroadcastSampleHandler {
     ///   ⇒ 就算 1帧/4s 也是 16.4 KB/s ⛔ 仍超预算
     ///   ⇒ **连续定时写盘在结构上就走不通**（⛔ 不是我参数没调好）
     /// ```
-    /// ✅ 但**帧有两条路**，而 `post()`（HTTP 到 `127.0.0.1:8899/frame`）
-    ///    **⛔ 完全不占磁盘写入预算**（走的是回环 socket，不是 file-backed 写）。
-    /// ⇒ 策略：**POST 成功 ⇒ ⛔ 不写盘**；只有 POST 失败（App 不在/挂起）才落盘兜底。
-    ///
-    /// 📏 这与既有注释的分工一致（`post` 的 docstring：「App Group 是主路，HTTP 是兜底」）——
-    ///    本轮**把它反过来**：**HTTP 是主路**（省预算），**落盘是兜底**（保可用）。
-    ///    ⚠️ 原因就是"预算是硬的、而 App 大部分时间活着"这个事实（§2263 实测后台 HTTP 通）。
-    private var lastPostOK = false
-    /// ⭐ §2266 **上次落盘的时间**（诊断用；⛔ 不再用它限速 ——
-    ///    见 `writeSharedFallback`：固定时间间隔不可靠，改用**字节预算**）
+    /// ⭐ §2267 **上次落盘的时间**（仅诊断；⛔ 不用它限速 —— 见 `writeShared` 的字节预算）
     private var lastDiskWrite = Date.distantPast
     /// ⭐ 落盘记账（滑动窗口：[时间, 字节数]）—— 字节预算的账本
     private var diskWriteLog: [(t: Date, bytes: Int)] = []
@@ -301,56 +292,42 @@ class SampleHandler: RPBroadcastSampleHandler {
 
         seq += 1
 
-        // ⑥ ⭐⭐⭐⭐⭐ §2266 **先 POST（不占磁盘预算）；POST 成功就⛔ 不写盘**
+        // ⑥ ⭐⭐⭐⭐⭐ §2267 **写盘（主路，照荔枝）+ 异步 POST（尽力而为）**
         //
-        // ## 为什么这个顺序是「直播一直停止」的正解
-        // 实测：预算 **12.73 KB/s**、单帧 **65.4 KB** ⇒ 连续写盘**结构上不可能**进预算
-        //   （1帧/4s 都要 16.4 KB/s ⇒ 仍被杀）。
-        // 而 HTTP POST 走**回环 socket**，**⛔ 不计入 file-backed 写入预算**。
-        // ⇒ 主 App 活着时（§2263 实测退后台仍通）**完全不用写盘**
-        //   ⇒ 磁盘写入 ≈ 0 ⇒ **扩展不会被写入预算杀掉**。
-        // ⇒ 只有 POST **失败**时（App 被杀/挂起/端口没起）才落盘兜底，
-        //   那种情况本来也跑不了闭环，写盘只为"恢复后还能拿到画面"。
-        post(jpg, seq: seq)
-        if !lastPostOK {
-            // 兜底：POST 不通 ⇒ 落盘（⛔ 且**带硬限速**，见 `writeSharedFallback`）
-            writeSharedFallback(jpg)
-        }
+        // ## ⛔⛔ 上一版（v0.10.21）在这里犯了一个致命错
+        // 我为了"POST 成功就不写盘"，把 `post()` 改成**同步等结果**：
+        // ```swift
+        // _ = sem.wait(timeout: .now() + 1.2)      // ⛔⛔ 在**采样回调**里阻塞！
+        // ```
+        // `processSampleBuffer` 跑在 **ReplayKit 的采样队列**上；
+        // **阻塞它 = 停止消费系统送来的帧** ⇒ 广播**原地卡死**
+        // （真机现象：`frames 2→2` 再也不涨；而扩展**没有崩溃报告**，
+        //  因为它是"被堵塞"不是"被杀" —— 这个区别正是排查的关键）。
+        // 📏 **教训：采样回调里⛔ 绝不能有任何同步等待/阻塞 IO。**
+        //
+        // ## ⭐ 正确架构 = **照荔枝**（`_note_2010` L60 / `_note_2011` L253）
+        // ```
+        //   扩展 : 每帧写 **一个文件** 到 App Group（异步、非阻塞）
+        //   主 App: **轮询**那个文件（"⏳ 等待截图文件生成... (第10次检查)"）
+        // ```
+        // ⇒ **写盘是主路**，而不是我发明的"HTTP 主路"。
+        //   ⚠️ 那"写入预算"怎么办？—— **它已经不是问题了**：
+        //   真正的元凶是 `scale=3` 那个 **9×** bug（§2265 已修）。
+        //   修完后单帧 **17.9 KB**（原来 65.4 KB），配合下面的**字节预算**：
+        //   `384 KB/60s = 6.4 KB/s` ⇒ **只有 iOS 预算的 50%** ⇒ ✅ 安全。
+        //   📏 我上一版是"在没修 9× 的前提下"算出的 24 KB/s，那个结论**已过期**。
+        //
+        // ## ⛔ POST 只作为**尽力而为的加速**（⛔ 不阻塞、不等结果、不影响主路）
+        // 它能让主 App 更快拿到帧，但**成功与否都不改变**上面的文件主路。
+        writeShared(jpg)
+        postBestEffort(jpg, seq: seq)
     }
 
-    /// ⭐⭐⭐⭐⭐ §2266 **落盘兜底** —— 用**字节预算**限速（⛔ 不是固定时间间隔）
+    /// ⭐⭐⭐ §2267 **写盘（主路）** —— 带**字节预算**保护，⛔ 但绝不阻塞
     ///
-    /// ## ⛔ 为什么不能用"固定 5 秒"（真机耐久观察逮到的）
-    /// 我第一版按"单帧 17.9 KB"算出 5s 间隔 ⇒ 17.9/5 = 3.6 KB/s，看着很宽裕。
-    /// 但**耐久日志**（`_var/_endurance.log`）显示真实帧大小**随画面内容剧烈变化**：
-    /// ```
-    ///   +0min  快手金币中心（大片纯色）  bytes = **17.9 KB**
-    ///   +6min  美团广告页（画面复杂）    bytes = **62.4 KB**   ← 3.5 倍！
-    /// ```
-    /// ⇒ 62.4 KB / 5s = **12.5 KB/s** —— 与预算 **12.73 KB/s** 几乎贴着，
-    ///   **余量 ≈ 0** ⇒ 只要广告页多停一会儿，**又会被杀**（回到原点）。
-    /// 📏 **教训：限速必须按"最坏帧"算，或者干脆按字节记账 —— ⛔ 不能按平均帧。**
-    ///
-    /// ## ✅ 做法：**滑动窗口字节预算**
-    /// ```
-    ///   最近 windowS 秒内已写 bytesInWindow 字节
-    ///   预算预算 budgetS 秒内最多写 budgetBytes
-    ///   ⇒ 只有 (bytesInWindow + 本帧) 不超过"按时间比例摊到的额度"时才写
-    /// ```
-    /// ⭐ 好处：**自适应**。大帧自动被压得更稀，小帧可以写得勤 ——
-    ///   ⛔ 不需要我去猜"单帧多大"，也⛔ 不会因为画面变复杂就爆预算。
-    ///
-    /// ## 参数（留 ~2× 余量）
-    /// ```
-    ///   iOS 预算        : 1073.74 MB / 86400s = 12.73 KB/s
-    ///   我们按预算的 50% 记账 : **6.4 KB/s**  ⇒ 余量 2×
-    ///   窗口             : 60s ⇒ 窗口额度 6.4 × 60 = **384 KB**
-    /// ```
-    /// ⇒ 62 KB 的广告帧在 60s 窗口里最多写 6 张（≈10s 一张）⇒ 约 **6.2 KB/s** ✅
-    ///   ⚠️ 代价：HTTP 全断时帧龄最坏 ~10s。
-    ///      ⇒ 那属于"降级模式"（App 挂起时本来也跑不了闭环），
-    ///        已把 `loop_frame_max_age` 的语义限定为**只在 HTTP 正常时**要求新鲜。
-    private func writeSharedFallback(_ data: Data) {
+    /// 预算账本见 `writeShared` 的说明（两张表都是同一套账）：
+    /// 60s 窗口内最多 **384 KB**（= 6.4 KB/s = iOS 预算的 50%）。
+    private func writeShared(_ data: Data) {
         let now = Date()
         // ① 滚动窗口：丢掉过期的记账
         let cutoff = now.addingTimeInterval(-Self.budgetWindowS)
@@ -358,31 +335,38 @@ class SampleHandler: RPBroadcastSampleHandler {
             diskWriteLog.removeFirst()
         }
         let used = diskWriteLog.reduce(0) { $0 + $1.bytes }
-        // ② 窗口额度：**满窗口额度**（窗口内累计不超过它即可）
-        //    ⚠️ 不做"按已过去时间比例放行"的细化 —— 那会让**启动瞬间**放大帧
-        //       （窗口刚空、比例小 ⇒ 反而更容易放行大帧）。朴素窗口额度更安全、更好懂。
         let allowance = Double(Self.budgetBytesPerWindow)
+        // ② 超预算 ⇒ **本帧不写**（⛔ 丢弃一帧远好过被系统杀掉整个广播）
         guard Double(used + data.count) <= allowance else {
-            NSLog("PGShot 落盘**被字节预算拦下**（窗口已用 %.0f KB + 本帧 %.0f KB > 额度 %.0f KB）⇒ 本帧不写",
+            NSLog("PGShot 写盘被字节预算拦下（窗口已用 %.0f KB + 本帧 %.0f KB > %.0f KB）⇒ 丢这一帧",
                   Double(used) / 1024.0, Double(data.count) / 1024.0, allowance / 1024.0)
             return
         }
-        // ③ 允许 ⇒ 写，并记账
         diskWriteLog.append((t: now, bytes: data.count))
+        lastDiskWrite = now
         write(data, name: "lastframe.jpg")
-        // ⭐ 低频留档（每 30 帧一次）—— 只为事后取证，⛔ 不是每帧
-        if seq % 30 == 0 {
-            write(data, name: "frame_\(seq).jpg")
-            trimOldFrames()
-        }
     }
 
-    /// ⭐ 字节预算（§2266）—— 按 iOS 写入预算的 **50%** 记账 ⇒ 留 **2×** 余量
+    /// ⭐ 字节预算（§2267）—— 按 iOS 写入预算的 **50%** 记账 ⇒ 留 **2×** 余量
     ///
+    /// ## 为什么用"字节窗口"而不是"固定间隔"（耐久日志逮到的）
+    /// 我第一版按"单帧 17.9 KB"算出 5 秒间隔 ⇒ 看着很宽裕。
+    /// 但**耐久日志**（`_var/_endurance.log`）显示真实帧大小**随画面剧烈变化**：
     /// ```
-    ///   iOS 预算 12.73 KB/s ⇒ 我们用 6.4 KB/s
-    ///   窗口 60s ⇒ 窗口额度 = 6.4 × 60 = 384 KB
+    ///   +0min  快手金币中心（大片纯色）  bytes = **17.9 KB**
+    ///   +6min  美团广告页（画面复杂）    bytes = **62.4 KB**   ← 3.5 倍！
     /// ```
+    /// ⇒ 按"平均帧"定间隔 ⇒ 遇到大帧就贴预算线（62.4/5 = 12.5 vs 12.73）⇒ **余量≈0**。
+    /// 📏 **教训：限速要按"字节"记账，⛔ 不能按"平均帧大小"猜。**
+    ///
+    /// ## 参数
+    /// ```
+    ///   iOS 预算            : 1073.74 MB / 86400s = 12.73 KB/s
+    ///   我们按预算 50% 记账  : **6.4 KB/s** ⇒ 余量 2×
+    ///   窗口 60s            : 额度 = 6.4 × 60 = **384 KB**
+    /// ```
+    /// ⇒ **无论帧多大，等效写入都被钉在 6.4 KB/s**：
+    ///   17.9 KB 帧 ≈ 每 2.8s 一张；62.4 KB 帧 ≈ 每 9.8s 一张。
     private static let budgetWindowS: Double = 60
     private static let budgetBytesPerWindow: Int = 384 * 1024
 
@@ -456,7 +440,27 @@ class SampleHandler: RPBroadcastSampleHandler {
     ///   调用方**当场**读不到结果 ⇒ `lastPostOK` 永远是初始值 ⇒
     ///   要么"永远不落盘"（POST 真挂了也没兜底），要么"永远落盘"（白写）。
     /// ✅ 改用 `semaphore` 同步等（最多 ~1s）—— 本扩展 1 帧/2s，等待代价可接受。
-    private func post(_ data: Data, seq: Int) {
+    /// ⭐⭐⭐ §2267 **尽力而为的异步 POST**（⛔ 绝不阻塞采样回调）
+    ///
+    /// ## ⛔⛔ 上一版在这里犯的致命错（真机现象：`frames 2→2` 再也不涨）
+    /// 我为了"POST 成功就不写盘"，把这里改成**同步等结果**：
+    /// ```swift
+    /// let sem = DispatchSemaphore(value: 0)
+    /// session?.dataTask(with: req) { ...; sem.signal() }.resume()
+    /// _ = sem.wait(timeout: .now() + 1.2)      // ⛔⛔ 在**采样回调**里阻塞 1.2 秒
+    /// ```
+    /// `processSampleBuffer` 跑在 **ReplayKit 的采样队列**上。
+    /// **阻塞它 = 停止消费系统送来的帧** ⇒ 广播**原地卡死**。
+    /// ⚠️ 而且它**不会**产生崩溃报告（是被"堵住"不是"被杀"）——
+    ///    这个区别正是排查关键：`crash ls` 里**没有新报告**，但 `frames` 不涨。
+    ///
+    /// 📏 **铁律：采样回调里⛔ 绝不能有任何同步等待/阻塞 IO**（网络、文件锁、信号量都不行）。
+    ///
+    /// ## 本函数的定位（⛔ 不再参与主路决策）
+    /// 帧的**主路是写盘**（照荔枝，见 `writeShared`）。
+    /// 这个 POST 只是**加速**：主 App 活着时能更快拿到帧。
+    /// ⇒ **成功与否都不改变**主路，⛔ 因此不需要（也不允许）等它的结果。
+    private func postBestEffort(_ data: Data, seq: Int) {
         guard let url = URL(string: "http://127.0.0.1:\(port)/frame?seq=\(seq)") else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
@@ -472,21 +476,15 @@ class SampleHandler: RPBroadcastSampleHandler {
             cfg.connectionProxyDictionary = [:]
             session = URLSession(configuration: cfg)
         }
-        // ⭐ 同步等结果（见 docstring：异步会让"兜底"失效）
-        let sem = DispatchSemaphore(value: 0)
-        var ok = false
+        // ⭐ **异步、不等结果、不阻塞**（回调只在失败时留一行日志）
         session?.dataTask(with: req) { _, resp, err in
-            if err == nil, let h = resp as? HTTPURLResponse, h.statusCode == 200 {
-                ok = true
+            if let err = err {
+                NSLog("PGShot POST 未成功（不影响主路，帧已落盘）: %@",
+                      String(describing: err))
+            } else if let h = resp as? HTTPURLResponse, h.statusCode != 200 {
+                NSLog("PGShot POST 状态码 %d（不影响主路）", h.statusCode)
             }
-            sem.signal()
         }.resume()
-        _ = sem.wait(timeout: .now() + 1.2)
-        lastPostOK = ok
-        if !ok {
-            NSLog("PGShot POST 未成功 ⇒ 本帧按**字节预算**决定是否落盘（窗口 %.0fs / 额度 %.0f KB）",
-                  Self.budgetWindowS, Double(Self.budgetBytesPerWindow) / 1024.0)
-        }
     }
 
     /// ⭐ 正常结束广播（⛔ 不报错）。
@@ -562,7 +560,7 @@ class SampleHandler: RPBroadcastSampleHandler {
         let dst = dir.appendingPathComponent(name)
         // ⛔⛔⛔ §2265 **一次写入，⛔ 不再"写 tmp + replaceItemAt + 兜底再写一遍"**
         //
-        // ## 为什么（写盘预算，见 `writeSharedFallback` 的血案报告）
+        // ## 为什么（写盘预算，见 `writeShared` 的血案报告）
         // 旧写法对一个文件最多做**三次**落盘：
         // ```
         // try data.write(to: tmp, options: .atomic)      // ① 写到 tmp
