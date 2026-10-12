@@ -186,6 +186,42 @@ final class Runner: ObservableObject {
         writeTraceLine("=== 开始 目标=\(target) 最大步数=\(maxSteps) ===")
         writeHeartbeat(["phase": "start", "target": target, "maxSteps": maxSteps])
 
+        // ⭐⭐⭐⭐⭐ §2631 **开机自检：帧龄上限必须 > 录屏节拍**（⛔ 否则必然"全 unknown"）
+        //
+        // ## ⛔⛔ 血案（用户令，本轮）
+        // > 「**你换了图片识别好像搞崩了程序 现在全识别未知了。你要做好全局适配啊**」
+        //
+        // 我把录屏扩展从 **1 帧/1s** 改成 **1 帧/10s**（原分辨率 + 用户令的 10s 间隔），
+        // 但设备上的 `loop_frame_max_age` **还是旧的 3.0s** ⇒ 真机日志逐字：
+        // ```
+        // 22:20:39  §geo 帧 888x1920 ⇒ 归一化到 451x977      ← 帧分辨率改动✅生效
+        // 22:20:47  §grab ⛔ 帧龄 7.6s > 上限 3.0s            ← ⛔ 上限还是旧的
+        // 22:21:07  §grab 第 2 次未拿到帧，重试…              ← 于是**永远拿不到帧**
+        // ```
+        // ⇒ `grab()` 恒失败 ⇒ 全链路 `unknown`（用户看到的"全识别未知"）。
+        //
+        // 📏 本仓库**自己早就记过**这条铁律（config 的 `_loop_doc` 末尾逐字）：
+        // > 📏 教训：**节拍与判据必须成对调** —— 只改一边就会自己把自己判死
+        // >   （§2265 曾出现：节拍降到 1帧/4s 而上限还是 3.0s ⇒ 每帧都误判"画面是旧帧"）。
+        //
+        // ✅ 现在**开机就自检并明确报出来**（⛔ 不再让用户/我事后去猜）：
+        //   帧龄上限若 **<=** 节拍（10s），直接**拒绝开跑**并说清怎么改。
+        //   📏 判据用"上限必须 > 节拍 + 2s 余量"，与 config 的 14.0 一致。
+        let frameAgeCap = cfg.settings?.loop_frame_max_age ?? 3.0
+        let minCap = Self.outFpsInterval + 2.0
+        if frameAgeCap < minCap {
+            let msg = String(format: "⛔ 配置自检不过：`loop_frame_max_age` = %.1fs，"
+                             + "而录屏节拍是 %.0fs/帧 ⇒ **帧永远算\"旧帧\" ⇒ 全 unknown**。"
+                             + " ⇒ 请把 config.json 的 `loop_frame_max_age` 调到 **≥ %.1fs** 再跑"
+                             + "（⛔ 这是 §2265/§2631 记过的\"节拍与判据必须成对调\"）",
+                             frameAgeCap, Self.outFpsInterval, minCap)
+            log("§run \(msg)")
+            finish(msg)
+            return
+        }
+        log(String(format: "§run ✅ 配置自检：loop_frame_max_age=%.1fs > 节拍 %.0fs + 2s 余量",
+                   frameAgeCap, Self.outFpsInterval))
+
         // ⭐⭐⭐⭐⭐ §2364 **第一步：切到目标 App** —— 用**真机验过的序列**（§2360~§2363）
         //
         // 用户令（逐字）：「**怎么实现的你就自己操作ESP32用蓝牙命令跑通再写入软件。**」
@@ -518,6 +554,25 @@ final class Runner: ObservableObject {
         }
         return nil
     }
+
+    /// ⭐⭐⭐⭐⭐ §2631 **「眼」的节拍：每帧间隔多少秒**（⛔ **唯一真源**）
+    ///
+    /// ## 为什么必须有这一个常量（用户令："你要做好全局适配啊"）
+    /// 这个数**同时**决定两件事，而它们**必须一致**：
+    /// ```
+    ///   ① 录屏扩展多久产生一帧（PGShot.fps = 1/10 ⇒ 10s）
+    ///   ② 主 App 判"这帧算不算新鲜"（loop_frame_max_age 必须 > ①）
+    /// ```
+    /// ⛔ 我本轮只改了 ①（扩展的 fps），忘了 ②（config 的上限）⇒
+    ///   `帧龄 7.6s > 上限 3.0s` ⇒ `grab()` 恒失败 ⇒ **全 unknown**（用户看到的现象）。
+    /// 📏 本仓库自己记过这条铁律（config `_loop_doc` 逐字）：
+    /// > **节拍与判据必须成对调** —— 只改一边就会自己把自己判死（§2265）。
+    ///
+    /// ✅ 现在把它**提到一处**，并用它做**开机自检**（见 `loop(dest:)`），
+    ///    ⇒ 以后再改节拍，只要改这里 + `SampleHandler.fps`，**改错会当场报出来**。
+    /// ⚠️ 与 `PGShot/SampleHandler.swift` 的 `fps = 0.1` **必须互为倒数**
+    ///   （⛔ 两处都要改 —— 这是跨 target 的常量，Swift 里没法直接共享）。
+    static let outFpsInterval: Double = 10.0
 
     /// ⭐ 帧**新鲜度**上限（秒）—— 超过就**不算"当前画面"**（照荔枝"只认新截图"）
     ///

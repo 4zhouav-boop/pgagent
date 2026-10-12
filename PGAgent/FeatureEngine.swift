@@ -2170,9 +2170,16 @@ final class FeatureEngine {
             return nil
         }
         // ② 形状优先：底部最宽粉色药丸（纯像素，⛔ 不过 OCR）
+        //
+        // ⛔⛔ §2631 **居中判据必须按"基准宽度"比**（全局适配）
+        // `widestPinkBand` 已**先归一到基准**（451×977）⇒ 它返回的 `cx` 是**基准坐标**；
+        // 而这里原来拿 `img.size.width`（**原始帧宽**，888）来比 ⇒ 基准坐标 vs 原始宽
+        // ⇒ 永远不"居中" ⇒ 形状腿恒废（⛔ 又一个我没适配的点）。
+        // ✅ 改成按 `baseW`（基准宽）比。
         if let band = Self.widestPinkBand(img, box: Self.boxCta) {
             let cx = band.0, cy = band.1
-            if abs(cx - Double(img.size.width) / 2.0) <= 10 {
+            let off = abs(cx - baseW / 2.0)
+            if off <= 10 {
                 // 复核文案（形状过了不代表能点）
                 let t = rec.ocrRegion(img, rect: CGRect(x: 0, y: max(0, cy - 26),
                                                         width: 442, height: 52),
@@ -2185,7 +2192,7 @@ final class FeatureEngine {
                 nav.tapPoint(cx, cy)
                 return "形状优先"
             }
-            log("   §\(tag) 粉药丸不居中（cx=\(Int(cx))，偏离 \(Int(abs(cx - Double(img.size.width) / 2.0)))）⇒ 不用形状腿")
+            log("   §\(tag) 粉药丸不居中（cx=\(Int(cx))，偏离 \(Int(off))）⇒ 不用形状腿")
         }
         // ③ 文案兜底
         let ws = rec.ocrRegion(img, rect: Self.boxCta, minConfidence: 0.3)
@@ -2206,12 +2213,38 @@ final class FeatureEngine {
     /// 在 box 里找**最宽的粉色横带**，返回 (cx, cy, 宽度)；没有 ⇒ nil。
     ///
     /// 照 PC `pink_bands`：纯像素判据（⛔ 不过 OCR）—— CTA 的**形状不变、只有文案会变**。
+    ///
+    /// # ⛔⛔⛔ §2631 **全局适配：必须先归一到基准，才能按基准 box 索引像素**
+    ///
+    /// ## 用户令（逐字）
+    /// > 「**你换了图片识别好像搞崩了程序 现在全识别未知了。你要做好全局适配啊**」
+    ///
+    /// ## ⛔ 我犯的错（本轮）
+    /// 我把录屏扩展的 `outWidth` 从 451 改成 0（原分辨率，帧变 **888×1920**），
+    /// 但**忘了**这类函数是**直接在原图上按像素索引**、而 `box` 是**基准坐标**：
+    /// ```swift
+    /// let bx = Int(box.minX)          // 基准 0
+    /// let bw = Int(box.width)         // 基准 451
+    /// for x in bx..<(bx+bw) { ... }   // ⛔ 但扫的是**原图**的 0..451
+    /// ```
+    /// ⇒ 帧一变大，它扫的就变成**左上角一小块**（888 宽里的 451 宽）
+    ///   ⇒ 判据全落在错的区域 ⇒ 认不出 ⇒ **全 unknown**（用户看到的现象）。
+    ///
+    /// ## ✅ 全局修法 = 照本仓库**已有**的约定（⛔ 不是新发明）
+    /// `ColorBlob.findCoinBall`（第 60 行）与 `ModalX.find`（第 58 行）**早就是**这个做法：
+    /// ```swift
+    /// let base = FrameNormalizer.normalize(img)   // ⭐ 先归一，再按基准索引
+    /// ```
+    /// ⇒ 本函数以及同类的像素函数（`looksLikeAppStorePage` / `findDownloadCloud` /
+    ///   `clickCTA` 的居中判据）**一律照此办理** —— 这才是"全局适配"。
     static func widestPinkBand(_ img: UIImage, box: CGRect) -> (Double, Double, Int)? {
-        guard let cg = img.cgImage else { return nil }
+        // ⭐ §2631 **先归一到基准**（451×977）⇒ `box` 的基准坐标才成立
+        let base = FrameNormalizer.normalize(img)
+        guard let cg = base.cgImage else { return nil }
         let W = cg.width, H = cg.height
         let bx = max(0, Int(box.minX)), by = max(0, Int(box.minY))
         let bw = min(W - bx, Int(box.width)), bh = min(H - by, Int(box.height))
-        guard bw > 8, bh > 8 else { return nil }
+        guard bx < W, by < H, bw > 8, bh > 8 else { return nil }
         var best: (Double, Double, Int)?
         guard let data = cg.dataProvider?.data,
               let ptr = CFDataGetBytePtr(data) else { return nil }
@@ -2310,8 +2343,13 @@ final class FeatureEngine {
     /// ⇒ 阈值取 **100**（两侧各留 ~3 倍余量）。
     /// ⚠️ 真机实测（`_dev/_2423_appstore_page.py`）：新版 iOS 上这台机器只有 **25** 个蓝像素
     ///   ⇒ 阈值 100 会**漏判**。⇒ 这里放宽到 15，并且**另配文案判据**（`更多来自/获取/打开`）。
+    ///
+    /// ⛔⛔ §2631 **全局适配**：`BOX_DONE_BLUE=(0,85,140,150)` 是**基准坐标**
+    ///   ⇒ 必须**先归一到基准**再索引像素（⛔ 否则帧 888 宽时会扫错区域）。
+    ///   （本函数属"像素类判据"；OCR 类走 `ocrRegion`，那里**已经**有比例换算，不受影响。）
     static func looksLikeAppStorePage(_ img: UIImage) -> Bool {
-        guard let cg = img.cgImage, let data = cg.dataProvider?.data,
+        let base = FrameNormalizer.normalize(img)      // ⭐ §2631 先归一
+        guard let cg = base.cgImage, let data = cg.dataProvider?.data,
               let ptr = CFDataGetBytePtr(data) else { return false }
         let bpr = cg.bytesPerRow, bpp = cg.bitsPerPixel / 8
         // BOX_DONE_BLUE = (0, 85, 140, 150)
@@ -2328,8 +2366,11 @@ final class FeatureEngine {
 
     /// 找 App Store 详情页那个**蓝色云朵（下载/安装）**：主体横宽 + 箭头在正下方。
     /// ⛔ 找不到 ⇒ nil（调用方不点）；⛔ 不会误点右侧的「分享」方框（它箭头在上方）。
+    ///
+    /// ⛔⛔ §2631 **全局适配**：`BOX_CLOUD=(0,320,451,760)` 是**基准坐标** ⇒ 先归一。
     static func findDownloadCloud(_ img: UIImage) -> CGPoint? {
-        guard let cg = img.cgImage, let data = cg.dataProvider?.data,
+        let baseImg = FrameNormalizer.normalize(img)   // ⭐ §2631 先归一
+        guard let cg = baseImg.cgImage, let data = cg.dataProvider?.data,
               let ptr = CFDataGetBytePtr(data) else { return nil }
         let bpr = cg.bytesPerRow, bpp = cg.bitsPerPixel / 8
         // PC BOX_CLOUD = (0, 320, 451, 760)
