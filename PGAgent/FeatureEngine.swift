@@ -204,7 +204,15 @@ final class FeatureEngine {
                     cur = im2
                     // ⭐ 广告结束的两个信号（照 PC）：
                     //    ① 顶栏出现「已成功领取」= 奖励已到账 ⇒ **立即去点 ✕**
-                    //    ② 顶栏**没有倒计时数字了** ⇒ 倒计时走完 ⇒ 也去点
+                    //    ② 顶栏**没有倒计时了** ⇒ 倒计时走完 ⇒ 也去点
+                    //
+                    // ⛔⛔ §2628 **② 的关键在判据本身**（用户的两次点破）：
+                    //   > 「**有倒计时 他还是强行点击了3次**」
+                    //   > 「**你仔细看日志 这个行为持续了几次 所以不是没加载的问题**」
+                    //   我原来以为"胶囊还没渲染"（猜错方向），真相是 **OCR 把 `19s` 读成 `19`**
+                    //   ⇒ 旧正则 `\d+秒|\d+s` 恒 false ⇒ 误判"走完" ⇒ 提前点 ✕。
+                    //   ✅ 现在用**抗错字**判据（`\d+[sS秒]?后` + 「后可领取」兜底）——
+                    //      真机帧 f031/f032/f033 三帧由此纠正（见 `adCountdownRunning`）。
                     let t2 = Self.adTopText(cur, rec: rec, bw: baseW, bh: baseH)
                     if t2.contains("已成功领取") {
                         log("   §adbox ✅ 顶栏「已成功领取」（等了 \(Int(slept))s）"
@@ -212,24 +220,62 @@ final class FeatureEngine {
                         break
                     }
                     if !Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH) {
-                        log("   §adbox ✅ 顶栏已无倒计时（等了 \(Int(slept))s）⇒ **倒计时走完，收奖励**")
+                        log("   §adbox ✅ 顶栏已无倒计时（等了 \(Int(slept))s）"
+                            + "⇒ **倒计时走完，收奖励**")
                         break
                     }
                 }
 
                 // ── ② G3：**等倒计时结束**才许动手（PC L9814~L9858）────────
-                //    ⭐ 判据 = PC 的「到账闸」（`_1377_ad_loop.py:4342`）：
-                //      **只看顶栏还有没有 `N秒` / `Ns` 倒计时** ⇒ 有就**没走完 ⇒ 不点**。
-                //      ⛔ 不能只认「已成功领取」——§1545 血案：倒计时早走完了，
-                //        但 OCR 没读到那四个字 ⇒ 若只认它，就**永远不敢点**。
+                //    ⭐ 判据 = PC 的**两条**（见 `adCountdownRunning` 的 docstring）：
+                //      ① `\d+[sS秒]?后`（抗错字 —— `19后` 也算，真机 f031/f033 铁证）
+                //      ② 「后可领取」句式还在 ⇒ 保守算"在走"
+                //    ⛔ 绝不能用旧式 `\d+秒` 单条：真机 OCR 常把 `19s` 读成 `19`
+                //      ⇒ 判据恒 false ⇒ 误判"走完" ⇒ **提前点 ✕ 把广告点死**（§2628 血案）。
+                //
+                // ⭐ §2628 **等待轮数按胶囊里的 N 动态定**（照 PC L9821~L9825）：
+                //   `_need = N + 20` ⇒ 多长的广告都等得起（⛔ 不是固定 90s）
                 var waited = 0.0
+                let needS: Double = {
+                    if let n0 = Self.adCountdownSeconds(cur, rec: rec,
+                                                        bw: baseW, bh: baseH) {
+                        return Double(n0) + 20.0
+                    }
+                    return 45.0          // 读不到 N ⇒ PC 的默认（`_need … else 45`）
+                }()
+                log("   §adbox G3 胶囊倒计时 N ⇒ 最多等 \(Int(needS))s（N+20 余量，照 PC）")
                 while Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH),
-                      waited < 90, !isCancelled() {
+                      waited < needS, !isCancelled() {
                     sleep(3.0)
                     waited += 3.0
                     guard let im3 = grab() else { break }
                     cur = im3
-                    log("   §adbox G3 等倒计时结束（已等 \(Int(waited))s；⛔ 没结束不点 ✕）")
+                    log("   §adbox G3 等倒计时结束（已等 \(Int(waited))s / \(Int(needS))s"
+                        + "；⛔ 没结束不点 ✕）")
+                }
+                // ⭐ §2628 **到账闸**（照 PC `click_toast_x` L4342，⛔ 点 ✕ 前最后确认一次）
+                //   「顶栏只要还有倒计时 ⇒ 倒计时没走完 ⇒ 不点 X」。
+                //   ⚠️ 这里再等一轮（预算是上面那个 `needS` 的余量），因为
+                //      G3 可能在**读不到 N** 时用了默认 45s 而广告实际更长。
+                if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH) {
+                    log("   §adbox ⛔ 顶栏**还有倒计时** ⇒ **这次不点 ✕**（照 PC 到账闸）⇒ 继续等")
+                    var extra = 0.0
+                    // 补等预算：再来一个 N+20（照 PC 的余量思想），上限 180s 防死等
+                    let extraNeed = min(180.0, needS)
+                    while Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH),
+                          extra < extraNeed, !isCancelled() {
+                        sleep(3.0)
+                        extra += 3.0
+                        guard let im4 = grab() else { break }
+                        cur = im4
+                        log("   §adbox G3 到账闸再等（已补等 \(Int(extra))s）；⛔ 不点 ✕）")
+                    }
+                    log("   §adbox ✅ 到账闸放行（补等 \(Int(extra))s）⇒ 现在才点 ✕")
+                }
+                if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH) {
+                    log("   §adbox ⛔⛔ 等满预算**倒计时仍未走完** ⇒ **本条不点 ✕**"
+                        + "（照 PC「不硬撑」）；交给下一轮重判")
+                    continue
                 }
                 log("§adbox G3 倒计时已结束（等了 \(Int(waited))s）⇒ **现在才点 ✕ 收奖励**")
 
@@ -357,11 +403,33 @@ final class FeatureEngine {
                         guard let im3 = grab() else { break }
                         cur = im3
                         let t3 = Self.adTopText(cur, rec: rec, bw: baseW, bh: baseH)
+                        // ⭐⭐ 信号①：明确到账 ⇒ 可以收奖励（PC `_already`）
                         if t3.contains("已成功领取") {
                             log("   §adbox ✅ 顶栏「已成功领取」（等 \(Int(slept))s）"
                                 + " ⇒ 广告结束，立即收奖励")
                             break
                         }
+                        // ⭐⭐⭐⭐⭐ §2628 **信号②的判据本身是抗错字的**（本轮真机破的案）
+                        //
+                        // ## ⛔⛔ 用户两次点破，我两次猜错方向
+                        // > 「**看广告倒计时未结束会提前点击X**」
+                        // > 「**有倒计时 他还是强行点击了3次**」
+                        // > 「**你仔细看日志 这个行为持续了几次 所以不是没加载的问题**」
+                        //
+                        // 我先猜"胶囊还没渲染"（错），加了个 `sawCountdown` 想绕过去。
+                        // 用户的第二句话直接否掉了这个方向 —— **每次都 2 秒**，不是随机的。
+                        //
+                        // ## ✅ 真机帧给出真根因（`_dev/_2629` 抓的广告页 5 帧）
+                        // ```
+                        //   f029  '21s后可领取968金币×'  → 旧正则命中 '21s' ✅
+                        //   f031  '19后可领取968金币×'   → ⛔ **None**（「s」被 OCR 吃掉）
+                        //   f032  '19后可领取968金币×'   → ⛔ None
+                        //   f033  '美18后可领取968金币×'  → ⛔ None
+                        // ```
+                        // ⇒ 倒计时**真的在走（21s→18s）**，是**我的正则读不到**
+                        //   （旧式要求"数字后必须跟 秒/s"）⇒ 误判"走完" ⇒ 提前点 ✕ 把广告点死。
+                        // ⇒ 修法在 `adCountdownRunning` 里（照 PC `\d+[sS秒]?后` + 「后可领取」兜底），
+                        //   本处只管调用 —— ⛔ 判据不在调用点打补丁。
                         if !Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH) {
                             log("   §adbox ✅ 倒计时已走完（等 \(Int(slept))s）⇒ 收奖励")
                             break
@@ -376,6 +444,23 @@ final class FeatureEngine {
                         guard let im3 = grab() else { break }
                         cur = im3
                         log("   §adbox G3 再等倒计时（已等 \(Int(waited))s；⛔ 没结束不点 ✕）")
+                    }
+                    // ⭐ §2628 **最后一道到账闸**（照 PC `click_toast_x` L4342）
+                    //   ⛔ 点 ✕ 之前**再确认一次**顶栏没有 `\d+秒`：
+                    //     「顶栏只要还有 `\d+秒 / \d+s` ⇒ 倒计时没走完 ⇒ 不点 X」。
+                    //   ⇒ 若此刻**仍有倒计时**，⛔ 绝不往下走收奖励（等它真的走完）。
+                    if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH) {
+                        log("   §adbox ⛔ 顶栏**还有倒计时** ⇒ **这次不点 ✕**（照 PC 到账闸）"
+                            + "⇒ 继续等")
+                        var extra = 0.0
+                        while Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH),
+                              extra < 90, !isCancelled() {
+                            sleep(3.0)
+                            extra += 3.0
+                            guard let im4 = grab() else { break }
+                            cur = im4
+                        }
+                        log("   §adbox ✅ 到账闸放行（补等 \(Int(extra))s）⇒ 现在才点 ✕")
                     }
                     // ⭐⭐⭐⭐⭐ §2441 **转化：点 CTA → 浏览落地页**（移植 PC `convert_and_browse`）
                     //
@@ -635,8 +720,34 @@ final class FeatureEngine {
             return true
         }
         // ③ 顶栏 toast ✕（⚠️ 只在**没有面板**时才轮到这里）
+        //
+        // ⛔⛔⛔ §2628 **到账闸：顶栏还有 `\d+秒/Ns` ⇒ 倒计时没走完 ⇒ 绝不点 ✕**
+        //
+        // ## 用户令（逐字，本轮）
+        // > 「**看广告倒计时未结束会提前点击X**」
+        //
+        // ## PC 的原文（`_1377_ad_loop.py:4342 click_toast_x`，逐字）
+        // > ② 到账闸：**只看「还有没有 N秒/Ns 倒计时」**
+        // >   ✅ 抗错字写法：**顶栏只要还有 `\d+秒 / \d+s`** ⇒ 倒计时没走完 ⇒ **不点 X**。
+        // >   ⛔⛔ §1545 血案：倒计时**早就走完了**，但 OCR 把「已成功领取」读成「善厨领取」
+        // >     ⇒ 用 `"已成功领取" not in top` 当闸 ⇒ 永远不成立 ⇒ X 永远不点。
+        // >   ⇒ 所以判据是「**还有没有倒计时数字**」，⛔ 不是"有没有到账字样"。
+        //
+        // 📏 真机证据（本轮 trace，`run_trace.log`）：
+        // ```
+        // 13:23:27 §adbox_ad2 顶栏胶囊 ✕（面板已不在）⇒ 点它
+        // 13:23:28 §click pill_x ATOMIC Q @(214,89)      ← ⛔ 没确认倒计时就点了
+        // ```
+        // ⇒ 这一脚**把广告点死**（PC 原话：「倒计时没走完就点 ✕ 会把广告点死」）
+        //   ⇒ 循环断在这里（用户看到"每次就看一个就强行退出"）。
         if nav.detect("pill_x", img: img) != nil {
-            log("   §\(tag) 顶栏胶囊 ✕（面板已不在）⇒ 点它")
+            // ⭐ 到账闸：只在**没有倒计时数字**时才允许点这个 ✕
+            if Self.adCountdownRunning(img, rec: rec, bw: baseW, bh: baseH) {
+                log("   §\(tag) ⛔ 顶栏**还有倒计时** ⇒ **不点胶囊 ✕**（照 PC 到账闸）"
+                    + "⇒ 本层不处理，交回主循环继续等")
+                return false
+            }
+            log("   §\(tag) 顶栏胶囊 ✕（面板已不在、且已无倒计时）⇒ 点它")
             _ = nav.tap("pill_x", img: img, atomic: true)
             return true
         }
@@ -656,31 +767,107 @@ final class FeatureEngine {
             .map(\.0).joined()
     }
 
-    /// ⭐⭐⭐ 倒计时**还在走**吗 —— 照 PC 的「到账闸」（`_1377_ad_loop.py:4342`）**逐字**。
+    /// ⭐⭐⭐⭐⭐ §2628 倒计时**还在走**吗 —— 照 PC 的**两条**判据（`_1377_ad_loop.py:4342` + `:9723`）
     ///
-    /// ## PC 原文
-    /// > ✅ 抗错字写法：**顶栏只要还有 `\d+秒 / \d+s`** ⇒ 倒计时没走完 ⇒ **不点 X**。
-    /// > ⛔⛔ §1545 真机血案（`_var/_1544_fuli_round.log`）：倒计时**早就走完了**，
-    /// >   但 OCR 没读到「已成功领取」四个字。
-    /// >   ⇒ 若**只认那四个字**当"到账"，就会**永远不敢点** ✕ ⇒ 卡在广告页出不去。
-    /// >   ✅ 所以判据必须是「**还有没有倒计时数字**」，⛔ 不是"有没有到账字样"。
+    /// # ⛔⛔⛔ 血案：用户两次点破，我两次猜错方向
+    /// > 「**看广告倒计时未结束会提前点击X**」
+    /// > 「**有倒计时 他还是强行点击了3次**」
+    /// > 「**你仔细看日志 这个行为持续了几次 所以不是没加载的问题**」
     ///
-    /// ## ⛔⛔ 为什么不能用「已成功领取」当判据（我上一版的错）
-    /// 用户令：「**倒计时是广告没结束 你没结束去点 不是傻逼。广告结束了你不点了。**」
-    /// ⇒ 判据只有一条：**顶栏还有 `N秒`/`Ns` ⇒ 广告没结束 ⇒ ⛔ 一个键都不许点。**
+    /// ## 真机帧铁证（`_dev/_2629` 抓的 70 帧，广告页那 5 帧）
+    /// ```
+    ///   f029  '21s后可领取968金币×'   → 我的旧正则命中 '21s' ✅
+    ///   f030  '20s后可领取968金币×'   → 命中 '20s' ✅
+    ///   f031  '19后可领取968金币×'    → ⛔ **None**（「s」被 OCR 吃掉）
+    ///   f032  '19后可领取968金币×'    → ⛔ None
+    ///   f033  '美18后可领取968金币×'   → ⛔ None
+    ///   f034  '美团精选婚纱摄影服务'    → 已跳到落地页（广告**被我点死了**）
+    /// ```
+    /// ⇒ 倒计时**从 21s 一直走到 18s**，而我的代码**在第 2 秒就判"倒计时已走完"**
+    ///   ⇒ 提前点 ✕ ⇒ **把广告点死**（trace：`§adbox ✅ 倒计时已走完（等 2s）`）。
+    ///
+    /// ## ⛔ 我的旧判据错在哪
+    /// 旧写法只搜 `[0-9]+\s*(秒|s|S)` —— **要求"数字后面必须跟 秒/s"**。
+    /// 而真机 OCR **经常把 `19s` 读成 `19`**（单位丢了）⇒ 判据恒 false
+    /// ⇒ 于是"没有倒计时" ⇒ 误判"走完" ⇒ 点 ✕ 点死广告。
+    ///
+    /// ## ✅ PC 的两条权威判据（⛔ 都不是"数字+秒"）
+    /// PC **从不用 `\d+秒` 单独当"还有倒计时"**，它用**胶囊的固定句式**：
+    /// ```python
+    /// # ① `_1377_ad_loop.py:14`（G1 判"在广告页"）
+    /// G1 顶部胶囊含「后可领取」或「已成功领取」⇒ 确认在视频广告页
+    /// # ② `_1377_ad_loop.py:9723`（判"倒计时还剩几秒"）
+    /// _CD_RX = re.search(r"(\d+)\s*s\s*后", top2) or re.search(r"(\d+)\s*秒后", top2)
+    /// ```
+    /// ⇒ 关键在 **`后`** 这个字：`Ns后可领取…` / `N秒后可领取…`
+    ///   即使 `s`/`秒` 被吃掉，**`后可领取` 这三个字一定还在**（它是广告胶囊的固定句式）。
+    ///
+    /// ⇒ 所以本函数现在按**优先级**判（照 PC）：
+    /// ```
+    /// ① 「已成功领取」                ⇒ 明确到账 ⇒ ⛔ 不再算"倒计时在走"（放行去收奖励）
+    /// ② `\d+\s*[sS秒]?\s*后`（后可领取/N秒后）⇒ **还有倒计时** ⇒ 走
+    /// ③ `\d+\s*[sS秒]`（旧的严格式）   ⇒ 兜底，仍算"在走"
+    /// ④ 「后可领取」但没数字            ⇒ 也算"在走"（胶囊形态在 ⇒ 保守不放行）
+    /// ```
+    /// ⚠️ ④ 是**保守**的一步：宁可多等，也绝不在倒计时没走完时点 ✕
+    ///   （用户明令：「**倒计时是广告没结束 你没结束去点 不是傻逼**」）。
     ///
     /// - Returns: true = **倒计时还在走**（广告没结束 ⇒ 只等，⛔ 不点）
     static func adCountdownRunning(_ img: UIImage, rec: Recognizer,
                                   bw: Double, bh: Double) -> Bool {
-        let items = rec.ocrRegion(img, rect: CGRect(x: 0, y: 62, width: bw, height: 78),
-                                  minConfidence: 0.3)
-        let t = items.map(\.0).joined().replacingOccurrences(of: " ", with: "")
-        // PC 正则 `\d+秒` / `\d+s`（含 `后` 的写法也一并覆盖）
-        if let re = try? NSRegularExpression(pattern: "[0-9]+\\s*(秒|s|S)") {
+        let t = adTopText(img, rec: rec, bw: bw, bh: bh)
+            .replacingOccurrences(of: " ", with: "")
+        // ① 明确到账 ⇒ 倒计时已结束（放行）
+        if t.contains("已成功领取") { return false }
+        // ② ⭐ PC 主力判据：`\d+[sS秒]?后`（= `19s后` / `19秒后` / **`19后`**）
+        //    ⛔ 这才是抗错字的写法 —— `s`/`秒` 丢了也能命中（因为靠 `后` 定位）
+        if let re = try? NSRegularExpression(pattern: "[0-9]+\\s*[sS秒]?\\s*后") {
             let r = NSRange(t.startIndex..<t.endIndex, in: t)
-            return re.firstMatch(in: t, range: r) != nil
+            if re.firstMatch(in: t, range: r) != nil { return true }
         }
-        return t.contains("秒")
+        // ③ 兜底：旧的严格式（`\d+秒` / `\d+s`）—— 有的版式没有「后」
+        if let re = try? NSRegularExpression(pattern: "[0-9]+\\s*(?:秒|[sS])") {
+            let r = NSRange(t.startIndex..<t.endIndex, in: t)
+            if re.firstMatch(in: t, range: r) != nil { return true }
+        }
+        // ④ ⭐ 保守兜底：胶囊句式「后可领取」在、且**没有**「已成功领取」
+        //    ⇒ 说明**倒计时还没走完**（只是数字没读出来）⇒ 也算"在走"
+        //    ⛔ 宁可多等，绝不在没走完时点 ✕（用户令）
+        if t.contains("后可领取") || t.contains("可领取") { return true }
+        return false
+    }
+
+    /// ⭐⭐ 从顶栏读出**倒计时还剩几秒**（照 PC `_1377_ad_loop.py:9723`）
+    ///
+    /// ```python
+    /// _CD_RX = re.search(r"(\d+)\s*s\s*后", top2) or re.search(r"(\d+)\s*秒后", top2)
+    /// ```
+    /// ⚠️ 读不到 ⇒ nil（调用方**不放枪**，照铁律②）。
+    /// ⭐ 用途：PC 用 `N + 20s` 定**等多久**（`_need = int(_m.group(1)) + 20`），
+    ///    ⛔ 不是固定 45s —— 多长的广告都等得起。
+    static func adCountdownSeconds(_ img: UIImage, rec: Recognizer,
+                                   bw: Double, bh: Double) -> Int? {
+        let t = adTopText(img, rec: rec, bw: bw, bh: bh)
+            .replacingOccurrences(of: " ", with: "")
+        // 顺序照 PC：先 `s后`，再 `秒后`；再看**宽松形**（`19后`）
+        for pat in ["([0-9]+)[sS]后", "([0-9]+)秒后", "([0-9]+)后"] {
+            if let re = try? NSRegularExpression(pattern: pat),
+               let m = re.firstMatch(in: t, range: NSRange(t.startIndex..<t.endIndex, in: t)),
+               m.numberOfRanges > 1,
+               let rr = Range(m.range(at: 1), in: t),
+               let n = Int(t[rr]) {
+                return n
+            }
+        }
+        // 最后兜底：任意 `\d+秒/s`
+        if let re = try? NSRegularExpression(pattern: "([0-9]+)\\s*(?:秒|[sS])"),
+           let m = re.firstMatch(in: t, range: NSRange(t.startIndex..<t.endIndex, in: t)),
+           m.numberOfRanges > 1,
+           let rr = Range(m.range(at: 1), in: t),
+           let n = Int(t[rr]) {
+            return n
+        }
+        return nil
     }
 
     /// PC `AD_ROW_Y_WIN = 26` —— 行内 y 容差（同一张卡片的标题与按钮落在此窗口内）
