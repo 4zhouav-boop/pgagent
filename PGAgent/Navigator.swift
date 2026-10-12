@@ -567,18 +567,46 @@ final class Navigator {
             // ⛔ 那不是快手的页面 ⇒ `pageHere` 判 unknown ⇒ 旧行为反复点 `〈`(26,61)
             //   **点不中**（那页的 ✕ 在 (43,110)）⇒ 空转十几步（我实测过）。
             //
-            // ## PC 的两条判据（`_1377_ad_loop.py:1507 find_appstore_x`）
+            // ## PC 的判据（`_1377_ad_loop.py:1507 find_appstore_x`，**逐字读出来的**）
+            // ```python
+            // def find_appstore_x(img):
+            //     # ① X_REFS 模板块逐像素 MAE 比对（§1638，MAE ≤ X_MAE）
+            //     for _name, _fx, _fy, _desc in X_REFS: ...
+            //     if not hits:
+            //         # ② §1718 暗色交叉字形兜底（§1689 的几何判据，极性翻成暗色）
+            //         _d = _find_cross_x(img, roi=_roi, thr=100, dark=True)
+            //         if _d: return _d
+            //         return None
             // ```
-            //   ① 页型闸 `is_appstore_page`：左上「完成/打开」那一带够不够 iOS 蓝
-            //      全量真帧标定：App Store 页 289~290 个蓝像素；其它页 = 0（阈值 100）
-            //      ⚠️ 真机实测（本机新版 iOS）只有 **25** 个 ⇒ 阈值放宽到 15，并配文案判据
-            //   ② 关闭入口：左上那个**黑色笔画 + 白底**的 ✕
-            //      ⛔ 与广告胶囊「白 ✕ + 暗底」**极性完全相反** ⇒ 必须按"暗色"找
-            //      真机实测命中 (43,110)，点它**一击退出**（蓝像素 25 → 0）
+            //
+            // ⛔⛔⛔ §2624 **删掉 `looksLikeAppStorePage` 这道闸 —— 它是我自造的组合，PC 里没有**
+            //
+            // ## 用户令（逐字）
+            // > 「**你搞的什么狗屎代码 还是一样 会乱点**」
+            //
+            // ## ⛔ 血案（真机 trace + 像素实测，本轮）
+            // 我在漏斗里写成 `if looksLikeAppStorePage(img) && findDarkCross(img)`，
+            // 而 **PC 的 `find_appstore_x` 根本不用蓝像素闸**。
+            // ⇒ 消息页**左上有蓝色头像**（离线实测：`BOX_DONE_BLUE` 那一带
+            //    **603 个蓝像素**，远超阈值 100）⇒ 闸门恒真
+            // ⇒ 再叠上 `findDarkCross` 的宽松几何判据 ⇒ 在消息页上点 `(31,82)`
+            // ⇒ trace 逐字：`§funnel appstore_x @(31,82)` **连点 6 次**
+            //    （用户看到的「乱点」）。
+            //
+            // 📏 真机两帧对照（`_dev` 离线复算）：
+            // ``` 
+            //   消息页 _2624_live.jpg  ⇒ 蓝像素 603 ⇒ 旧写法过闸 ⛔（就是乱点根源）
+            //   真 feed _2613_s3_feed.jpg ⇒ 蓝像素 0   ⇒ 不过闸
             // ```
+            // ⚠️ PC 的 `is_appstore_page`（蓝像素）**只用在安装链路**（L8767：
+            //    「形状腿**必须有页面闸**」——防 `find_cloud` 的形状判据误报 29%），
+            //    **⛔ 不是用来"关 ✕"的**。把两处混用就是我这个 bug。
+            //
+            // ✅ 现在 = PC 的口径：**只用 `findDarkCross`**（它本身内含 PC §1689 的
+            //    几何判据：近正方 / 尺寸 8~30 / 孤立 / 每行段数≤2 / 填充率 0.15~0.75），
+            //    ⛔ 不再叠加蓝像素闸。
             if it.element == "appstore_x" {
-                if Self.looksLikeAppStorePage(img),
-                   let p = Self.findDarkCross(img) {
+                if let p = Self.findDarkCross(img) {
                     funnelLast[it.element] = now
                     log("   §funnel appstore_x（App Store 页左上暗色 ✕）@(\(Int(p.x)),\(Int(p.y)))")
                     tapPoint(Double(p.x), Double(p.y))
