@@ -377,6 +377,37 @@ final class FeatureEngine {
                         cur = im3
                         log("   §adbox G3 再等倒计时（已等 \(Int(waited))s；⛔ 没结束不点 ✕）")
                     }
+                    // ⭐⭐⭐⭐⭐ §2441 **转化：点 CTA → 浏览落地页**（移植 PC `convert_and_browse`）
+                    //
+                    // ## ⛔ 手机端原来**完全没有这一步**（`_dev/_2440_port_diff.py` 对照出来的差集）
+                    // 它从"倒计时结束"**直接跳到收奖励** ⇒ 就是用户骂的那句：
+                    // > 「**广告完全不转化，全是看完就X。全是低价值**」（§1526）
+                    // > 「**他是一直滑动 但是没有点击CTA**」「**都没点进去 跳什么啊？**」（§1560）
+                    //
+                    // ## PC 的顺序（`_1377_ad_loop.py:8783 convert_and_browse`，⛔ 不许改）
+                    // ```
+                    //   ① click_cta      点底部 CTA（形状优先 → 文案兜底）
+                    //   ② wait(3.2)
+                    //   ③ 判 is_ad_page  ⛔ 没点进落地页 ⇒ **一律不滑**（用户令：都没点进去，滑什么）
+                    //   ④ browse_landing 上滑 4~8 次、每次隔 3~6s
+                    // ```
+                    // ⛔ 红线只有一条：**不支付/不购买**（由 `forbidden()` 黑名单硬闸守）
+                    if let cur4 = grab(), !isCancelled() {
+                        if let how = clickCTA(cur4, tag: "adbox_cta\(n + 1)") {
+                            log("§adbox CTA 已点（\(how)）⇒ 等落地页")
+                            sleep(3.2)
+                            if let land = grab(),
+                               !Self.looksLikeAdPage(land, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+                                log("§adbox ✅ 已进落地页（顶栏「\(Self.adTopText(land, rec: rec, bw: baseW, bh: baseH).prefix(18))」）⇒ 浏览")
+                                clickInstall(land, tag: "adbox_inst\(n + 1)")   // ④a 先点安装（照 PC 顺序）
+                                browseLanding(tag: "adbox_browse\(n + 1)")      // ④b 再浏览
+                            } else {
+                                log("§adbox ⚠️ CTA 没点进落地页 ⇒ **不浏览**（照 PC：都没进去，滑什么）")
+                            }
+                        } else {
+                            log("§adbox ⚠️ 没找到可点的 CTA（过闸后）⇒ 本条不做转化，直接收奖励")
+                        }
+                    }
                     log("§adbox G3 倒计时结束 ⇒ **现在才点 ✕ 收奖励**")
                     for _ in 0..<6 {
                         if isCancelled() { break }
@@ -1423,6 +1454,299 @@ final class FeatureEngine {
         let a = min(gapMin, gapMax), b = max(gapMin, gapMax)
         let g = b > a ? Double.random(in: a...b) : a
         sleepWithCancel(g)
+    }
+
+    // MARK: - ⛔⛔⛔ 用户红线：禁点词硬闸（照 PC `forbidden()` 逐字移植）
+
+    /// PC `FORBID_KEYS`（`_1377_ad_loop.py:448`）—— **逐字**，⛔ 不许删减
+    ///
+    /// ## PC 原文（事故经过，必须记住）
+    /// > 货速发那条广告底部的「**立即秒杀**」是红色药丸，`pink_bands` 按**形状**直接命中并点下去
+    /// > ⇒ 打开了快手小店收银台「待支付 ¥9.9」，屏幕上出现「确认支付 / 继续支付」，
+    /// >   用户看见以为在买东西。
+    /// > 用户口径：**可以浏览，绝不做支付/购买**。
+    /// > ⇒ 用户口径 > 形状判据，形状优先从此**必须让位于这张黑名单**。
+    ///
+    /// ⛔⛔ 手机端**原来一条都没有**（`_dev/_2440_port_diff.py` 粗筛 + 全量搜 Swift 均 0 命中）
+    /// ⇒ 这是**移植差集里最要命的一条**：踩下去就是"在帮用户买东西"。
+    static let forbidKeys: [String] = [
+        "支付", "付款", "结算", "收银", "购买", "下单", "确认订单", "立即买", "去支付",
+        "继续支付", "确认支付", "秒杀", "抢购", "立即抢", "加购", "购物车", "进店",
+        "开通", "续费", "充值", "免密", "刷脸", "人脸", "花呗", "白条",
+    ]
+
+    /// PC `REJECT_CLICK_KEYS`（`_1377_ad_loop.py:471`）—— 照抄雷神的"拒绝点击"词表
+    ///
+    /// PC 原文：「雷神踩过的坑：**屏底那几条广告条/版本号**长得像按钮，点了会乱跑 ⇒ 一律拉黑。」
+    /// ⛔ 唯一**故意没抄**的两条：裸 `功能` 与裸 `|`（会误伤正常文案）。
+    static let rejectClickKeys: [String] = [
+        "88元", "大额福利", "去星图", "版本号", "每日听歌赚钱", "每日领现金",
+    ]
+
+    /// ⛔ 点击前**统一过闸**：文案含黑名单任一词 ⇒ 拒绝点击。返回命中的词（便于日志），否则 nil。
+    ///
+    /// 移植自 PC `forbidden()`（`_1377_ad_loop.py:474`）——**语义逐字一致**。
+    /// ⚠️ 用法契约（照 PC）：**调用方拿到非 nil 就必须放弃这次点击**，
+    ///    ⛔ 不是"换个坐标再试"、⛔ 不是"只记日志"。
+    static func forbidden(_ text: String?) -> String? {
+        let t = text ?? ""
+        for k in forbidKeys where t.contains(k) { return k }
+        for k in rejectClickKeys where t.contains(k) { return k }
+        return nil
+    }
+
+    /// PC `BOX_SHOPBAR` / `SHOP_AD_KEYS`（`_1377_ad_loop.py:455`）—— 购物/电商型广告判据带
+    ///
+    /// 判据带 = 快手小店商品页底部那条固定工具条（进店/客服/购物车）+
+    /// 「秒杀价/已抢/已售/限时秒杀」那排促销信息。
+    static let boxShopBar = CGRect(x: 0, y: 875, width: 451, height: 102)
+    static let shopAdKeys: [String] = [
+        "秒杀", "购物车", "进店", "客服", "立即购买", "加购", "去购买",
+        "领券购买", "已抢", "已售", "限时秒杀", "找同款",
+    ]
+
+    /// 照 PC `is_shop_ad`：底部工具条里是否出现购物/电商型关键词。返回 (是否, 命中词)。
+    private func isShopAd(_ img: UIImage) -> (Bool, [String]) {
+        let ws = rec.ocrRegion(img, rect: Self.boxShopBar, minConfidence: 0.3)
+        let hit = ws.map(\.0).filter { t in Self.shopAdKeys.contains { t.contains($0) } }
+        return (!hit.isEmpty, hit)
+    }
+
+    // MARK: - ⭐⭐⭐ 转化：点 CTA（照 PC `click_cta`，⛔ 形状优先但必须让位于黑名单）
+
+    /// PC `BOX_BOT` / `CTA_KEYS`（`_1377_ad_loop.py`）—— 底部 CTA 带与文案兜底词表
+    static let boxCta = CGRect(x: 0, y: 760, width: 451, height: 217)
+    static let ctaKeys: [String] = [
+        "了解详情", "查看详情", "立即下载", "免费预约", "去看看", "去了解",
+        "立即查看", "点击查看", "去逛逛", "立即参与", "去体验", "去咨询",
+    ]
+
+    /// ⭐ 点广告页底部的 CTA —— 逐条移植 PC `click_cta`（`_1377_ad_loop.py:1044`）。
+    ///
+    /// ## PC 的三步（⛔ 顺序不能变）
+    /// ```
+    /// ① 硬闸：is_shop_ad → 直接拒绝（购物广告不转化，用户口径）
+    /// ② 形状优先：底部**最宽**粉色药丸，且**必须居中**（|cx-225| ≤ 10）
+    ///    ⛔ §1522 真机：不居中就点到 scr(88,886) 的创意红条 ⇒ "转化"名存实亡
+    ///    命中后**再 OCR 复核文案**，含 FORBID_KEYS ⇒ 拒绝
+    /// ③ 文案兜底：CTA_KEYS 命中 + 粉色质心；再不行用偏心粉带当"一次广告点击"
+    /// ```
+    /// - Returns: 点到了哪条腿（供日志）；nil = 没点（⛔ 不放枪）
+    private func clickCTA(_ img: UIImage, tag: String) -> String? {
+        // ① 硬闸：购物/电商型广告
+        let (shop, shopHit) = isShopAd(img)
+        if shop {
+            log("   §\(tag) ⛔ 购物/电商型广告（底栏命中 \(shopHit.prefix(3))）⇒ **拒绝点 CTA**")
+            return nil
+        }
+        // ② 形状优先：底部最宽粉色药丸（纯像素，⛔ 不过 OCR）
+        if let band = Self.widestPinkBand(img, box: Self.boxCta) {
+            let cx = band.0, cy = band.1
+            if abs(cx - Double(img.size.width) / 2.0) <= 10 {
+                // 复核文案（形状过了不代表能点）
+                let t = rec.ocrRegion(img, rect: CGRect(x: 0, y: max(0, cy - 26),
+                                                        width: 442, height: 52),
+                                      minConfidence: 0.3).map(\.0).joined()
+                if let bad = Self.forbidden(t) {
+                    log("   §\(tag) ⛔ 形状命中的药丸文案含违规词「\(bad)」⇒ **拒绝点击**")
+                    return nil
+                }
+                log("   §\(tag) 形状优先：居中粉药丸 @(\(Int(cx)),\(Int(cy))) 文案「\(t.prefix(14))」过闸")
+                nav.tapPoint(cx, cy)
+                return "形状优先"
+            }
+            log("   §\(tag) 粉药丸不居中（cx=\(Int(cx))，偏离 \(Int(abs(cx - Double(img.size.width) / 2.0)))）⇒ 不用形状腿")
+        }
+        // ③ 文案兜底
+        let ws = rec.ocrRegion(img, rect: Self.boxCta, minConfidence: 0.3)
+        for (t, r, _c) in ws {
+            guard Self.ctaKeys.contains(where: { t.contains($0) }) else { continue }
+            if let bad = Self.forbidden(t) {
+                log("   §\(tag) ⛔ CTA 文案「\(t)」含违规词「\(bad)」⇒ 跳过")
+                continue
+            }
+            log("   §\(tag) 文案兜底：CTA「\(t)」@(\(Int(r.midX)),\(Int(r.midY)))")
+            nav.tapPoint(Double(r.midX), Double(r.midY))
+            return "文案兜底"
+        }
+        log("   §\(tag) ⛔ 没找到可点的 CTA（过闸后）⇒ 停手，⛔ 不盲点")
+        return nil
+    }
+
+    /// 在 box 里找**最宽的粉色横带**，返回 (cx, cy, 宽度)；没有 ⇒ nil。
+    ///
+    /// 照 PC `pink_bands`：纯像素判据（⛔ 不过 OCR）—— CTA 的**形状不变、只有文案会变**。
+    static func widestPinkBand(_ img: UIImage, box: CGRect) -> (Double, Double, Int)? {
+        guard let cg = img.cgImage else { return nil }
+        let W = cg.width, H = cg.height
+        let bx = max(0, Int(box.minX)), by = max(0, Int(box.minY))
+        let bw = min(W - bx, Int(box.width)), bh = min(H - by, Int(box.height))
+        guard bw > 8, bh > 8 else { return nil }
+        var best: (Double, Double, Int)?
+        guard let data = cg.dataProvider?.data,
+              let ptr = CFDataGetBytePtr(data) else { return nil }
+        let bpr = cg.bytesPerRow, bpp = cg.bitsPerPixel / 8
+        for y in by..<(by + bh) {
+            var minX = -1, maxX = -1
+            for x in bx..<(bx + bw) {
+                let o = y * bpr + x * bpp
+                let r = Int(ptr[o]), g = Int(ptr[o + 1]), b = Int(ptr[o + 2])
+                // PC 的粉色判据：R>200 且 G<120 且 B<150
+                if r > 200 && g < 120 && b < 150 {
+                    if minX < 0 { minX = x }
+                    maxX = x
+                }
+            }
+            if minX >= 0 {
+                let w = maxX - minX
+                if best == nil || w > best!.2 {
+                    best = (Double(minX + maxX) / 2.0, Double(y), w)
+                }
+            }
+        }
+        return best
+    }
+
+    /// ⭐ 转化：浏览落地页 —— 逐条移植 PC `browse_landing`（`_1377_ad_loop.py:8535`）。
+    ///
+    /// ## PC 原文
+    /// ```python
+    /// def browse_landing(tag):
+    ///     '''⭐⭐⭐ §1559 转化浏览（用户口径）：上滑 4~8 次、每次间隔 3~6s。'''
+    ///     _ns = random.randint(4, 8)
+    ///     for _i in range(_ns):
+    ///         cmd(SWIPE)
+    ///         wait(random.uniform(3.0, 6.0))
+    /// ```
+    /// ## ⛔ 用户令（不许自己发明）
+    /// > 「**不是上滑浏览，是点击 CTA 互动按钮 → 进去 → 再上滑浏览**」（§1532）
+    /// > 「**我说不支付 不是说不浏览**」（§1562）⇒ 购物型也要浏览
+    /// ⛔ 唯一红线 = **不支付/不购买**（由 `forbidden()` 守）
+    private func browseLanding(tag: String) {
+        let n = Int.random(in: 4...8)
+        log("   §\(tag) 转化浏览：上滑 \(n) 次，每次隔 3~6s（照 PC `browse_landing`）")
+        for _ in 0..<n {
+            if isCancelled() { break }
+            swipeUp(3.0, 6.0)
+        }
+        log("   §\(tag) 转化浏览完成")
+    }
+
+    /// ⭐ 转化：点落地页里的「安装/获取」—— 移植 PC `click_install`（`_1377_ad_loop.py:8738`）。
+    ///
+    /// ## PC 的来历（用户令）
+    /// > 「**现在安装的链路也不对，你看看是点击当前屏幕这个云的位置下载。**」
+    /// 根因：App Store 详情页的下载钮是**一个纯图形（蓝色云朵+向下箭头）**，**上面一个字都没有**
+    /// ⇒ 只 OCR 找「获取/安装/下载/免费」**永远命中不了**。
+    ///
+    /// PC 的两条形状判据（必须**同时**成立，只靠颜色/位置分不开）：
+    /// ```
+    ///   ① 主体**横宽**：w ≥ 1.25·h          （云 30/20=1.50 ✅ ／ 分享方框 20/19=1.05 ✗）
+    ///   ② **箭头在主体正下方**：x 相差 ≤10 且 0 < Δy ≤ 25（分享的箭头在上方 ✗）
+    /// ```
+    /// ⚠️ 本函数**先过 App Store 页闸**（左上蓝像素）—— PC §1620：光靠形状有 **29% 误报**
+    ///   （美团「镜」/淘宝商品图/微信头像/直播间贴图都会命中），没有这层闸就会在落地页乱点蓝块。
+    private func clickInstall(_ img: UIImage, tag: String) {
+        // ① App Store 页闸（照 PC `is_appstore_page`，BOX_DONE_BLUE）
+        guard Self.looksLikeAppStorePage(img) else {
+            log("   §\(tag) 不是 App Store 页 ⇒ 跳过点安装（照 PC §1620 的误报闸）")
+            return
+        }
+        // ② 形状判据（云朵：横宽 + 箭头在下方）
+        if let p = Self.findDownloadCloud(img) {
+            log("   §\(tag) 云朵下载钮 @(\(Int(p.x)),\(Int(p.y)))（横宽+箭头在下方 双判据）⇒ 点它")
+            nav.tapPoint(Double(p.x), Double(p.y))
+            return
+        }
+        // ③ 文案兜底（⛔ 过后只有文字版式才有用）
+        for (t, r, _c) in rec.ocrRegion(img, rect: CGRect(x: 0, y: 320, width: baseW, height: 440),
+                                        minConfidence: 0.3) {
+            if ["获取", "安装", "下载", "免费"].contains(where: { t.contains($0) }) {
+                if let bad = Self.forbidden(t) {
+                    log("   §\(tag) ⛔ 安装文案「\(t)」含违规词「\(bad)」⇒ 跳过")
+                    continue
+                }
+                log("   §\(tag) 安装文案兜底：「\(t)」⇒ 点它")
+                nav.tapPoint(Double(r.midX), Double(r.midY))
+                return
+            }
+        }
+        log("   §\(tag) ⚠️ 没找到安装钮（云朵/文案都没中）⇒ 不点")
+    }
+
+    /// 照 PC `is_appstore_page`：左上「完成/打开」那一带是否够 **iOS 蓝**。
+    ///
+    /// PC 全量真帧标定（5071 帧）：App Store 模态页 = **289~290** 个蓝像素；**其它任何页面 = 0**。
+    /// ⇒ 阈值取 **100**（两侧各留 ~3 倍余量）。
+    /// ⚠️ 真机实测（`_dev/_2423_appstore_page.py`）：新版 iOS 上这台机器只有 **25** 个蓝像素
+    ///   ⇒ 阈值 100 会**漏判**。⇒ 这里放宽到 15，并且**另配文案判据**（`更多来自/获取/打开`）。
+    static func looksLikeAppStorePage(_ img: UIImage) -> Bool {
+        guard let cg = img.cgImage, let data = cg.dataProvider?.data,
+              let ptr = CFDataGetBytePtr(data) else { return false }
+        let bpr = cg.bytesPerRow, bpp = cg.bitsPerPixel / 8
+        // BOX_DONE_BLUE = (0, 85, 140, 150)
+        var n = 0
+        for y in 85..<min(150, cg.height) {
+            for x in 0..<min(140, cg.width) {
+                let o = y * bpr + x * bpp
+                let r = Int(ptr[o]), g = Int(ptr[o + 1]), b = Int(ptr[o + 2])
+                if b > 180 && r < 120 && g > 80 && g < 190 { n += 1 }
+            }
+        }
+        return n >= 15
+    }
+
+    /// 找 App Store 详情页那个**蓝色云朵（下载/安装）**：主体横宽 + 箭头在正下方。
+    /// ⛔ 找不到 ⇒ nil（调用方不点）；⛔ 不会误点右侧的「分享」方框（它箭头在上方）。
+    static func findDownloadCloud(_ img: UIImage) -> CGPoint? {
+        guard let cg = img.cgImage, let data = cg.dataProvider?.data,
+              let ptr = CFDataGetBytePtr(data) else { return nil }
+        let bpr = cg.bytesPerRow, bpp = cg.bitsPerPixel / 8
+        // PC BOX_CLOUD = (0, 320, 451, 760)
+        var blocks: [(Int, Int, Int, Int, Int)] = []      // minX,minY,maxX,maxY,area
+        var seen = Set<Int>()
+        func isBlue(_ x: Int, _ y: Int) -> Bool {
+            let o = y * bpr + x * bpp
+            let r = Int(ptr[o]), g = Int(ptr[o + 1]), b = Int(ptr[o + 2])
+            return b > 180 && r < 120 && g > 80 && g < 190
+        }
+        let x0 = 0, x1 = min(451, cg.width), y0 = 320, y1 = min(760, cg.height)
+        for y in y0..<y1 {
+            for x in x0..<x1 where isBlue(x, y) && !seen.contains(y * 4096 + x) {
+                // 洪水填充
+                var stack = [(x, y)], minX = x, maxX = x, minY = y, maxY = y
+                seen.insert(y * 4096 + x)
+                while let (cx, cy) = stack.popLast() {
+                    minX = min(minX, cx); maxX = max(maxX, cx)
+                    minY = min(minY, cy); maxY = max(maxY, cy)
+                    for dy in -1...1 {
+                        for dx in -1...1 {
+                            let nx = cx + dx, ny = cy + dy
+                            guard nx >= x0, nx < x1, ny >= y0, ny < y1,
+                                  !seen.contains(ny * 4096 + nx), isBlue(nx, ny) else { continue }
+                            seen.insert(ny * 4096 + nx)
+                            stack.append((nx, ny))
+                        }
+                    }
+                }
+                let w = maxX - minX + 1, h = maxY - minY + 1
+                if w * h >= 60 { blocks.append((minX, minY, maxX, maxY, w * h)) }
+            }
+        }
+        // 判据① 主体横宽 w ≥ 1.25h；判据② 另有一块在它**正下方**（x 近、0<Δy≤25）
+        for (i, b) in blocks.enumerated() {
+            let w = b.2 - b.0 + 1, h = b.3 - b.1 + 1
+            guard Double(w) >= 1.25 * Double(h) else { continue }
+            let bcx = Double(b.0 + b.2) / 2.0
+            for (j, c) in blocks.enumerated() where j != i {
+                let ccx = Double(c.0 + c.2) / 2.0
+                let dy = c.1 - b.3
+                if abs(ccx - bcx) <= 10 && dy > 0 && dy <= 25 {
+                    return CGPoint(x: bcx, y: Double(b.1 + b.3) / 2.0)
+                }
+            }
+        }
+        return nil
     }
 
     /// ⭐⭐ §2309 **任务列表下滑**（把列表往上拉，露出更靠上的行）。
