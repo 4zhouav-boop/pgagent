@@ -225,18 +225,74 @@ final class Navigator {
         //   · 然后在**错的页面**上翻 4 页找 ⇒ 必然走到
         //       「⛔ 翻页也没找到 ⇒ 不放枪（铁律②）」
         // ⇒ 修法不是"少等一会儿"，而是**照 PC 把 ⌘H 变成条件分支**。
+        // ⭐⭐⭐⭐⭐ §2344 **必须等一帧"真的变了"的帧**，⛔ 不能睡一觉就抓
+        //
+        // ## ⛔⛔ 真机铁证（v0.10.57 实测日志）
+        // ```
+        //   ① 回主屏（底部快速上滑 y=971 / 120ms）
+        //   ①b 上滑后**不像桌面** ⇒ 补一发 `H:HOME`      ← ⛔ 这里判错了
+        //   ② 在桌面上找「kslite」图标
+        //      ⚠️ 当页没找到 ⇒ 才开始翻页                  ← 被 ⌘H 推到别的页了
+        // ```
+        // 而同一时刻我离线实测（§2342，只发这一条上滑命令）：
+        // ```
+        //   [上滑前]       桌面=True OCR=32 快手=❌
+        //   [第 1 次上滑后] 桌面=True OCR=34 快手=['快手极速版','快手']   ✅ 一次就中
+        // ```
+        // ⇒ **上滑本身是对的**。错在我判"像不像桌面"用的那一帧是**上滑前的旧帧**
+        //   （帧由录屏扩展写文件 + 轮询读入，有延迟）⇒ 旧帧还是快手页面
+        //   ⇒ `looksLikeDesktop` 判 false ⇒ 误补 ⌘H ⇒ 推到副桌面 ⇒ 后面全废。
+        //
+        // ✅ 正解：上滑前**先存一帧参考**，上滑后**循环抓帧直到画面真的变了**
+        //    （用现成的 `screenChanged`，与 `FeatureEngine.grabFresh` 同一套判据），
+        //    拿到新帧再判桌面 / 再找图标。
+        //    ⚠️ §2284 的老坑：**桌面静止**，"等两帧不同"在**已经到桌面后**会等到超时 ——
+        //       所以这里**只等一次、只在上滑之后用**，且超时就退回当前帧继续走（⛔ 不死等）。
+        let refBefore = frame()
         log("   ① 回主屏（底部快速上滑 y=971 / 120ms，照 PC `go_home`）")
         hid([BLEController.swipe(x1: 225, y1: 971, x2: 225, y2: 300,
                                  speed: .fast, baseW: baseW, baseH: baseH, yFix: yFix)])
         Thread.sleep(forTimeInterval: 1.4)                     // PC `wait(1.4)`
-        var deskImg = frame()                                  // ⭐ 上滑后**先拿新帧**
+        // ⚠️ `switchToApp` 是 **static**，⛔ 不能调实例方法 `screenChanged`
+        //    ⇒ 这里自带一个 24×24 灰度指纹（与 `thumb` 同一套思路，但静态自包含）
+        func digest(_ img: UIImage) -> [UInt8]? {
+            guard let cg = img.cgImage else { return nil }
+            let W = 24, H = 24
+            var buf = [UInt8](repeating: 0, count: W * H)
+            guard let ctx = CGContext(data: &buf, width: W, height: H,
+                                      bitsPerComponent: 8, bytesPerRow: W,
+                                      space: CGColorSpaceCreateDeviceGray(),
+                                      bitmapInfo: CGImageAlphaInfo.none.rawValue)
+            else { return nil }
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: W, height: H))
+            return buf
+        }
+        func differs(_ a: UIImage?, _ b: UIImage?) -> Bool {
+            guard let x = a.flatMap(digest), let y = b.flatMap(digest),
+                  x.count == y.count else { return true }
+            var d = 0
+            for i in 0..<x.count where abs(Int(x[i]) - Int(y[i])) > 18 { d += 1 }
+            return Double(d) / Double(x.count) > 0.02
+        }
+        /// ⭐ 抓一帧"与参考帧不同"的新帧（超时则返回当前帧，⛔ 不死等）
+        func waitNewFrame(since ref: UIImage?, maxSec: Double = 4.0) -> UIImage? {
+            let t0 = Date()
+            Thread.sleep(forTimeInterval: 0.6)                 // 先给扩展落盘的时间
+            while Date().timeIntervalSince(t0) < maxSec {
+                if let p = frame(), differs(ref, p) { return p }
+                Thread.sleep(forTimeInterval: 0.35)
+            }
+            return frame()
+        }
+        var deskImg = waitNewFrame(since: refBefore)
         if let im = deskImg, looksLikeDesktop(im, rec: rec, baseW: baseW, baseH: baseH) {
             log("   ★回主屏：**底部快速上滑**生效（已落到桌面）⇒ 就在这一帧上找图标")
         } else {
-            log("   ①b 上滑后**不像桌面** ⇒ 补一发 `H:HOME`（⌘H 兜底，可能被 App 吃）")
+            // ⚠️ 只有**确认不是桌面**才补 ⌘H（照 PC `go_home` 的条件分支）
+            log("   ①b 上滑后**不像桌面**（且已等到新帧）⇒ 补一发 `H:HOME`（⌘H 兜底）")
             hid(["H:HOME\n"])
             Thread.sleep(forTimeInterval: 1.8)                 // PC `wait(1.8)`
-            deskImg = frame()
+            deskImg = waitNewFrame(since: deskImg)
         }
 
         // ⛔ §2284 **"等新帧"要按"时间"等，⛔ 不能按"画面变化"等**
