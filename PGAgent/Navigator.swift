@@ -189,9 +189,18 @@ final class Navigator {
     /// | **副桌面** | 底部快速上滑 ×2 | ✅ **回到主桌面**（快手图标出现） |
     /// | 主桌面 | 点图标 | ✅ **进入快手**（页型 = feed） |
     ///
-    /// ⇒ **结论：回主桌面不是"一条命令"，是「上滑到看见快手为止」。**
+    /// ⇒ **结论：回主桌面不是"一条命令"，是「上滑到看见快手为止」，而实测 2 条就到。**
     ///   PG 控制台里写的 `H:HOME`（⌘H）在**副桌面上完全无效** —— 这正是
     ///   「连快手都进不去」卡了两天的真正原因。
+    ///
+    /// ## ⚡ 命令预算（用户令：「**我都是最多 2 个命令回到主桌面**」）
+    /// ```
+    ///   本来就在主桌面（最常见） ： 0 上滑 + 1 OCR + 1 点         ← 最快
+    ///   停在副桌面（H:HOME 之后） ： 2 上滑 + 1 OCR + 1 点         ← 用户口径
+    ///   极端靠后                 ： 最多 +2 上滑（兜底）
+    /// ```
+    /// ⛔ **上滑之间不插 OCR** —— v0.10.59 写成"滑一次 OCR 一次"的循环，
+    ///    最坏 4 次全屏 OCR + 4×2.5s ⇒ 白耗 15~20 秒，用户当场指出「效率极度低下」。
     ///
     /// ## ⛔ 明确不做的事（都是错的，已删）
     /// · **左右翻页找图标** —— 用户令：「**我要的是直接用上滑进入主页面 而不是傻逼左右翻找**」
@@ -212,22 +221,61 @@ final class Navigator {
         let homeFling = BLEController.swipe(x1: 225, y1: 971, x2: 225, y2: 300,
                                             speed: .fast, baseW: baseW, baseH: baseH, yFix: yFix)
 
-        // ⭐ 上滑 ×N，直到在**当前帧**上看到目标图标（⛔ 不翻页）
-        for round in 1...4 {
-            if let img = frame(), let (pt, label) = findDesktopIcon(img, which: which, rec: rec,
-                                                                   baseW: baseW, baseH: baseH) {
-                log("   ✅ 第 \(round) 帧上命中「\(label)」⇒ 点 (\(Int(pt.x)),\(Int(pt.y)))")
-                hid(BLEController.moveAndClick(x: Double(pt.x), y: Double(pt.y),
-                                               baseW: baseW, baseH: baseH, yFix: yFix))
-                Thread.sleep(forTimeInterval: 6.0)      // 照 PC `wait(6.5)`
-                return true
+        /// 在**当前帧**上找图标；找到就点。返回是否已发出点击。
+        func findAndTap(_ tag: String) -> Bool {
+            guard let img = frame(),
+                  let (pt, label) = findDesktopIcon(img, which: which, rec: rec,
+                                                    baseW: baseW, baseH: baseH) else {
+                return false
             }
-            log("   上滑第 \(round) 次（还没看到「\(which)」图标）")
-            hid([homeFling])
-            // ⭐ 录屏 ~1fps ⇒ 等够时间让**新帧**落盘，⛔ 不是立刻抓（§2284 血案）
-            Thread.sleep(forTimeInterval: 2.5)
+            log("   ✅ \(tag)命中「\(label)」⇒ 点 (\(Int(pt.x)),\(Int(pt.y)))")
+            hid(BLEController.moveAndClick(x: Double(pt.x), y: Double(pt.y),
+                                           baseW: baseW, baseH: baseH, yFix: yFix))
+            Thread.sleep(forTimeInterval: 6.0)      // 照 PC `wait(6.5)`
+            return true
         }
-        log("   ⛔ 连上滑 4 次都没看到「\(which)」图标 ⇒ **不放枪**（铁律②）")
+
+        // ⭐⭐⭐⭐⭐ §2366 **回主桌面 = 2 条命令**（用户口径，⛔ 不再循环 OCR）
+        //
+        // ## 用户令（逐字）
+        // > 「**你为什么还是在用滑动命令 虽然实现了 但是效率极度低下**」
+        // > 「**我都是最多 2 个命令回到主桌面**」
+        //
+        // ## 这 2 条命令是什么（照我已实测出来的行为表）
+        // ```
+        //   ① H:HOME     —— 在 App 内有效（§2362 B 步实测：快手内 → 主桌面 ✅）
+        //                    真身是 ⌘H（固件 src/main.cpp:113）；副桌面上无效，
+        //                    但那不重要 —— 第 ② 条会把页补到第 1 页。
+        //   ② 底部快速上滑 —— 把"桌面第 N 页"推到第 1 页
+        //                    （§2363 帧证：副桌面 + 上滑 ×2 ⇒ 主桌面）
+        // ```
+        // ⇒ 一条"退出 App" + 一条"补页"，**2 条命令后必定在主桌面**。
+        //
+        // ## ⛔ 我上一版错在哪（v0.10.59，用户当场指出「效率极度低下」）
+        // ```
+        //   for round in 1...4 { 全屏 OCR → 上滑 → sleep 2.5s }
+        // ```
+        // 最坏 = 4 次全屏 OCR + 4 次上滑 + 10 秒空等 ⇒ 切个 App 白耗 15~20 秒。
+        // **上滑之间根本不需要 OCR** —— 因为 2 条命令后位置是确定的（主桌面）。
+        log("   ① H:HOME 退出当前 App")
+        hid(["H:HOME\n"])
+        Thread.sleep(forTimeInterval: 1.5)
+        log("   ② 底部快速上滑，把桌面补到第 1 页")
+        hid([homeFling])
+        // ⭐ 录屏 ~1fps ⇒ 睡够让**新帧**落盘，⛔ 不是立刻抓（§2284 血案）
+        Thread.sleep(forTimeInterval: 2.0)
+
+        // 现在必定在主桌面 ⇒ **一次 OCR + 一次点击**，完了。
+        if findAndTap("2 条命令后") { return true }
+
+        // ⭐ 兜底：只在"2 条命令后仍没看到图标"时才补 1 条上滑 + 1 次 OCR（最多 2 轮）
+        for extra in 1...2 {
+            log("   ⚠️ 第 ② 条后没看到图标 ⇒ 补 1 条上滑（兜底 \(extra)/2）")
+            hid([homeFling])
+            Thread.sleep(forTimeInterval: 2.0)
+            if findAndTap("兜底 \(extra)") { return true }
+        }
+        log("   ⛔ 仍没看到「\(which)」图标 ⇒ **不放枪**（铁律②）")
         return false
     }
 
