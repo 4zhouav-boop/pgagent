@@ -294,8 +294,26 @@ final class Navigator {
         Thread.sleep(forTimeInterval: 1.5)
         log("   ② 底部快速上滑，把桌面补到第 1 页")
         hid([homeFling])
-        // ⭐ 录屏 ~1fps ⇒ 睡够让**新帧**落盘，⛔ 不是立刻抓（§2284 血案）
-        Thread.sleep(forTimeInterval: 2.0)
+        // ⭐⭐⭐⭐⭐ §2631 **等"新帧"必须 ≥ 录屏节拍**（用户令：「你要做好全局适配啊」）
+        //
+        // ## ⛔⛔ 血案（真机 trace，本轮）
+        // ```
+        // [9s] ② 底部快速上滑
+        // [9s] ⚠️ 第 ② 条后没看到图标 ⇒ 补 1 条上滑（兜底 1/2）
+        // [9s] ⚠️ 第 ② 条后没看到图标 ⇒ 补 1 条上滑（兜底 2/2）
+        // [9s] ⛔ 仍没看到「kslite」图标 ⇒ **不放枪**（铁律②）
+        // ```
+        // **三次全在同一秒** —— 因为原来只 `sleep 2.0`，而扩展现在是 **10 秒一帧**
+        // ⇒ 每次 OCR 拿到的都是**上滑之前那张旧帧** ⇒ 三次看的是**同一张图**
+        // ⇒ 必然"没看到图标" ⇒ **切 App 直接失败**（后面全废）。
+        //
+        // 📏 这就是 §2265 那条铁律的又一次翻版（config `_loop_doc` 逐字）：
+        // > **节拍与判据必须成对调** —— 只改一边就会自己把自己判死。
+        //
+        // ✅ 修法：**等一帧新的**（`outFpsInterval` = 10s + 2s 余量），⛔ 不是固定 2 秒。
+        //    ⚠️ 与 `Runner.outFpsInterval` **同一个数**（那里有开机自检兜着）。
+        log("   ⏳ 等录屏新帧（\(Int(Self.frameWaitS))s，节拍 \(Int(Self.outFpsInterval))s + 余量）")
+        Thread.sleep(forTimeInterval: Self.frameWaitS)
 
         // 现在必定在主桌面 ⇒ **一次 OCR + 一次点击**，完了。
         if findAndTap("2 条命令后") { return true }
@@ -304,12 +322,23 @@ final class Navigator {
         for extra in 1...2 {
             log("   ⚠️ 第 ② 条后没看到图标 ⇒ 补 1 条上滑（兜底 \(extra)/2）")
             hid([homeFling])
-            Thread.sleep(forTimeInterval: 2.0)
+            log("   ⏳ 再等录屏新帧（\(Int(Self.frameWaitS))s）")
+            Thread.sleep(forTimeInterval: Self.frameWaitS)
             if findAndTap("兜底 \(extra)") { return true }
         }
         log("   ⛔ 仍没看到「\(which)」图标 ⇒ **不放枪**（铁律②）")
         return false
     }
+
+    /// ⭐⭐⭐⭐⭐ §2631 **录屏节拍 + 等新帧的时长**（⛔ 必须成对，见 `switchToApp` 的血案）
+    ///
+    /// ⚠️ `outFpsInterval` **必须与 `Runner.outFpsInterval` 和
+    ///    `PGShot/SampleHandler.fps` 的倒数一致**（2s/帧）——
+    ///    Swift 跨 target 没法共享常量，所以这里再声明一次，
+    ///    而 `Runner` 的**开机自检**会把不一致当场报出来。
+    static let outFpsInterval: Double = 2.0
+    /// 等一帧新图要多久 = 节拍 + 2s 余量（⛔ 不是固定 2 秒 —— 那是旧节拍的写法）
+    static var frameWaitS: Double { outFpsInterval + 2.0 }
 
     /// ⭐ OCR 找「快手 / 快手极速版」图标标签，返回**图标落点**（标签上方 0.055 屏高）。
     ///
