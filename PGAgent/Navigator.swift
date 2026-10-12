@@ -507,6 +507,33 @@ final class Navigator {
                 }
                 continue
             }
+            // ⭐⭐⭐⭐⭐ §2442 **App Store 安装页左上的 ✕**（移植 PC `find_appstore_x`）
+            //
+            // ## ⛔ 手机端原来**没有这条腿**（`_dev/_2440_port_diff.py` 对照出来的差集）
+            // 点广告 CTA「立即下载」后 iOS 会弹 **App Store 商品 sheet**
+            // （真机 `_var/_stuck2.png`：上面有「打开 / 获取 / 更多来自…的 App」）。
+            // ⛔ 那不是快手的页面 ⇒ `pageHere` 判 unknown ⇒ 旧行为反复点 `〈`(26,61)
+            //   **点不中**（那页的 ✕ 在 (43,110)）⇒ 空转十几步（我实测过）。
+            //
+            // ## PC 的两条判据（`_1377_ad_loop.py:1507 find_appstore_x`）
+            // ```
+            //   ① 页型闸 `is_appstore_page`：左上「完成/打开」那一带够不够 iOS 蓝
+            //      全量真帧标定：App Store 页 289~290 个蓝像素；其它页 = 0（阈值 100）
+            //      ⚠️ 真机实测（本机新版 iOS）只有 **25** 个 ⇒ 阈值放宽到 15，并配文案判据
+            //   ② 关闭入口：左上那个**黑色笔画 + 白底**的 ✕
+            //      ⛔ 与广告胶囊「白 ✕ + 暗底」**极性完全相反** ⇒ 必须按"暗色"找
+            //      真机实测命中 (43,110)，点它**一击退出**（蓝像素 25 → 0）
+            // ```
+            if it.element == "appstore_x" {
+                if Self.looksLikeAppStorePage(img),
+                   let p = Self.findDarkCross(img) {
+                    funnelLast[it.element] = now
+                    log("   §funnel appstore_x（App Store 页左上暗色 ✕）@(\(Int(p.x)),\(Int(p.y)))")
+                    tapPoint(Double(p.x), Double(p.y))
+                    return true
+                }
+                continue
+            }
             // ⭐ 券弹窗 ✕（PC `find_coupon_x`，ROI 在屏幕中下）—— 同一个判据换 ROI
             if it.element == "coupon_x" {
                 if let c = ModalX.findCoupon(img) {
@@ -808,5 +835,129 @@ final class Navigator {
             return false
         }
         return false
+    }
+
+    // MARK: - ⭐⭐⭐ §2442 App Store 安装页的 ✕（移植 PC `find_appstore_x`）
+
+    /// 照 PC `is_appstore_page`：左上「完成/打开」那一带是否够 **iOS 蓝**。
+    ///
+    /// PC 全量真帧标定（5071 帧）：App Store 模态页 = **289~290** 个蓝像素；**其它任何页面 = 0**。
+    /// ⇒ 阈值取 **100**（两侧各留 ~3 倍余量）。
+    /// ⚠️ 真机实测（`_dev/_2423_appstore_page.py`）：本机新版 iOS 只有 **25** 个蓝像素
+    ///   ⇒ 100 会**漏判** ⇒ 这里放宽到 **15**。
+    static func looksLikeAppStorePage(_ img: UIImage) -> Bool {
+        guard let cg = img.cgImage, let data = cg.dataProvider?.data,
+              let ptr = CFDataGetBytePtr(data) else { return false }
+        let bpr = cg.bytesPerRow, bpp = cg.bitsPerPixel / 8
+        // PC `BOX_DONE_BLUE = (0, 85, 140, 150)`
+        let sx = Double(cg.width) / 451.0, sy = Double(cg.height) / 977.0
+        let x1 = min(cg.width, Int(140 * sx)), y1 = min(cg.height, Int(150 * sy))
+        let y0 = max(0, Int(85 * sy))
+        var n = 0
+        for y in y0..<y1 {
+            for x in 0..<x1 {
+                let o = y * bpr + x * bpp
+                let r = Int(ptr[o]), g = Int(ptr[o + 1]), b = Int(ptr[o + 2])
+                if b > 180 && r < 120 && g > 80 && g < 190 { n += 1 }
+            }
+        }
+        return n >= 15
+    }
+
+    /// ⭐⭐⭐ 在左上一带找 App Store 页的**暗色交叉字形 ✕**。
+    ///
+    /// ## 逐条移植 PC `_find_cross_x(img, roi, thr=100, dark=True)`（`_1377_ad_loop.py:3825`）
+    /// PC 的极性说明（必须照抄，⛔ 不能想当然）：
+    /// > App Store 页左上的关闭 ✕ 是**黑色笔画 + 白色底**，与广告胶囊的**白色 ✕ + 暗底**
+    /// > **极性完全相反** ⇒ 默认 `thr=225`（取亮像素）在这页上**一个亮像素都取不到** ⇒ 恒 None。
+    /// > ✅ `dark=True` ⇒ 取**暗**像素，其余几何判据**一条不动**。
+    ///
+    /// ## 几何判据（PC §1689 逐像素量出的真值，⛔ 不是"觉得差不多"）
+    /// ```
+    ///   · 近正方：宽高比 0.6 ~ 1.7
+    ///   · 尺寸 8~30 px
+    ///   · 孤立：左右各空 ≥5 px
+    ///   · 每行暗像素段数 ≤2（汉字有长横 ⇒ 被挡）
+    ///   · 填充率 0.15 ~ 0.75
+    /// ```
+    /// ## 真机实测（`_dev/_2423_appstore_page.py`）
+    /// 4 个锚点里 3 个命中同一位置 **(43,110)**，点它一击退出。
+    static func findDarkCross(_ img: UIImage, thr: Int = 100) -> CGPoint? {
+        // 照 PC `X_REFS` 的锚点（归一化），⛔ 不写死一个绝对坐标
+        let anchors: [(Double, Double)] = [(0.093, 0.11), (0.093, 0.14),
+                                           (0.093, 0.085), (0.10, 0.16)]
+        for (fx, fy) in anchors {
+            let cx0 = Int(fx * 451), cy0 = Int(fy * 977)
+            let r = 30
+            let roi = CGRect(x: max(0, cx0 - r), y: max(0, cy0 - r),
+                             width: 2 * r, height: 2 * r)
+            if let p = _findCrossIn(img, roi: roi, thr: thr) { return p }
+        }
+        return nil
+    }
+
+    private static func _findCrossIn(_ img: UIImage, roi: CGRect, thr: Int) -> CGPoint? {
+        guard let cg = img.cgImage, let data = cg.dataProvider?.data,
+              let ptr = CFDataGetBytePtr(data) else { return nil }
+        let bpr = cg.bytesPerRow, bpp = cg.bitsPerPixel / 8
+        let sx = Double(cg.width) / 451.0, sy = Double(cg.height) / 977.0
+        let x0 = max(0, Int(roi.minX * sx)), y0 = max(0, Int(roi.minY * sy))
+        let x1 = min(cg.width, Int(roi.maxX * sx)), y1 = min(cg.height, Int(roi.maxY * sy))
+        let W = x1 - x0, H = y1 - y0
+        guard W > 10, H > 10 else { return nil }
+        var seen = [Bool](repeating: false, count: W * H)
+        func dark(_ x: Int, _ y: Int) -> Bool {
+            let o = y * bpr + x * bpp
+            let r = Int(ptr[o]), g = Int(ptr[o + 1]), b = Int(ptr[o + 2])
+            return (299 * r + 587 * g + 114 * b) / 1000 <= thr
+        }
+        var best: (Int, Double, Double)?
+        for yy in 0..<H {
+            for xx in 0..<W where dark(x0 + xx, y0 + yy) && !seen[yy * W + xx] {
+                var stack = [(xx, yy)]
+                seen[yy * W + xx] = true
+                var pix: [(Int, Int)] = []
+                var minX = xx, maxX = xx, minY = yy, maxY = yy
+                while let (cx, cy) = stack.popLast() {
+                    pix.append((cx, cy))
+                    minX = min(minX, cx); maxX = max(maxX, cx)
+                    minY = min(minY, cy); maxY = max(maxY, cy)
+                    for dy in -1...1 {
+                        for dx in -1...1 {
+                            let nx = cx + dx, ny = cy + dy
+                            guard nx >= 0, nx < W, ny >= 0, ny < H,
+                                  !seen[ny * W + nx], dark(x0 + nx, y0 + ny) else { continue }
+                            seen[ny * W + nx] = true
+                            stack.append((nx, ny))
+                        }
+                    }
+                }
+                guard pix.count >= 20 else { continue }
+                let bw = maxX - minX + 1, bh = maxY - minY + 1
+                guard bw >= 8, bw <= 30, bh >= 8, bh <= 30 else { continue }
+                let ar = Double(bw) / Double(bh)
+                guard ar >= 0.6, ar <= 1.7 else { continue }
+                var ok = true
+                for row in minY...maxY {
+                    let xs = pix.filter { $0.1 == row }.map { $0.0 }.sorted()
+                    if xs.isEmpty { continue }
+                    var runs = 1
+                    for i in 1..<xs.count where xs[i] != xs[i - 1] + 1 { runs += 1 }
+                    if runs > 2 { ok = false; break }
+                }
+                guard ok else { continue }
+                guard minX >= 5, (W - maxX) >= 5 else { continue }
+                let fill = Double(pix.count) / Double(bw * bh)
+                guard fill >= 0.15, fill <= 0.75 else { continue }
+                let score = bw * bh
+                if best == nil || score > best!.0 {
+                    let bx = (Double(x0) + Double(minX + maxX) / 2.0) / sx
+                    let by = (Double(y0) + Double(minY + maxY) / 2.0) / sy
+                    best = (score, bx, by)
+                }
+            }
+        }
+        guard let b = best else { return nil }
+        return CGPoint(x: b.1, y: b.2)
     }
 }
