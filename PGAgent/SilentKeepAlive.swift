@@ -44,7 +44,7 @@ public final class SilentKeepAlive {
     /// 装完 v0.10.43 后真机实测：
     /// ```
     ///   keepalive: started=True  playing=False     ← ⛔ 声音已经不在播了，可 started 还是 True
-    ///   → App 在后台被系统挂起 ⇒ HTTP 8899 断 ⇒ switchToApp 后的 grab() 拿不到帧
+    ///   → App 在后台被系统挂起 ⇒ HTTP 8899 断 ⇒ 后续 grab() 拿不到帧
     ///   → 表现：「回了桌面并且点开了快手，但后面一步都走不动」
     /// ```
     /// 根因：`AVAudioPlayer` 会被 **中断**（interruption）而暂停，而社区版

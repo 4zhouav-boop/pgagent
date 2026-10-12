@@ -186,42 +186,36 @@ final class Runner: ObservableObject {
         writeTraceLine("=== 开始 目标=\(target) 最大步数=\(maxSteps) ===")
         writeHeartbeat(["phase": "start", "target": target, "maxSteps": maxSteps])
 
-        // ⭐⭐⭐⭐⭐ §2282 **第一步：自动切到目标 App**（用户令 —— 这是脚本**必须自己**做的）
+        // ⭐⭐⭐⭐⭐ §2364 **第一步：切到目标 App** —— 用**真机验过的序列**（§2360~§2363）
         //
-        // ## 用户原话（逐字，这条就是本段的规格）
-        // > 「**我手动启动会打开录屏，然后点击启动后 他需要自动回桌面，然后自己进快手。**」
-        // > 「**老子原来都跑通了的。**」
-        // > 「**脚本启动都不会自动回桌面 自动进快手。**」
-        //
-        // ## ⛔ 为什么原来跑不通（我漏了这一步）
-        // 手机端的录屏**录的是"当前前台"**（不像 PC 抓投屏窗口恒等于手机屏）⇒
-        // 点「开始跑」时**前台是 PGAgent 自己** ⇒ 录到的是控制台界面 ⇒ 全部 `unknown`。
-        // 真机并排对照铁证（`_var/_d1_side.png`）：左=真屏、右=App 帧，**两边都是控制台**。
-        // ⇒ **必须先回桌面、再点快手图标**，否则一轮都跑不了。
-        //
-        // ## ✅ 做法：全程 ESP32（⛔ 不碰 `UIApplication.open`、⛔ 不碰开发者功能）
-        // 照 PC `ensure_app`（`_1377_ad_loop.py:8508`）的两步：
+        // 用户令（逐字）：「**怎么实现的你就自己操作ESP32用蓝牙命令跑通再写入软件。**」
+        // ⇒ 下面这段不是我设计的，是**在 ESP32 上一条一条试出来**的结果：
         // ```
-        // ① 回主屏  = **底部快速上滑**（起点 y=971 贴进 Home Indicator；120ms 才有效）
-        //             ⛔ `H:HOME`（⌘H）会被前台 App 吃掉 ⇒ 只当兜底
-        // ② 点图标  = OCR 找「快手/快手极速版」标签 ⇒ 点**标签上方 0.055 屏高**
-        //             （PC `find_desktop_icon` 的落点算法）
+        //   | 起点        | 命令              | 实测结果                        |
+        //   | 快手 App 内 | H:HOME            | ✅ 回主桌面                     |
+        //   | 副桌面      | H:HOME            | ❌ 什么都不做（帧文字一模一样）  |
+        //   | 副桌面      | 底部快速上滑 ×1   | ⚠️ 只挪一格，没回主桌面          |
+        //   | 副桌面      | 底部快速上滑 ×2   | ✅ 回到主桌面（快手图标出现）    |
+        //   | 主桌面      | 点图标            | ✅ 进入快手（页型 = feed）       |
         // ```
-        // ⇒ 本函数自包含：**发现不在目标 App 就自己切过去**，⛔ 不依赖 PC 脚本。
+        // ⇒ **回主桌面 = "上滑到看见快手为止"**，⛔ 不是某一条命令。
+        //   ⛔ 已删除的两条错腿：左右翻页（用户明令）、把 `H:HOME` 当主腿（副桌面无效）。
+        //
+        // ## 为什么必须先切
+        // 手机端录屏录的是**当前前台** ⇒ 点「开始跑」时前台是 PGAgent
+        // ⇒ 录到的就是控制台 ⇒ 识别必然全部 `unknown`。
         let apps = cfg.settings?.apps ?? []
         let which = apps.first ?? "kslite"
-        let wantSwitch = (cfg.settings?.auto_goto_app ?? true)
-        if wantSwitch {
-            log("§run ⭐ 自动切 App（照 PC `ensure_app`；全程 ESP32）：\(which)")
+        if cfg.settings?.auto_goto_app ?? true {
+            log("§run ⭐ 切 App（上滑→认图标→点，全程 ESP32）：\(which)")
             let ok = Navigator.switchToApp(named: which, rec: rec, ble: ble,
                                            frame: { [weak self] in self?.grabSync() },
                                            baseW: cfg.settings?.base_w ?? 451,
                                            baseH: cfg.settings?.base_h ?? 977,
                                            yFix: cfg.settings?.y_fix ?? 4,
                                            log: { [weak self] s in self?.append(s) })
-            log("§run 切 App \(ok ? "✅ 已完成" : "⛔ 未确认（继续跑，可能仍在非目标 App）")")
-            // ⭐ 切完**等界面稳定**再抓帧（照 PC `wait(6.5)`）
-            Thread.sleep(forTimeInterval: 2.5)
+            log("§run 切 App \(ok ? "✅ 已发出点图标" : "⛔ 没找到图标")")
+            Thread.sleep(forTimeInterval: 2.5)      // 等界面稳定再抓帧（照 PC wait(6.5)）
         }
 
         // ⭐⭐⭐ §2255 **有勾选功能 ⇒ 走 FeatureEngine 的一轮闭环**
