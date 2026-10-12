@@ -92,6 +92,38 @@ final class Navigator {
                                       evidence: used)
             }
             return nil
+        // ⭐⭐⭐⭐⭐ §2621 **色彩判据元素**（`match: "color"`）——
+        //    目前只有一种：`coin_ball`（红包/金币悬浮球）。
+        //
+        // ## ⛔ 为什么必须补这一种（用户令逐字）
+        // > 「**你移植一个一个移植吧。怎么总是卡死要自己制造方案。
+        // >   就调用PG控制器的方案就行了啊。**」
+        //
+        // 我原来把 `coin_ball` **只写在漏斗里**（当"恢复腿"），
+        // 而**页型判据里用不了它** ⇒ 于是 `feed.check` 只能拿**底栏「首页」**凑合
+        // ⇒ **消息页底栏也有「首页」** ⇒ 页型误判成 feed ⇒ 死循环（见 §2621 血案）。
+        //
+        // ✅ PC 的做法（`_1377_ad_loop.py:5655 ks_is_feed_home`）**逐字**：
+        // ```python
+        // if feed_judge(img):                       # ⭐ 红包球（零 OCR）**优先**
+        //     return True
+        // return all(k in txt(img, KS_BAND_TOP) for k in KS_TOP_HOME)   # 或 顶栏 同城+商城
+        // ```
+        //   而 `feed_judge` = `find_coin_entry(img) is not None`（L4622）
+        //   ⇒ **PC 判 feed 靠"红包球"或"顶栏同城+商城"，⛔ 从来不用底栏「首页」**。
+        // ⇒ 所以本 `color` 类型就是那条 `feed_judge` 的落地。
+        //
+        // ⚠️ 判据全部内联在 `ColorBlob`（PC `find_coin_entry` 的逐行移植，含
+        //    尺寸闸 `[20,55]` 与 fill 闸 `[0.68,0.88]`）——
+        //    真机离线复算：真 feed ✅ `(52.1,156.6) fill=0.742`；
+        //    **消息页 ❌ None**；任务中心 ❌（大号金币数字 `w=80` 被尺寸闸挡）；搜索页 ❌。
+        case "color":
+            guard e.color == "coin_ball" else { return nil }
+            guard let c = ColorBlob.findCoinBall(img) else { return nil }
+            return Recognizer.Hit(name: name,
+                                  rect: CGRect(x: c.x - 15, y: c.y - 15,
+                                               width: 30, height: 30),
+                                  score: 1.0, evidence: "color/coin_ball")
         default:
             return nil
         }

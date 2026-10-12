@@ -212,6 +212,19 @@ struct PGConfig: Codable {
         /// ⇒ **必须由 App 自己**先回桌面、再点快手图标（全程 ESP32）。
         var auto_goto_app: Bool?
 
+        /// ⭐⭐⭐⭐⭐ §2621 **进 App 后等开屏广告走完的秒数**（默认 8.0，用户口径）
+        ///
+        /// ## 用户令（逐字）
+        /// > 「**的确前面进来有开屏广告 你设置一个等待8秒再执行找红包的逻辑。**」
+        ///
+        /// ## ⛔ 不等的后果（真机血案，本轮）
+        /// 冷启动快手极速版**先出开屏广告**，此时红包悬浮球**还没画出来**
+        /// ⇒ `find_coin_entry` 返回 None（trace：`§coin 没找到红包悬浮球`）
+        /// ⇒ `feed.go = coin_ball` 被记死 ⇒ 退到 `feed.alts` 点「消息」
+        /// ⇒ 开屏期间页面还在变 ⇒ 页型把消息页误判成 feed ⇒ **点消息死循环**。
+        /// ⇒ 原来只等 2.5s 是**太早**（开屏广告通常 3~5s）。
+        var splash_wait_s: Double?
+
         /// ⭐ 广告**条数**（PC 控制台「条数」）
         var ad_count: Int?
 
@@ -289,6 +302,26 @@ struct PGConfig: Codable {
         /// 快手 App 自己在状态栏画了个**水印**（OCR 读成 `快手极速版`），
         /// 它**几乎每一页都在** ⇒ 不加否定闸会在 80% 的页面上误击中（PC §1752 实测 16/20 帧）。
         var not_words: [String]?
+
+        /// ⭐⭐⭐⭐⭐ §2621 **色彩判据元素**（`match: "color"` 时用）——目前只有 `coin_ball`。
+        ///
+        /// ## 为什么必须补这一种（用户令逐字）
+        /// > 「**你移植一个一个移植吧。怎么总是卡死要自己制造方案。
+        /// >   就调用PG控制器的方案就行了啊。**」
+        ///
+        /// PC 判 **feed 首页**用的是 `ks_is_feed_home`（`_1377_ad_loop.py:5655`）：
+        /// ```python
+        /// if feed_judge(img):                       # ⭐ 红包球（零 OCR）**优先**
+        ///     return True
+        /// return all(k in txt(img, KS_BAND_TOP) for k in KS_TOP_HOME)   # 或 顶栏 同城+商城
+        /// ```
+        /// 而 `feed_judge` = `find_coin_entry(img) is not None`（L4622）
+        /// ⇒ **PC 判 feed ⛔ 从来不用底栏「首页」**。
+        ///
+        /// 我原来把 `coin_ball` 只写在**漏斗**里 ⇒ 页型判据里用不上它
+        /// ⇒ `feed.check` 只能拿底栏「首页」凑合 ⇒ **消息页底栏也有「首页」**
+        /// ⇒ 页型误判成 feed ⇒ 「点消息 → 还判 feed → 再点消息」死循环（§2621 血案）。
+        var color: String?
     }
 
     struct Page: Codable {

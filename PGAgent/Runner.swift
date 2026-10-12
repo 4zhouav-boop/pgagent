@@ -216,6 +216,36 @@ final class Runner: ObservableObject {
                                            log: { [weak self] s in self?.append(s) })
             log("§run 切 App \(ok ? "✅ 已发出点图标" : "⛔ 没找到图标")")
             Thread.sleep(forTimeInterval: 2.5)      // 等界面稳定再抓帧（照 PC wait(6.5)）
+
+            // ⭐⭐⭐⭐⭐ §2621 **开屏广告等待（8 秒）—— 用户令逐字**
+            //
+            // > 「**的确前面进来有开屏广告 你设置一个等待8秒再执行找红包的逻辑。**」
+            //
+            // ## ⛔ 为什么要等（真机血案，本轮）
+            // 冷启动快手极速版时**先出开屏广告**（全屏视频/大图 + 右上「跳过」）。
+            // 此时：
+            //   · 红包悬浮球**还没画出来** ⇒ `find_coin_entry` 返回 None
+            //     （真机 trace 逐字：`§coin 没找到红包悬浮球（⛔ 不盲点）`）
+            //   · 于是 `feed.go = coin_ball` 被**记死** ⇒ 退到 `feed.alts` 点「消息」
+            //     ⇒ 但开屏广告期间页面**还在变** ⇒ 页型判据把消息页当 feed
+            //     ⇒ 「点消息 → 还判 feed → 再点消息」**死循环**（§2621 全套血案）。
+            // ⇒ 根因就是**进 App 后抓帧太早**（原来只等 2.5s，而开屏广告通常 3~5s）。
+            //
+            // ## ✅ 做法
+            // 切到 App 之后**先等 8 秒**（用户给的数），让开屏广告自己走完、
+            // 主页画出来之后，再进 adbox 去找红包球。
+            //   ⚠️ 仍用 `sleepWithCancel` 语义：随时可被「停」打断（⛔ 不是死睡）。
+            //   📏 8 秒是**用户口径**；`splash_wait_s` 可覆盖（⛔ 不硬编码两处）。
+            let splash = cfg.settings?.splash_wait_s ?? 8.0
+            if splash > 0 {
+                log("§run ⏳ 等开屏广告走完（\(String(format: "%.1f", splash))s，用户口径）⇒ 再找红包球")
+                var left = splash
+                while left > 0 && !cancelFlag {
+                    Thread.sleep(forTimeInterval: min(0.2, left))
+                    left -= 0.2
+                }
+                log("§run ✅ 开屏等待结束")
+            }
         }
 
         // ⭐⭐⭐ §2255 **有勾选功能 ⇒ 走 FeatureEngine 的一轮闭环**
