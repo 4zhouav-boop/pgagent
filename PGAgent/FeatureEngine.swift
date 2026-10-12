@@ -226,21 +226,33 @@ final class FeatureEngine {
                 for k in 0..<9 {
                     if isCancelled() { break }
                     guard let imr = grab() else { break }
-                    // ① 落回金币中心 ⇒ 本条已完成（PC `on_center` 短路）
-                    if ensureInCenter(tag: "adbox_ret\(n + 1)_\(k)") {
-                        log("   §adbox ✅ 已落回金币中心（第 \(k + 1) 次检查）⇒ 本条算完成")
-                        backHome = true
-                        break
-                    }
-                    // ② 已回广告页 ⇒ 继续走 G3/G4
+                    // ① ⭐⭐⭐⭐⭐ **已回广告页** ⇒ 继续走 G3/G4
+                    //    ⛔⛔ **必须在"中心判据"之前**（§2644 真机血案，子智能体核对逮到）
                     if Self.looksLikeAdPage(imr, rec: rec, nav: nav, bw: baseW, bh: baseH) {
                         log("   §adbox ✅ 已回广告页（第 \(k + 1) 次检查）⇒ 继续等倒计时")
                         cur = imr
                         break
                     }
+                    // ② 落回金币中心 ⇒ 本条已完成（照 PC `on_center`）
+                    //
+                    // ⛔⛔⛔ §2644 **绝不能在这里用 `ensureInCenter`**（血案）
+                    // `ensureInCenter` 第 1328 行有一条**广告页放行短路**：
+                    // ```swift
+                    // if Self.looksLikeAdPage(img, ...) { return true }   // ← 广告页也返回 true
+                    // ```
+                    // ⇒ 若拿它当"到中心了吗"的判据：**人还在广告页**时它会返回 true
+                    //   ⇒ 打印"已落回金币中心 ⇒ 本条算完成" ⇒ `n += 1` 切下一条
+                    //   ⇒ **不进 G3/G4、不点 ✕、不收奖励** = 用户令「**这个未点X就切下一个了**」。
+                    // ✅ 改用**纯元素判据**（config 的 `center_marker`）—— 与 PC `on_center` 同语义：
+                    //    它只看"中心页的特征词在不在"，⛔ 不会因为"是广告页"就放行。
+                    if nav.detect("center_marker", img: imr) != nil {
+                        log("   §adbox ✅ 已落回金币中心（第 \(k + 1) 次检查）⇒ 本条算完成")
+                        backHome = true
+                        break
+                    }
                     // ③ 还在落地页 ⇒ **主动返回**（照 PC `return_to_ad`）
                     log("   §adbox ↩ 还在落地页（第 \(k + 1)/9 次）⇒ 执行返回")
-                    returnToAd(imr, tag: "adbox_ret\(n + 1)_\(k)")
+                    returnToAd(imr, tag: "adbox_ret\(n + 1)_\(k)", k: k)
                     sleep(3.2)
                 }
                 if backHome {
@@ -509,14 +521,17 @@ final class FeatureEngine {
                     for k in 0..<9 {
                         if isCancelled() { break }
                         guard let imr = grab() else { break }
-                        if ensureInCenter(tag: "adbox_ret\(n + 1)_\(k)") {
-                            log("   §adbox ✅ 已落回金币中心（第 \(k + 1) 次检查）⇒ 本条算完成")
-                            backHome = true
-                            break
-                        }
+                        // ⭐ §2644 **"已回广告页"必须排在"中心判据"之前**（血案见分支① 注释）
                         if Self.looksLikeAdPage(imr, rec: rec, nav: nav, bw: baseW, bh: baseH) {
                             log("   §adbox ✅ 已回广告页（第 \(k + 1) 次检查）⇒ 继续等倒计时")
                             cur = imr
+                            break
+                        }
+                        // ⛔ §2644 **不能用 `ensureInCenter`**（它对广告页 `return true` ⇒
+                        //   会误判"已回中心"⇒ 不点 ✕ 就切下一条）。改用纯元素判据 `center_marker`。
+                        if nav.detect("center_marker", img: imr) != nil {
+                            log("   §adbox ✅ 已落回金币中心（第 \(k + 1) 次检查）⇒ 本条算完成")
+                            backHome = true
                             break
                         }
                         log("   §adbox ↩ 还在落地页（第 \(k + 1)/9 次）⇒ 执行返回")
