@@ -172,29 +172,10 @@ final class FeatureEngine {
             // ```
             // ⛔⛔ §2632 **② 必须在 ③ 之前**（我上一版把转化排在 G3 之后 ⇒ CTA 已消失）。
             if Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH) {
-                // ── ① 先等 30~60s 随机（PC §1541）──────────────────────
-                // ⛔ 不许"进去就点 ✕"（PC 原话：「进去就点X 卡死 出去进来像傻逼一样，最后点X」）
+                // ⭐⭐⭐⭐⭐ §2641 **转化必须在最前**（照 PC `_1377_ad_loop.py:9560`）
+                // ⛔ 等 30~60s 再转化 = 本机广告只有约 25s ⇒ 等满时 **CTA 必然消失**
+                // 真机 trace：`[72s] 顶栏已成功领取` → `[90s] 没找到可点的 CTA`
                 var cur = img
-                let waitS = Double.random(in: 30...60)
-                log("§adbox ⛔ 广告页 ⇒ 先等 \(Int(waitS))s（30~60 随机，照 PC §1541）"
-                    + "；⛔ **等满再转化**（CTA 只有在广告还在时才在）")
-                var slept = 0.0
-                while slept < waitS, !isCancelled() {
-                    let d = min(2.0, waitS - slept)
-                    Thread.sleep(forTimeInterval: d)
-                    slept += d
-                    guard let im2 = grab() else { break }
-                    cur = im2
-                    // ⚠️ §2632 **只记录、不提前跳出**（照 PC `wait(_dwell)` 是**固定随机等**）。
-                    //    提前跳出（无论按"已成功领取"还是"倒计时走完"）都会
-                    //    **结构上错过 CTA 窗口** —— 那正是「转化整条丢失」的原因。
-                    //    倒计时/到账的判断交给下面的 G3/G4（它们各有一道到账闸）。
-                    if slept.truncatingRemainder(dividingBy: 10.0) < 2.0 {
-                        let t2 = Self.adTopText(cur, rec: rec, bw: baseW, bh: baseH)
-                        log("   §adbox ⏳ 广告页等待 \(Int(slept))/\(Int(waitS))s"
-                            + "（顶栏「\(t2.prefix(16))」）")
-                    }
-                }
 
                 // ── ② ⭐⭐⭐ 转化：点 CTA → 浏览落地页（**必须在 G3 之前**，§2632）──
                 if !isCancelled(), let cur4 = grab() {
@@ -470,34 +451,11 @@ final class FeatureEngine {
                     //   （上一轮"能点到 CTA"是**歪打正着**：当时判据读不到倒计时 ⇒ 2 秒就跳出
                     //     ⇒ 碰巧广告还在 ⇒ 点到 CTA）。
                     //
-                    // ## 现在的顺序（= PC，⛔ 不许再改）
-                    // ```
-                    //   ① dwell：睡满随机 30~60s（只被"停"打断，⛔ 不因倒计时/到账提前跳出）
-                    //   ② convert：点 CTA → 进落地页 → 浏览      ← 广告还在，CTA 在
-                    //   ③ G3：等倒计时结束（N+20s 余量）
-                    //   ④ G4：点 ✕ 收奖励（内有到账闸）
-                    // ```
+                    // ## ✅ §2641 **正确顺序 = ① 转化 → ② 回广告页 → ③ 等倒计时 → ④ 点 ✕**
+                    // ⛔ 我连错三次（等倒计时→转化 / 先等30~60s→转化 / 被 reset 冲掉两次），
+                    //   共同点都是**把转化放在了某个等待之后** ⇒ 而本机广告只有约 25s。
                     var cur = i2
-                    let waitS = Double.random(in: 30...60)
-                    log("§adbox ⛔ 已进广告页 ⇒ 先等 \(Int(waitS))s（30~60 随机，照 PC §1541）"
-                        + "；⛔ **等满再转化**（CTA 只有在广告还在时才在）")
-                    var slept = 0.0
-                    while slept < waitS, !isCancelled() {
-                        let d = min(2.0, waitS - slept)
-                        Thread.sleep(forTimeInterval: d)
-                        slept += d
-                        guard let im3 = grab() else { break }
-                        cur = im3
-                        // ⚠️ 这里**只记录、不提前跳出**（照 PC：`wait(_dwell)` 是固定随机等）。
-                        //    提前跳出 = 结构上错过 CTA 窗口（§2632 血案）。
-                        //    倒计时/到账的判断交给下面的 G3/G4。
-                        if slept.truncatingRemainder(dividingBy: 10.0) < 2.0 {
-                            let t3 = Self.adTopText(cur, rec: rec, bw: baseW, bh: baseH)
-                            log("   §adbox ⏳ 广告页等待 \(Int(slept))/\(Int(waitS))s"
-                                + "（顶栏「\(t3.prefix(16))」）")
-                        }
-                    }
-                    // ── ② ⭐⭐⭐ 转化：点 CTA → 浏览落地页（**必须在 G3 之前**，§2632）──
+                    // ── ① ⭐⭐⭐ 转化：**立刻**点 CTA → 进落地页 → 浏览（§2641）──
                     //
                     // ## ⛔ 手机端原来**完全没有这一步**（`_dev/_2440_port_diff.py` 对照出来的差集）
                     // 它从"倒计时结束"**直接跳到收奖励** ⇒ 就是用户骂的那句：
@@ -528,6 +486,49 @@ final class FeatureEngine {
                             log("§adbox ⚠️ 没找到可点的 CTA（过闸后）⇒ 本条不做转化，直接收奖励")
                         }
                     }
+                    // ── ①b ⭐⭐⭐⭐⭐ §2640 **回广告页**（PC L9769~L9801，⛔ 我原来整段漏了）──
+                    //
+                    // ## ⛔⛔ 用户令（逐字）
+                    // > 「**这个未点X就切下一个了**」
+                    //
+                    // ## 血案（用户截图 + trace）
+                    // 截图停在**天猫落地页**（「商品正在加速赶来中」）⇒ CTA **点成功了**，
+                    // 但代码**在落地页上直接跑 G3/G4 找广告胶囊 ✕** ⇒ 找不到
+                    // ⇒ `finishAdPanel` 返回 false ⇒ 本条"结束" ⇒ **去切下一个广告**。
+                    //
+                    // ## PC 的做法（`_1377_ad_loop.py:9769-9801`）
+                    // ```python
+                    // for k in range(9):                    # ⭐ 最多 9 轮
+                    //     if on_center(img_r): at_center=True; break   # 落回金币中心 ⇒ 也算完成
+                    //     if page_kind(img_r) in ("ad_video","ad_live"): break   # 已回广告页
+                    //     return_to_ad(img_r, k)            # ⛔ 否则**主动返回**
+                    //     wait(3.2)
+                    // ```
+                    log("§adbox ↩ 转化完 ⇒ **回广告页**（照 PC 9 轮返回腿）")
+                    var backHome = false
+                    for k in 0..<9 {
+                        if isCancelled() { break }
+                        guard let imr = grab() else { break }
+                        if ensureInCenter(tag: "adbox_ret\(n + 1)_\(k)") {
+                            log("   §adbox ✅ 已落回金币中心（第 \(k + 1) 次检查）⇒ 本条算完成")
+                            backHome = true
+                            break
+                        }
+                        if Self.looksLikeAdPage(imr, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+                            log("   §adbox ✅ 已回广告页（第 \(k + 1) 次检查）⇒ 继续等倒计时")
+                            cur = imr
+                            break
+                        }
+                        log("   §adbox ↩ 还在落地页（第 \(k + 1)/9 次）⇒ 执行返回")
+                        returnToAd(imr, tag: "adbox_ret\(n + 1)_\(k)", k: k)
+                        sleep(3.2)
+                    }
+                    if backHome {
+                        n += 1
+                        scrollTries = 0
+                        continue
+                    }
+
                     // ── ③ G3：**等倒计时结束**才许动手（PC L9814~L9858）────────
                     //    ⭐ 判据 = PC 的**两条**（见 `adCountdownRunning` 的 docstring）：
                     //      ① `\d+[sS秒]?后`（抗错字 —— `19后` 也算，真机 f031/f033 铁证）
