@@ -170,33 +170,31 @@ final class FeatureEngine {
             // ③ G3：**等倒计时结束**（轮数按胶囊里的 N 动态定：N+20s 余量）
             // ④ G4：倒计时结束后**才点 ✕**收奖励 ⇒ 处理弹出的面板
             // ```
-            // ⛔⛔ §2632 **② 必须在 ③ 之前**（我上一版把转化排在 G3 之后 ⇒ CTA 已消失）。
+            // ⛔⛔ §2636 **顺序必须是 ① 转化 → ② 等倒计时 → ③ 点 ✕**
+            //
+            // ## ⛔⛔⛔ §2638 **这一改动被"API 推送"回滚过一次，必须警惕**
+            // 真机 trace 铁证：`ff53c90`（v0.10.72）**有**这个改动（106 行），
+            // 而 `6fe9fa7`（v0.10.73）把它**原样回滚了**（53 增 / 53 删 ⇒ 正好是逆操作）。
+            // ⇒ 于是 v0.10.73 那一轮跑的是**旧顺序**（`等满再转化`），⛔ 白测 3 轮。
+            // 📏 教训：**推送后必须核对"远端文件内容"**，⛔ 不能只看"推送成功"。
+            //
+            // ## 为什么是"先转化"（真机 trace 的决定性数字）
+            // ```
+            //   [54s] 等待 10/45s（顶栏「15s后可领取219金币」）  ← 广告还在
+            //   [72s] 等待 30/45s（顶栏「已成功领取219金币」）    ← ⛔ 广告已结束（本条约 25s）
+            //   [90s] §adbox_cta2 ⛔ 没找到可点的 CTA            ← CTA 早没了
+            // ```
+            // ⇒ 本机广告**只有约 25 秒**，比"等 30~60s"短 ⇒ 等满时 CTA 必然消失。
+            // 📏 而**成功过**的那次（trace）：`13:34:51 CTA 已点 → 13:34:55 已进落地页`
+            //   —— 它是**进广告约 2 秒**就点 CTA ⇒ CTA 还在。
+            // ⇒ PC 的 `wait(_dwell)` 管的是"**别急着关**"（L9562），⛔ 不是"转化也要等"；
+            //   PC 那条广告长（60s+）所以等完 CTA 还在，**我们这台必须更早**。
+            //   唯一稳妥 = **进广告页立刻转化**（此时 CTA 一定在），再等倒计时收奖励。
             if Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH) {
-                // ── ① 先等 30~60s 随机（PC §1541）──────────────────────
-                // ⛔ 不许"进去就点 ✕"（PC 原话：「进去就点X 卡死 出去进来像傻逼一样，最后点X」）
                 var cur = img
-                let waitS = Double.random(in: 30...60)
-                log("§adbox ⛔ 广告页 ⇒ 先等 \(Int(waitS))s（30~60 随机，照 PC §1541）"
-                    + "；⛔ **等满再转化**（CTA 只有在广告还在时才在）")
-                var slept = 0.0
-                while slept < waitS, !isCancelled() {
-                    let d = min(2.0, waitS - slept)
-                    Thread.sleep(forTimeInterval: d)
-                    slept += d
-                    guard let im2 = grab() else { break }
-                    cur = im2
-                    // ⚠️ §2632 **只记录、不提前跳出**（照 PC `wait(_dwell)` 是**固定随机等**）。
-                    //    提前跳出（无论按"已成功领取"还是"倒计时走完"）都会
-                    //    **结构上错过 CTA 窗口** —— 那正是「转化整条丢失」的原因。
-                    //    倒计时/到账的判断交给下面的 G3/G4（它们各有一道到账闸）。
-                    if slept.truncatingRemainder(dividingBy: 10.0) < 2.0 {
-                        let t2 = Self.adTopText(cur, rec: rec, bw: baseW, bh: baseH)
-                        log("   §adbox ⏳ 广告页等待 \(Int(slept))/\(Int(waitS))s"
-                            + "（顶栏「\(t2.prefix(16))」）")
-                    }
-                }
 
-                // ── ② ⭐⭐⭐ 转化：点 CTA → 浏览落地页（**必须在 G3 之前**，§2632）──
+                // ── ① ⭐⭐⭐ 转化：**立刻**点 CTA → 进落地页 → 浏览（§2636）──
+                //    ⛔ 必须最先做：CTA 只在广告播放期间存在（本机广告约 25s）。
                 if !isCancelled(), let cur4 = grab() {
                     if let how = clickCTA(cur4, tag: "adbox_cta\(n + 1)") {
                         log("§adbox CTA 已点（\(how)）⇒ 等落地页")
@@ -206,6 +204,7 @@ final class FeatureEngine {
                             log("§adbox ✅ 已进落地页（顶栏「\(Self.adTopText(land, rec: rec, bw: baseW, bh: baseH).prefix(18))」）⇒ 浏览")
                             clickInstall(land, tag: "adbox_inst\(n + 1)")   // 先点安装（照 PC 顺序）
                             browseLanding(tag: "adbox_browse\(n + 1)")      // 再浏览
+                            if let back = grab() { cur = back }             // 浏览后回广告页
                         } else {
                             log("§adbox ⚠️ CTA 没点进落地页 ⇒ **不浏览**（照 PC：都没进去，滑什么）")
                         }
@@ -416,34 +415,23 @@ final class FeatureEngine {
                     //   （上一轮"能点到 CTA"是**歪打正着**：当时判据读不到倒计时 ⇒ 2 秒就跳出
                     //     ⇒ 碰巧广告还在 ⇒ 点到 CTA）。
                     //
-                    // ## 现在的顺序（= PC，⛔ 不许再改）
+                    // ## ✅ §2636/§2638 **正确顺序 = ① 转化 → ② 等倒计时 → ③ 点 ✕**
+                    // ⛔ 我连错两次（先"等倒计时→转化"，再"先等30~60s→转化"），都是**等过了头**。
+                    // 📏 且 §2638 证实这改动曾被"API 推送"**回滚**过一次（`ff53c90` 有、`6fe9fa7` 没了）
+                    //   ⇒ **推送后必须核对远端文件内容**，⛔ 不能只看"推送成功"。
+                    // 真机 trace 的决定性数字：
                     // ```
-                    //   ① dwell：睡满随机 30~60s（只被"停"打断，⛔ 不因倒计时/到账提前跳出）
-                    //   ② convert：点 CTA → 进落地页 → 浏览      ← 广告还在，CTA 在
-                    //   ③ G3：等倒计时结束（N+20s 余量）
-                    //   ④ G4：点 ✕ 收奖励（内有到账闸）
+                    //   [54s] 等待 10/45s（顶栏「15s后可领取219金币」）  ← 广告还在
+                    //   [72s] 等待 30/45s（顶栏「已成功领取219金币」）    ← ⛔ 广告已结束（本条约 25s）
+                    //   [90s] §adbox_cta2 ⛔ 没找到可点的 CTA            ← CTA 早没了
                     // ```
+                    // ⇒ 本机广告**只有约 25 秒**，比"等 30~60s"短 ⇒ 等满时 CTA 必然消失。
+                    // 📏 而**成功过**的那次（trace）：`13:34:51 CTA 已点 → 13:34:55 已进落地页`
+                    //   —— 它是**进广告约 2 秒**就点 CTA ⇒ CTA 还在。
+                    // ⇒ PC 的 `wait(_dwell)` 管的是"**别急着关**"（L9562），⛔ 不是"转化也要等"。
+                    //   唯一稳妥 = **进广告页立刻转化**（此时 CTA 一定在），再等倒计时收奖励。
                     var cur = i2
-                    let waitS = Double.random(in: 30...60)
-                    log("§adbox ⛔ 已进广告页 ⇒ 先等 \(Int(waitS))s（30~60 随机，照 PC §1541）"
-                        + "；⛔ **等满再转化**（CTA 只有在广告还在时才在）")
-                    var slept = 0.0
-                    while slept < waitS, !isCancelled() {
-                        let d = min(2.0, waitS - slept)
-                        Thread.sleep(forTimeInterval: d)
-                        slept += d
-                        guard let im3 = grab() else { break }
-                        cur = im3
-                        // ⚠️ 这里**只记录、不提前跳出**（照 PC：`wait(_dwell)` 是固定随机等）。
-                        //    提前跳出 = 结构上错过 CTA 窗口（§2632 血案）。
-                        //    倒计时/到账的判断交给下面的 G3/G4。
-                        if slept.truncatingRemainder(dividingBy: 10.0) < 2.0 {
-                            let t3 = Self.adTopText(cur, rec: rec, bw: baseW, bh: baseH)
-                            log("   §adbox ⏳ 广告页等待 \(Int(slept))/\(Int(waitS))s"
-                                + "（顶栏「\(t3.prefix(16))」）")
-                        }
-                    }
-                    // ── ② ⭐⭐⭐ 转化：点 CTA → 浏览落地页（**必须在 G3 之前**，§2632）──
+                    // ── ① ⭐⭐⭐ 转化：**立刻**点 CTA → 进落地页 → 浏览（§2636）──
                     //
                     // ## ⛔ 手机端原来**完全没有这一步**（`_dev/_2440_port_diff.py` 对照出来的差集）
                     // 它从"倒计时结束"**直接跳到收奖励** ⇒ 就是用户骂的那句：
