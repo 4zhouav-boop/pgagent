@@ -351,19 +351,39 @@ final class Navigator {
             log("   §click \(name) ATOMIC Q @(\(Int(c.x)),\(Int(c.y))) score=\(String(format: "%.3f", h.score)) ev=\(h.evidence)")
             return true
         }
-        // ⭐ 两步式（`P:` + `C:L`）—— 与电脑端 `click_at` 一致，**并按电脑端节奏等待**
+        // ⭐⭐⭐ §2600 **两步式**：`P:` + `D:`（原地长按 600ms）
+        //
+        // ## ⛔⛔ 原来是 `P:` + `C:L`，**点不动**（用户当场看到的现象）
+        // > 「看你哪个失败的点击命令 就是**圆点一直显示在那里**。这就是和别的点击命令最大的区别。」
+        // ⇒ 圆点不消失 = HID 的**抬起事件被 iOS 丢弃** = 手指还按着 ⇒ 按钮只高亮不触发。
+        // 📏 库源码 `clickAbs` 的注释亲口说：`同坐标的重复报告会被 iOS 整个丢弃`
+        //   而 `C:L` 的按下帧与抬起帧**坐标完全相同** ⇒ 抬起被丢。
+        // ✅ 改用 `D:`（`swipeAbs`）—— 按下后保持 14 帧插值移动 ⇒ 抬起帧形态不同 ⇒ 被消费。
+        //
+        // ⚠️ 时序：`moveAndClick` 返回 `["P:…", "D:…,600"]`。第 1 条后要等库内 8 帧插值走完（~48ms，
+        //    这里给 0.15s）；第 2 条是 600ms 按压 ⇒ 等 0.9s 再往下走。
         let cmds = BLEController.moveAndClick(x: Double(c.x), y: Double(c.y),
                                               baseW: baseW, baseH: baseH, yFix: yFix)
         for (i, cmd) in cmds.enumerated() {
             ble.send(cmd)
-            Thread.sleep(forTimeInterval: i == 0 ? Self.tapMoveSettle : Self.tapAfterSettle)
+            Thread.sleep(forTimeInterval: i == 0 ? Self.tapMoveSettle : 0.9)
         }
         log("   §click \(name) @(\(Int(c.x)),\(Int(c.y))) score=\(String(format: "%.3f", h.score)) ev=\(h.evidence)")
         return true
     }
 
     /// ⭐ **按坐标直接点**（坐标来自别处，如 OCR 词中心）
-    /// 同样遵守电脑端的点击节奏。
+    /// ⭐⭐ **按坐标直接点**（坐标来自识别结果，如 OCR 词中心）
+    ///
+    /// # ⛔⛔⛔ §2600 **这里就是「领福利点不动」的现场**
+    /// 用户当场抓到的现象（逐字）：
+    /// > 「**看你哪个失败的点击命令 就是圆点一直显示在那里。**」
+    /// > 「**别的都能点击 就你这个不行。**」
+    /// ⇒ 圆点 = iOS 的蓝牙鼠标光标，**一直停着不消失** = HID 的**抬起没被消费** =
+    ///   iOS 认为手指还按着 ⇒ 按钮**只高亮、从不触发**。
+    ///
+    /// 📏 修法见 `BLEController.moveAndClick` 的 §2600 注释（已从 `C:L` 改成 `D:` 长按）。
+    /// ⚠️ 时序：第 1 条 `P:` 后等 0.15s（库内 8 帧插值 ≈48ms），第 2 条 `D:` 是 600ms 按压 ⇒ 等 0.9s。
     @discardableResult
     func tapPoint(_ x: Double, _ y: Double, atomic: Bool = false) -> Bool {
         if atomic {
@@ -376,7 +396,7 @@ final class Navigator {
                                               baseW: baseW, baseH: baseH, yFix: yFix)
         for (i, cmd) in cmds.enumerated() {
             ble.send(cmd)
-            Thread.sleep(forTimeInterval: i == 0 ? Self.tapMoveSettle : Self.tapAfterSettle)
+            Thread.sleep(forTimeInterval: i == 0 ? Self.tapMoveSettle : 0.9)
         }
         return true
     }

@@ -463,7 +463,13 @@ final class APIRouter {
             let yf = cfgStore.cfg?.settings?.y_fix ?? 4
             let cmds = BLEController.moveAndClick(x: x, y: y, baseW: bw, baseH: bh, yFix: yf)
             var sent: [String] = []
-            for c in cmds { if ble.send(c) { sent.append(c) }; usleep(60_000) }
+            // ⭐ §2600：`moveAndClick` 现在返回 `["P:…", "D:…,600"]` —— 第 2 条是**长按 600ms**。
+            //   原来的 60ms 间隔会在板子还没走完按住序列时就去发下一条 ⇒ 必须等够。
+            //   ⇒ 第 1 条后等 150ms（让库内的 8 帧插值走完），第 2 条后等 900ms（600ms 按压 + 余量）。
+            for (i, c) in cmds.enumerated() {
+                if ble.send(c) { sent.append(c) }
+                usleep(i == 0 ? 150_000 : 900_000)
+            }
             return .json(["ok": sent.count == cmds.count, "sent": sent,
                           "state": ble.state, "error": ble.lastError])
 
