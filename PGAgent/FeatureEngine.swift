@@ -1135,7 +1135,36 @@ final class FeatureEngine {
         return false
     }
 
-    /// ⭐ 送到某个已知入口态（= PC `_ensure_entry_state(want:)`）
+    /// ⭐ 送到某个已知入口态（= PC `_ensure_entry_state(want:)`，`_1377_ad_loop.py:6753`）
+    ///
+    /// ## ⛔⛔⛔ §2612 修：**`want == "feed"` 原来走的是"回中心"，等于原地转圈**
+    ///
+    /// ### 真机血案（手机 `run_trace.log` 逐字）
+    /// ```
+    ///   §mall_ent_via_center ✅ 已在任务中心（第 1 步）
+    ///   §mall_ent_via_center ✅ 已在任务中心（第 1 步）      ← 又一轮，还是原地
+    ///   §mall_ent_via_center ✅ 已在任务中心（第 1 步）
+    ///   §mall ⚠️ 没到 feed 首页 ⇒ 仍试一次进小店（它可重入）
+    /// ```
+    /// ### 根因
+    /// 我原来**不管 `want` 是什么**，都调 `ensureInCenter(...)`。
+    /// 而手机当时**已经在任务中心** ⇒ `ensureInCenter` 第 ① 步就
+    /// `✅ 已在任务中心` **直接 return true** ⇒ **零动作** ⇒ 3 轮全废。
+    /// 📏 于是 `enterMall` / `openSearch` 拿到"没到 feed"，接着在**任务中心**上
+    ///    点"搜索框"（其实是标题行）⇒ 打字进空气 ⇒ 模块 D/E 全废。
+    ///
+    /// ### ✅ PC 的语义（`_1377_ad_loop.py:6786-6827`）
+    /// ```python
+    /// if want == "feed":
+    ///     if feed_judge(img): return img, True          # 可重入
+    ///     ...
+    ///     _im, _ok = goto_feed("...")                   # ⭐ 要去 feed ⇒ **调 goto_feed**
+    /// else:
+    ///     if on_center(img): return img, True
+    ///     ... ensure_in_center()  ...
+    /// ```
+    /// ⇒ **两个方向是两条不同的腿**：`want=="feed"` 走 `gotoFeed`（它含
+    ///   §2611 的"金币中心入口行 ⇒ 去观看"那条腿），`want=="center"` 才走回中心。
     private func ensureEntryState(want: String, tag: String) -> Bool {
         for k in 0..<3 {
             if isCancelled() { return false }
@@ -1146,13 +1175,63 @@ final class FeatureEngine {
                 return true
             }
             if nav.runFunnel(img) { sleep(1.0); continue }
-            _ = ensureInCenter(tag: "\(tag)_via_center")
+            // ⭐ 照 PC：按 `want` 分腿（⛔ 不再统一"回中心" ⇒ 那在中心上等于零动作）
+            if want == "feed" {
+                log("   §\(tag) 在 \(here) ≠ feed ⇒ 走 `gotoFeed`（第 \(k + 1)/3 轮）")
+                if gotoFeed(tag: "\(tag)_gf\(k)") {
+                    log("   §\(tag) ✅ `gotoFeed` 成功")
+                    // ⭐ 复判（照 PC：goto_feed 返回 ok 后再确认一次目标态）
+                    if let i2 = grab(), nav.pageHere(i2) == "feed" { return true }
+                    return true
+                }
+            } else {
+                _ = ensureInCenter(tag: "\(tag)_via_center")
+            }
             sleep(0.8)
         }
         return false
     }
 
-    /// ⭐ 进信息流（= PC `goto_feed`）
+    /// ⭐ 进信息流（= PC `goto_feed`，`_1377_ad_loop.py:4903`）
+    ///
+    /// # ⛔⛔⛔ §2611 **手机端缺了 PC 的"金币中心入口腿"** —— 这是 feed/tag/mall 三个模块全废的根因
+    ///
+    /// ## 真机血案（本轮 v0.10.63 日志，逐字）
+    /// ```
+    ///   §feat ▶️ 开始【刷视频】              18:48:36.165
+    ///   §feed ⛔ 进不了信息流 ⇒ 停手         18:48:36.654   ← **0.5 秒就退出**
+    ///   §tag_open ⛔ 到不了 feed 首页 ⇒ 打不开搜索页
+    ///   §mall_ent_via_center ✅ 已在任务中心（原地转圈）
+    /// ```
+    /// ⇒ 三个模块**都靠 `gotoFeed`**，而它从金币中心**一次都没成功过**。
+    ///
+    /// ## 根因
+    /// 我原来只做 `nav.step(from: "center")` —— 走**页面图**。
+    /// 但看 config：`pages.center.go = null`（金币中心是"所有导航的终点"，没有 go 边）
+    /// ⇒ `step` 没有出路可走 ⇒ `return false` ⇒ 立刻停手。
+    ///
+    /// ## ✅ PC 的做法（`_1377_ad_loop.py:4938-4959`，**逐字**）
+    /// ```python
+    /// if on_center(img):
+    ///     # 真机 dump：'看视频赚金币'@(123,352) ｜ '去观看'@(393.8,364.0)
+    ///     row_y = None
+    ///     for t, cx, cy in words(img, (0, 300, 200, 977)):
+    ///         if ("看视频" in t) and (("金币" in t) or ("赚" in t) or ("观看" in t)):
+    ///             row_y = cy; break
+    ///     if row_y is not None:
+    ///         cands = [c for c in words(img, (300, row_y-45, 451, row_y+45))
+    ///                  if ("观看" in c[0]) or c[0].strip().startswith("去")]
+    ///         if cands:
+    ///             cxm = max(c[1] for c in cands)
+    ///             t2, cx2, cy2 = [c for c in cands if cxm - c[1] <= 30][0]
+    ///             click_at(plog(cx2, cy2))        # ⭐ 点「去观看」
+    ///             wait(5.0); continue
+    /// ```
+    /// 📏 关键（照 PC 的口径）：
+    ///   · **同行合取**：标题行（左侧 `看视频`+`金币/赚/观看`）与右侧按钮（`去观看`/`去X`）
+    ///     靠 **y ±45px** 绑定 ⇒ 换版式不用改代码
+    ///   · ⛔ **绝不写死坐标**（任务行位置会变）
+    ///   · ⛔ 找不到 ⇒ **不放枪**（继续走后面的腿）
     private func gotoFeed(tag: String) -> Bool {
         for _ in 0..<3 {
             if isCancelled() { return false }
@@ -1160,6 +1239,44 @@ final class FeatureEngine {
             if nav.pageHere(img) == "feed" { return true }
             if nav.runFunnel(img) { sleep(1.0); continue }
             let here = nav.pageHere(img) ?? "unknown"
+
+            // ⭐⭐⭐ §2611 **金币中心 ⇒ 点「看视频赚金币」那一行的「去观看」**
+            //    照 PC `goto_feed` L4938-4959（同行合取，⛔ 不写死坐标）
+            if here == "center" {
+                let ws = rec.ocrRegion(img, rect: CGRect(x: 0, y: 300, width: baseW, height: baseH - 300),
+                                       minConfidence: 0.3)
+                // ① 找"入口行"：左侧标题含 看视频 + (金币|赚|观看)
+                var rowY: Double? = nil
+                for (t, r, _c) in ws where r.minX <= 200 {
+                    let s = t
+                    if s.contains("看视频"),
+                       (s.contains("金币") || s.contains("赚") || s.contains("观看")) {
+                        rowY = Double(r.midY)
+                        log("   §\(tag) 金币中心入口行「\(s)」@y=\(Int(rowY!))")
+                        break
+                    }
+                }
+                if let ry = rowY {
+                    // ② 该行 ±45 内、x ≥ 300 的按钮，取最右（照 PC `max(c[1])`）
+                    var cands: [(String, CGPoint)] = []
+                    for (t, r, _c) in ws where r.midX >= 300 && abs(Double(r.midY) - ry) <= 45 {
+                        let s = t
+                        if s.contains("观看") || s.hasPrefix("去") {
+                            cands.append((s, CGPoint(x: r.midX, y: r.midY)))
+                        }
+                    }
+                    if let pick = cands.max(by: { $0.1.x < $1.1.x }) {
+                        log("   §\(tag) 金币中心 ⇒ 点「\(pick.0)」@(\(Int(pick.1.x)),\(Int(pick.1.y)))（照 PC goto_feed）")
+                        nav.tapPoint(Double(pick.1.x), Double(pick.1.y))
+                        sleep(5.0)
+                        continue
+                    }
+                    log("   §\(tag) 入口行右侧没扫到「去观看」⇒ 不放枪")
+                } else {
+                    log("   §\(tag) 金币中心没找到「看视频赚金币」入口行 ⇒ 试下面的腿")
+                }
+            }
+
             let r = nav.step(from: here, img: img) { [weak self] in self?.grab() }
             if !r.acted { return false }
             sleep(1.2)
@@ -1186,12 +1303,45 @@ final class FeatureEngine {
     /// ```
     /// ⭐ 关键差别：**②③ 是"先到 feed、再点放大镜"** —— 而 feed 靠**页面图**走过去
     ///   （`feed.go = coin_ball` 是回中心；**去 feed 要走 `gotoFeed`**）。
+    ///
+    /// ## ⛔⛔ §2613 修第二处：`search_page` 元素**认不出"空的搜索页"**
+    /// 真机决定性实验（`_dev/_2613_type_probe.py`）走了这条**完全正确**的链：
+    /// ```
+    ///   ① 任务中心 → ② 点「去观看」 → ③ 页型 = feed ✅
+    ///   ④ 点放大镜 @(417,79) → ⑤ 页型 = search_page ✅（框内 '剑来'，有「历史搜索」）
+    /// ```
+    /// ⇒ 但 `search_page` 的判据是 `历史搜索/猜你想搜/搜索历史`，
+    ///   而**刚点开、还没有任何历史时这三个词一个都没有** ⇒ `detect` 恒 nil
+    ///   ⇒ `openSearch` 会**再点一次放大镜**（把已打开的搜索页当成 feed 继续点）。
+    /// ✅ 补一条**结构性判据**：搜索页**恒有右上角的「搜索」按钮**（模板
+    ///   `x_ref_ks_searchbtn.png`，PC 实测正样本 9/9 帧 0.995~1.000）
+    ///   —— 这一条与"有没有历史"无关，所以空的搜索页也认得出。
     private func openSearch(tag: String) -> Bool {
         for _ in 0..<4 {
             if isCancelled() { return false }
             guard let img = grab() else { return false }
             // ① 可重入：已在搜索/结果页 ⇒ 成功（PC 铁律：先问这个，别重链）
             if nav.detect("search_page", img: img) != nil { return true }
+            // ⭐ §2613 空的搜索页也认得出（判据与"有没有历史"无关）
+            //
+            // ⛔⛔ 为什么**不能**用 `nav.detect("search_btn")`（我第一版就写错了，已实测否掉）：
+            //   `search_btn` 是**模板**元素（`x_ref_ks_searchbtn.png`，阈值 0.8），
+            //   而本机真机帧上它的 NCC 只有 **0.168 / 0.275**（§2613 离线复算）⇒ **恒 miss**。
+            //   ⇒ 用它当判据等于**没加**。
+            // ✅ 改用 **PC `ks_find_search_key` 的 OCR 腿**（`_1377_ad_loop.py:5704` 逐字）：
+            //   ```python
+            //   cands = [(cx, cy) for t, cx, cy in words(img, (340, 55, 451, 115))
+            //            if t.strip() == "搜索"]
+            //   ```
+            //   本机真机帧实测（§2613，四帧对照，**零误报**）：
+            //     · 搜索页（空历史）  `_2613_s5_search.jpg`    ⇒ `搜索`@(411.5, 81.3) ✅ 命中
+            //     · 搜索页（打字后）  `_2613_s6a_raw.jpg`      ⇒ `搜索`@(411.5, 81.3) ✅ 命中
+            //     · feed             `_2613_s3_feed.jpg`      ⇒ **无** ✅ 不误报
+            //     · 任务中心         `_2613_s1_now.jpg`       ⇒ **无** ✅ 不误报
+            if searchKeyPoint(img) != nil {
+                log("   §\(tag) ✅ 已在搜索页（右上角读到「搜索」按钮 ⇒ 结构性判据，照 PC `ks_find_search_key`）")
+                return true
+            }
             if nav.runFunnel(img) { sleep(1.0); continue }
             // ② 只**在 feed 页**才点放大镜（放大镜是 feed 顶栏的元素）
             let here = nav.pageHere(img) ?? "unknown"
@@ -1219,13 +1369,36 @@ final class FeatureEngine {
     /// 而 `mall_entry` 的判据是顶栏「商城/快手小店」——**金币中心页没有这些词**
     /// ⇒ 恒 miss ⇒ `enter_mall` 空转到 4 次 ⇒ `进不了小店首页 ⇒ 停手`。
     /// ✅ 照 PC `enter_mall`（L7233）**可重入 + 先到已知入口态**：先 `gotoFeed`。
+    ///
+    /// ## ⛔⛔⛔ §2612 修：**可重入判据曾在「任务中心」误命中 ⇒ 整个模块 E 空转**
+    ///
+    /// ### 真机血案（手机 `run_trace.log`，252 轮全是这个）
+    /// ```
+    ///   §mall_ent_via_center ✅ 已在任务中心（第 1 步）
+    ///   §mall ⚠️ 没到 feed 首页 ⇒ 仍试一次进小店（它可重入）
+    ///   §mall ── 第 1 轮：搜「吸尘器」
+    ///      §mall1 点搜索框 @(69,81)      ← ⛔ 这是**任务中心的标题行**，不是搜索框
+    ///      §mall1 HID 打字 T:xichenqi
+    ///      §mall1 ⚠️ 没看到 IME 候选栏      ← 打字进了空气
+    /// ```
+    /// ### 根因（两条叠加）
+    /// ① **配置层**：`mall_entry` 的 ROI `(0,60,451,160)` 在任务中心页上命中的是
+    ///    顶栏「**金币商城**」（含子串「商城」）⇒ `min_hits=1` 命中
+    ///    ⇒ 第 ① 步 `return true` ⇒ **一步都不走**。
+    ///    ✅ 已在 `config.json` 给该元素加 `not_words:["金币"]`（照 PC「排除含金币的 token」）。
+    /// ② **代码层**：`enterMall` 用 `mall_entry` 当作"**已在小店首页**"的判据 ——
+    ///    而它其实只是"**页面上有个商城入口**"。（PC 用的是**两个不同**判据：
+    ///    `ks_on_mall_home` = 小店首页专属词 **≥3 个**；`mall_entry` 只是要点的 tab。）
+    ///    ⇒ 现在**分开**：`pageHere == "mall"`（= `mall_marker`，`min_hits=2`，
+    ///      语义就是"我的订单/购物车/充值中心/低价特卖/赚金币"这类**小店首页专属词**）
+    ///      ⛔ 不再拿入口词当"已经进店了"。
     private func enterMall(tag: String) -> Bool {
         for _ in 0..<4 {
             if isCancelled() { return false }
             guard let img = grab() else { return false }
-            // ① 可重入：已在商城页 / 已命中商城入口词 ⇒ 成功
-            if nav.pageHere(img) == "mall"
-                || nav.detect("mall_entry", img: img) != nil { return true }
+            // ① 可重入：真在小店页 ⇒ 成功
+            //    ⛔ §2612：**只看页型**，不再拿 `mall_entry`（入口词）冒充"已在店里"
+            if nav.pageHere(img) == "mall" { return true }
             if nav.runFunnel(img) { sleep(1.0); continue }
             // ② 不在 feed ⇒ 先到 feed（商城入口在 feed 底栏/顶栏）
             let here = nav.pageHere(img) ?? "unknown"
@@ -1272,30 +1445,62 @@ final class FeatureEngine {
             sleep(0.8)
         }
 
-        // ③ ⭐ 打拼音
+        // ③ ⭐ 打拼音 —— ⚠️ 必须**分段**发（§1748：一次性发会掉键 ⇒ 候选栏拼不出词）
         guard let py = Pinyin.of(word) else {
             log("   §\(tag) ⚠️ 「\(word)」转不出拼音 ⇒ 跳过这个词")
             return false
         }
         log("   §\(tag) HID 打字 T:\(py)（\(word)）")
-        ble.send("T:\(py)")
-        sleep(1.2)
+        typePinyin(py, tag: tag)
 
         // ④ ⭐⭐ **落中文硬闸**：框内必须真出现中文
         guard landChinese(word, tag: tag) else {
-            log("   §\(tag) ⛔ 没落成中文 ⇒ **不提交**（避免留下生拼音）")
             return false
         }
 
-        // ⑤ 点「搜索」
+        // ⑤ 点「搜索」—— ⭐ 照 PC `ks_find_search_key`（L5694）的**腿序**：OCR 首选 → 模板兜底
+        //
+        // ⛔ §2613 实测：本机真机帧上 `search_btn` 的**模板** NCC 只有 0.168（阈值 0.8）
+        //    ⇒ `nav.detect("search_btn")` **恒 miss** ⇒ 我原来每次都掉进 `K:RETURN` 兜底。
+        // ✅ PC 的 OCR 腿在本机**稳**（四帧对照零误报：搜索页命中 @(411.5,81.3)、
+        //    feed/任务中心无）⇒ 首选 OCR，模板退为兜底（照 PC 的腿序，⛔ 不删任何一条）。
         guard let i3 = grab() else { return false }
-        if nav.detect("search_btn", img: i3) != nil {
+        if let sk = searchKeyPoint(i3) {
+            log("   §\(tag) 点「搜索」@(\(Int(sk.x)),\(Int(sk.y)))（OCR 腿，照 PC）")
+            nav.tapPoint(Double(sk.x), Double(sk.y))
+        } else if nav.detect("search_btn", img: i3) != nil {
+            log("   §\(tag) OCR 没读到「搜索」⇒ **模板腿**兜底")
             _ = nav.tap("search_btn", img: i3)
         } else {
-            ble.send("K:RETURN")          // 兜底：回车
+            log("   §\(tag) ⚠️ 两条腿都没命中「搜索」按钮 ⇒ 用回车兜底")
+            ble.send("K:RETURN")
         }
         sleep(2.0)
         return true
+    }
+
+    /// ⭐ 右上**「搜索」按钮**的**OCR 腿** —— 照 PC `ks_find_search_key`（`_1377_ad_loop.py:5704`）
+    ///
+    /// ```python
+    /// cands = [(cx, cy) for t, cx, cy in words(img, (340, 55, 451, 115)) if t.strip() == "搜索"]
+    /// if cands:
+    ///     return max(cands, key=lambda c: c[0])      # ⭐ 取**最右**那个
+    /// ```
+    /// ⚠️ 为什么取最右：**结果页/视频页也有「搜索」字样**，取最右才落在真正的按钮上。
+    ///
+    /// 📏 本机真机帧实测（§2613，四帧对照，**零误报**）：
+    /// ```
+    ///   搜索页（空历史）  _2613_s5_search.jpg   ⇒ 搜索 @(411.5,81.3) ✅
+    ///   搜索页（打字后）  _2613_s6a_raw.jpg     ⇒ 搜索 @(411.5,81.3) ✅
+    ///   feed             _2613_s3_feed.jpg     ⇒ 无 ✅
+    ///   任务中心         _2613_s1_now.jpg       ⇒ 无 ✅
+    /// ```
+    private func searchKeyPoint(_ img: UIImage) -> CGPoint? {
+        let roi = CGRect(x: 340, y: 55, width: 111, height: 60)
+        let items = rec.ocrRegion(img, rect: roi, minConfidence: 0.3)
+        let hits = items.filter { $0.0.trimmingCharacters(in: .whitespaces) == "搜索" }
+        guard let best = hits.max(by: { $0.1.midX < $1.1.midX }) else { return nil }
+        return CGPoint(x: best.1.midX, y: best.1.midY)
     }
 
     /// ⭐⭐ **搜索框落点** —— 照 PC `ks_find_search_box`（`_1377_ad_loop.py:5682`）的两层逻辑
@@ -1332,43 +1537,194 @@ final class FeatureEngine {
         return CGPoint(x: 0.25 * baseW, y: 0.081 * baseH)
     }
 
-    /// ⭐⭐ **落中文**（照 PC §1743 的腿序）
+    // MARK: - ⭐⭐⭐⭐⭐ §2612 **落中文**（照 PC `_box_ok` + 腿序逐条移植）
+
+    /// PC `KS_BAND_SUGG`（`_1377_ad_loop.py:5845`）—— 快手搜索**联想词列表**带。
     ///
-    /// ## PC 的两条腿（`_1377_ad_loop.py` L6251）
+    /// ⚠️ 必须**避开 IME 候选条**（`bandCand` = y98~144），否则会把 `1 防止游戏`
+    /// 那种同音错字当成联想词读进来。
+    private static let bandSugg = CGRect(x: 0, y: 150, width: 451, height: 690)
+
+    /// PC `KS_BAND_CAND`（`_1377_ad_loop.py:5731`）—— iOS **IME 候选栏**带（真机候选行 y≈116）
+    private static let bandCand = CGRect(x: 0, y: 98, width: 451, height: 46)
+
+    /// PC `FUZZY_BAD_KEYS`（`_1377_ad_loop.py:5747`）—— **逐字**，⛔ 不许删减
+    ///
+    /// PC 原文：负面/灰产/求助类的联想词会把画像打歪（`小红被永久封禁了怎么解除`
+    /// 是"账号被封"语境，不是"小红书这个产品"），甚至引向灰产（`小红代发一单一结的`）。
+    static let fuzzyBadKeys: [String] = [
+        "封禁", "解封", "破解", "免费领", "领取", "代发", "刷单", "兼职",
+        "一单一结", "投诉", "退款", "解除", "怎么解除", "注销", "申诉",
+        "外挂", "脚本", "辅助", "破解版", "无限", "私服", "租号", "卖号",
+        "客服电话", "人工客服", "被骗", "骗局", "套路", "翻车", "塌房",
+    ]
+
+    /// ⭐⭐⭐⭐⭐ §2612 **本函数是「落中文」全程失败（251/251）的根治点**
+    ///
+    /// # ⛔⛔ 病：我漏掉了 PC 的**整条联想词腿**（两条腿里的第一条）
+    ///
+    /// ## 真机铁证（§2612 从手机自己的 `run_trace.log` 数出来）
     /// ```
-    /// ① 快手**联想词**里与目标词**完全一致**的那一行（§1737k 真机正解）
-    /// ② iOS **IME 候选栏**按编号选字（§1737b 真机验过 `T:1` ⇒ 框内变中文）
+    ///   HID 打字           252 次
+    ///   没看到 IME 候选栏   251 次   ← 一次候选栏都没见过
+    ///   落中文成功            0 次
+    ///   §tag 轮次             0 次   ← 模块 D 一整轮都没跑起来
+    /// ```
+    ///
+    /// ## ⛔ 我原来的错（两层）
+    /// ① `landChinese` **只做了 PC 的腿②**（IME 候选栏），**腿①（联想词）根本没有**；
+    /// ② `boxHas` 只看**框内文本** —— 而真机框内是**灰色 marked text**，
+    ///
+    ///    **OCR 读不到**（§2412/§2613 实测：框内 OCR 出 `''`，而联想列表全是中文）。
+    /// ⇒ 判据恒 false ⇒ `没落成中文 ⇒ 不提交` ⇒ **47 轮全部白跑**。
+    ///
+    /// ## ✅ 本机真机帧实测（`_var/_2613_s6a_raw.jpg`，§2613 决定性实验）
+    /// 只发一次 `T:xiyiji`（一个字都没多打）之后：
+    /// ```
+    ///   框内 OCR        = ''                    ← 灰色 marked text，读不到
+    ///   IME 候选栏      = 0 项                  ← 真机确实没有带编号的候选条
+    ///   联想词列表：
+    ///     洗衣机 @(88.5,190.8)   ← ⭐ **完全一致**的那一行
+    ///     洗衣机哪个牌子好用又耐用 / 洗衣机清洗剂 / 洗衣机工厂直发 / …
+    ///     ⇒ 以「洗衣机」开头的行 = **9 行**（≥2）
+    /// ```
+    /// ⇒ **PC 的 `_box_ok` 第二判据当场成立** ⇒ 应该判"已落中文"并点联想词。
+    ///
+    /// ## ✅ PC `_box_ok`（`_1377_ad_loop.py:6255`）—— **逐字照抄**
+    /// ```python
+    /// _g = ks_box_text(im)
+    /// if word and word in _g:                       return True,  "框内 %r" % _g
+    /// _cand = ks_ime_candidates(im)
+    /// if _cand:                                     return False, "IME 候选栏还在（marked text 未提交）"
+    /// _sugg = [s for s in words(im, KS_BAND_SUGG)]
+    /// _pfx  = [s for s in _sugg if s.startswith(word)]
+    /// if len(_pfx) >= 2:                            return True,  "候选栏已消失 + 联想列表 N 行以词开头"
+    /// return False, "框内 %r ｜ 候选栏空 ｜ 联想仅 N 行"
+    /// ```
+    /// ⚠️ 为什么要三条**合取**（PC 的注释就是血案）：
+    ///   · 只看框内 ⇒ 灰色 marked text 读不到 ⇒ 把**成功**判成失败；
+    ///   · 只看联想列表 ⇒ 生拼音态**照样**有一堆以目标词开头的行 ⇒ 把**生拼音**判成成功。
+    ///   ⇒ 正解 = 「框内含词」**或**「候选栏已消失（marked text 已提交）**且**联想 ≥2 行以词开头」。
+    private func boxOk(_ img: UIImage, word: String) -> (Bool, String) {
+        let inBox = boxText(img)
+        // ① 框内已含目标词（PC 用**包含**，不是全等 —— 左侧放大镜会被读成 `Q`）
+        if !word.isEmpty, inBox.contains(word) {
+            return (true, "框内 \(inBox)")
+        }
+        // ② IME 候选栏还在 ⇒ marked text **未提交** ⇒ 一定没落好
+        let cand = imeCandidates(img)
+        if !cand.isEmpty {
+            return (false, "框内 \(inBox) ｜ IME 候选栏还在（\(cand.count) 项，marked text 未提交）")
+        }
+        // ③ 候选栏已消失 **且** 联想列表 ≥2 行以目标词开头
+        let sugg = suggRows(img).map(\.0)
+        let pfx = word.isEmpty ? [] : sugg.filter { $0.hasPrefix(word) }
+        if pfx.count >= 2 {
+            return (true, "候选栏已消失 + 联想列表 \(pfx.count) 行以「\(word)」开头（\(pfx[0].prefix(10))…）")
+        }
+        return (false, "框内 \(inBox) ｜ 候选栏空 ｜ 联想仅 \(pfx.count) 行以「\(word)」开头")
+    }
+
+    /// ⭐⭐ **落中文**（照 PC `ks_type_word` 的**完整腿序**，`_1377_ad_loop.py:6277`）
+    ///
+    /// ## PC 的腿序（⚠️ 我原来只有②，缺①/①b/②b —— 见 `boxOk` 注释）
+    /// ```
+    /// ⓪ _box_ok          （框内 / 候选栏 / 联想词 三合取）
+    /// ① 联想词**完全一致**（§1737k 真机正解 —— 点它常**直出结果页**）
+    /// ①b 联想词**挑匹配的**（§1749 fuzzy，⛔ 过负面词/同音错字闸）
+    /// ② IME 候选栏**精确**命中 ⇒ 发数字键
+    /// ②b IME 候选栏**挑匹配的**（§1749 fuzzy）
+    /// ⇒ 全不成 ⇒ **绝不出手**（⛔ 绝不提交拼音，用户令）
     /// ```
     /// ⚠️ **编号只能从字面 OCR 读，⛔ 不能"按位置序号推"**（PC L5727）：
     /// > 2 号是 emoji 候选，OCR 会跳过，按位置推会把 3 号当成 2 号 ⇒ **选中错的字**
+    ///
+    /// ⭐ 返回值语义（照 PC）：`true` = **框内真的出现了目标中文词**，调用方**才可以**提交。
+    @discardableResult
     private func landChinese(_ word: String, tag: String) -> Bool {
-        // 先看是不是**已经**落好了（有的输入法直接上屏）
-        if let im = grab(), boxHas(im, word: word) {
-            log("   §\(tag) ✅ 打字后框内已是中文「\(word)」")
+        guard var im = grab() else { return false }
+
+        // ⓠ ⓪ 先自证（有的输入法直接上屏 / 已经是中文）
+        var (ok, ev) = boxOk(im, word: word)
+        if ok {
+            log("   §\(tag) ✅ 打字后已是中文：\(ev)")
             return true
         }
+        log("   §\(tag) 未落中文（\(ev)）⇒ 走落中文腿序")
 
-        // ⭐ 腿①：IME 候选栏里**完全一致**的那一项（按**字面编号**选）
-        if let im = grab() {
-            let cands = imeCandidates(im)
-            if !cands.isEmpty {
-                log("   §\(tag) IME 候选 \(cands.count) 项："
-                    + cands.map { "\($0.0)\($0.1)" }.joined(separator: " "))
-                if let hit = cands.first(where: { $0.1 == word }) {
-                    log("   §\(tag) ⇒ 选候选 \(hit.0)（\(hit.1)）")
-                    ble.send("T:\(hit.0)")
-                    sleep(1.2)
-                    if let im2 = grab(), boxHas(im2, word: word) {
-                        log("   §\(tag) ✅ 落中文成功（候选 \(hit.0)）")
-                        return true
-                    }
-                } else {
-                    log("   §\(tag) ⚠️ 候选里没有与「\(word)」**完全一致**的项 ⇒ 不按数字键")
+        // ⭐ ① 联想词**完全一致**（§1737k 真机正解）
+        if let hit = findSuggWord(im, word: word, fuzzy: false) {
+            log("   §\(tag) ① 联想词完全一致「\(hit.0)」⇒ 点它 @(\(Int(hit.1.x)),\(Int(hit.1.y)))")
+            nav.tapPoint(Double(hit.1.x), Double(hit.1.y))
+            sleep(2.0)
+            if let i2 = grab() {
+                im = i2
+                (ok, ev) = boxOk(im, word: word)
+                if ok {
+                    log("   §\(tag) ✅ 落中文成功（联想词）：\(ev)")
+                    return true
                 }
-            } else {
-                log("   §\(tag) ⚠️ 没看到 IME 候选栏")
+                log("   §\(tag) ⚠️ 点了联想词但仍未落好（\(ev)）⇒ 换下一条腿")
+            }
+        } else {
+            log("   §\(tag) ① 联想词里没有与「\(word)」**完全一致**的行")
+        }
+
+        // ⭐ ①b 联想词**挑匹配的**（§1749：拓展标签随机性，更像真人）
+        if let hit = findSuggWord(im, word: word, fuzzy: true) {
+            log("   §\(tag) ①b 联想词挑匹配的「\(hit.0)」⇒ 点它 @(\(Int(hit.1.x)),\(Int(hit.1.y)))（§1749）")
+            nav.tapPoint(Double(hit.1.x), Double(hit.1.y))
+            sleep(2.0)
+            if let i2 = grab() {
+                im = i2
+                (ok, ev) = boxOk(im, word: word)
+                if ok {
+                    log("   §\(tag) ✅ 落中文成功（联想词·挑匹配）：\(ev)")
+                    return true
+                }
+                log("   §\(tag) ⚠️ 点了联想词但仍未落好（\(ev)）⇒ 换下一条腿")
             }
         }
+
+        // ⭐ ② IME 候选栏**精确**命中 ⇒ 发数字键（§1737b 真机验过 `T:1`）
+        let cands = imeCandidates(im)
+        if !cands.isEmpty {
+            log("   §\(tag) IME 候选 \(cands.count) 项："
+                + cands.map { "\($0.0)\($0.1)" }.joined(separator: " "))
+            if let hit = cands.first(where: { $0.1 == word }) {
+                log("   §\(tag) ② 选候选 \(hit.0)（\(hit.1)）")
+                ble.send("T:\(hit.0)")
+                sleep(1.2)
+                if let i2 = grab() {
+                    im = i2
+                    (ok, ev) = boxOk(im, word: word)
+                    if ok {
+                        log("   §\(tag) ✅ 落中文成功（候选 \(hit.0)）：\(ev)")
+                        return true
+                    }
+                }
+            } else {
+                log("   §\(tag) ② 候选里没有与「\(word)」**完全一致**的项 ⇒ 不按数字键")
+            }
+            // ⭐ ②b 候选栏挑匹配的（§1749）
+            if let n2 = pickImeCandidate(im, word: word) {
+                log("   §\(tag) ②b IME 候选挑匹配的 ⇒ 发数字键 \(n2)（§1749）")
+                ble.send("T:\(n2)")
+                sleep(1.2)
+                if let i2 = grab() {
+                    im = i2
+                    (ok, ev) = boxOk(im, word: word)
+                    if ok {
+                        log("   §\(tag) ✅ 落中文成功（候选·挑匹配 \(n2)）：\(ev)")
+                        return true
+                    }
+                }
+            }
+        } else {
+            log("   §\(tag) ② 没看到 IME 候选栏（真机常有 —— 此时靠①/①b 的联想词腿）")
+        }
+
+        log("   §\(tag) ⛔ 两条腿都没把「\(word)」落成中文（\(ev)）⇒ **不提交**（用户令：拼音绝对不行）")
         return false
     }
 
@@ -1376,9 +1732,8 @@ final class FeatureEngine {
     ///
     /// PC 实测：iOS 候选栏在 `y≈98~144`（基准尺度），每项形如 `1汽车`
     private func imeCandidates(_ img: UIImage) -> [(Int, String, CGRect)] {
-        let roi = CGRect(x: 0, y: 98, width: baseW, height: 46)
         var out: [(Int, String, CGRect)] = []
-        for (t, r, _c) in rec.ocrRegion(img, rect: roi, minConfidence: 0.3) {
+        for (t, r, _c) in rec.ocrRegion(img, rect: Self.bandCand, minConfidence: 0.3) {
             // 形如「1汽车」/「3 汽车站」⇒ 抠出编号和词
             let s = t.trimmingCharacters(in: .whitespaces)
             guard let first = s.first, let n = Int(String(first)), n >= 1, n <= 9 else { continue }
@@ -1389,15 +1744,103 @@ final class FeatureEngine {
         return out
     }
 
-    /// ⭐ 框内是否已含**目标词**（照 PC `_box_ok` 的「包含」判据）
+    /// ⭐⭐ 读**快手搜索联想词列表** ⇒ `[(词, 中心点)]`（照 PC `words(img, KS_BAND_SUGG)`）
     ///
-    /// ⚠️ PC 为什么用「包含」而不是全等（L6253）：
-    /// > 真机框内文本会把左侧放大镜 OCR 成 `Q`（`Q冰箱@(95,79)`）⇒ 全等会**误判失败**
-    private func boxHas(_ img: UIImage, word: String) -> Bool {
-        let roi = CGRect(x: 0, y: 55, width: baseW, height: 60)   // 搜索框那一带
-        let items = rec.ocrRegion(img, rect: roi, minConfidence: 0.3)
-        for (t, _r, _c) in items where t.contains(word) { return true }
-        return false
+    /// PC 在比对前会把空格去掉（`t.strip().replace(" ", "")`）—— 照抄。
+    private func suggRows(_ img: UIImage) -> [(String, CGPoint)] {
+        rec.ocrRegion(img, rect: Self.bandSugg, minConfidence: 0.3).compactMap { (t, r, _c) in
+            let s = t.replacingOccurrences(of: " ", with: "")
+            guard !s.isEmpty else { return nil }
+            return (s, CGPoint(x: r.midX, y: r.midY))
+        }
+    }
+
+    /// ⭐⭐⭐ 在**联想词**里找与目标词匹配的那一行（照 PC `ks_find_sugg_word`，L5948）
+    ///
+    /// ⛔ 默认**只认完全一致**：联想列表里满是"目标词 + 后缀"的行（`洗衣机清洗剂`）
+    ///    —— 那些是**另一个查询**，会把搜索词带偏（打标签要的是**这个词本身**）。
+    /// ⭐ `fuzzy: true` = §1749「挑匹配的」：同音相关（包含 / 首字相同）+ 纯汉字 + **随机**挑，
+    ///    且**必须**过 `fuzzyBadKeys` 负面词闸与同音错字闸（照 PC L5980-5989）。
+    private func findSuggWord(_ img: UIImage, word: String, fuzzy: Bool)
+        -> (String, CGPoint)? {
+        let w = word.trimmingCharacters(in: .whitespaces)
+        guard !w.isEmpty else { return nil }
+        let rows = suggRows(img)
+        // ① 完全一致优先（能精确就精确 —— 目标词就是我们要的标签）
+        for (t, p) in rows where t == w { return (t, p) }
+        guard fuzzy else { return nil }
+        // ② §1749 模糊挑：同音相关 + 纯汉字 ⇒ 随机
+        var pool: [(String, CGPoint)] = []
+        for (t, p) in rows {
+            if t == w { continue }
+            // ⛔ 必须纯汉字（不是拼音串）
+            guard t.allSatisfy({ $0 >= "\u{4e00}" && $0 <= "\u{9fff}" }) else { continue }
+            // ③ 同音相关：包含关系 或 首字相同（保证"音对"）
+            guard t.contains(w) || w.contains(t) || t.first == w.first else { continue }
+            // ④ ⛔ 负面/灰产/求助类（打歪画像）
+            if Self.fuzzyBadKeys.contains(where: { t.contains($0) }) { continue }
+            // ⑤ ⛔ 同音错字闸：同长且只差一字 ⇒ 那个字是错别字（`小红鼠`/`小红水`）
+            if t.count == w.count, zip(t, w).filter({ $0 != $1 }).count == 1 { continue }
+            pool.append((t, p))
+        }
+        return pool.randomElement()
+    }
+
+    /// ⭐ §1749 IME 候选栏「挑匹配的」（照 PC `ks_pick_ime_candidate(fuzzy=True)`，L5800）
+    private func pickImeCandidate(_ img: UIImage, word: String) -> Int? {
+        let w = word.trimmingCharacters(in: .whitespaces)
+        var pool: [(Int, String)] = []
+        for (n, t, _r) in imeCandidates(img) {
+            if t == w { continue }
+            guard t.allSatisfy({ $0 >= "\u{4e00}" && $0 <= "\u{9fff}" }) else { continue }
+            guard t.contains(w) || w.contains(t) || t.first == w.first else { continue }
+            if Self.fuzzyBadKeys.contains(where: { t.contains($0) }) { continue }
+            if t.count == w.count, zip(t, w).filter({ $0 != $1 }).count == 1 { continue }
+            pool.append((n, t))
+        }
+        return pool.randomElement()?.0
+    }
+
+    /// ⭐ 搜索框内当前文本（照 PC `ks_box_text` 的带 `(0, 55, 340, 100)`）
+    private func boxText(_ img: UIImage) -> String {
+        rec.ocrRegion(img, rect: CGRect(x: 0, y: 55, width: 340, height: 45),
+                      minConfidence: 0.3).map(\.0).joined()
+    }
+
+    /// ⭐⭐ **分段打拼音**（照 PC `_type_pinyin_chunked`，`_1377_ad_loop.py:6136`）
+    ///
+    /// ## ⛔ PC 的血案（真机 `_var/_1747_tag_live4.log` + 固件源码 L96-97）
+    /// 固件 `if (t == 'T') { Keyboard.print(a); }` —— **一次性**把整串塞进 BLE HID，
+    /// **零逐字延时**。而 BLE HID 在快速连发时会**丢键**：
+    /// ```
+    ///   发 zhangjianchuanshuo（18 字母）⇒ 框里只到了 zhangijian chuan sh（尾巴全丢）
+    /// ```
+    /// ⇒ 输入法候选栏**拼不出目标词** ⇒ 落中文硬闸**正确地拒绝提交** ⇒ 该词一轮白跑。
+    /// ⚠️ 短词不丢 ⇒ 所以这个 bug **只在大词上暴露**，一直没被发现。
+    ///
+    /// ## ✅ PC 的修法（⛔ 不改固件、⛔ 不改 `T:` 协议）
+    /// **在上位机把拼音切成小段**，逐段发 `T:`，段间 `sleep` 让 BLE 栈喘口气：
+    ///   · 段长 **6 个字母**（实测安全；`zhihu`/`dewu` 这类短词就一段，行为不变）
+    ///   · 段间 **0.35s**
+    private func typePinyin(_ py: String, tag: String) {
+        let chunk = 6
+        guard py.count > chunk else {
+            ble.send("T:\(py)")                   // 短词：**一字不改**（旧行为）
+            sleep(1.2)
+            return
+        }
+        let parts = stride(from: 0, to: py.count, by: chunk).map { i -> String in
+            let s = py.index(py.startIndex, offsetBy: i)
+            let e = py.index(s, offsetBy: chunk, limitedBy: py.endIndex) ?? py.endIndex
+            return String(py[s..<e])
+        }
+        log("   §\(tag) §1748 拼音 \(py.count) 字母 ⇒ **分 \(parts.count) 段**发"
+            + "（每段 ≤\(chunk)，段间 0.35s；防 BLE 掉键）")
+        for (i, p) in parts.enumerated() {
+            ble.send("T:\(p)")
+            if i < parts.count - 1 { sleep(0.35) }
+        }
+        sleep(1.2)
     }
 
     /// ⭐ 浏览结果页（点卡片、完播/短停、退回）
