@@ -536,6 +536,45 @@ final class Runner: ObservableObject {
         }
 
         // ② 快捷指令截图（兜底）
+        //
+        // ⛔⛔⛔ §2637 **广播已死时，这条兜底路会空转 126 秒**（真机血案，本轮）
+        //
+        // ## 血案（真机 trace，逐字）
+        // ```
+        //   [   9s] ⏳ 等录屏新帧（4s）
+        //   [ 108s] ⚠️ 第 ② 条后没看到图标 ⇒ 补 1 条上滑（兜底 1/2）   ← ⛔ 中间 **99 秒**
+        //   [ 207s] ⚠️ 第 ② 条后没看到图标 ⇒ 补 1 条上滑（兜底 2/2）   ← ⛔ 又 **99 秒**
+        //   [ 307s] ⛔ 仍没看到「kslite」图标
+        // ```
+        // ⇒ 一次"切 App"就白等 **5 分钟**。
+        //
+        // ## 根因（算术）
+        // ```
+        //   轮数 = max(1, ocrMaxTries / 10) = max(1, 99/10) = **9 轮**
+        //   每轮 = sem.wait(grabTimeout + 4) = 10 + 4 = **14 秒**
+        //   ⇒ 9 × 14 = **126 秒**（与实测 99 秒同量级 ✅ 对得上）
+        // ```
+        // ⇒ 而**广播已死时，这 9 轮注定全失败**（`frames` 冻住、帧龄一直涨）
+        //   ⇒ **纯空转**（用户令：「**我感觉这样工作效率太低了**」）。
+        //
+        // ## ✅ 修法：**先判"广播在不在"，死了就立刻放弃**（⛔ 不空转 126 秒）
+        //   判据用**已有的**字段（⛔ 不新造判据）：
+        //     · `broadcaster.hasFrame` 为假（从来没收到过帧）⇒ 兜底路也没戏
+        //     · 帧龄已 **> 3 倍上限**（说明不是"抖动"，是真停了）⇒ 快速失败
+        //   ⚠️ 只影响**兜底路**；主路（新鲜帧）逻辑**一字不动**。
+        //   📏 这符合本仓库 §2263 的分流原则：**把"广播死了"和"识别不行"分开**，
+        //      而且**立刻报出来**，⛔ 不让它伪装成"慢慢等"。
+        if let b = broadcaster {
+            let age = b.lastFrameAge()
+            if !b.hasFrame() || (age ?? .greatestFiniteMagnitude) > maxFrameAge * 3 {
+                log("   §grab ⛔ 广播已停（"
+                    + (age.map { String(format: "帧龄 %.1fs", $0) } ?? "从未收到帧")
+                    + String(format: " > 3×上限 %.1fs", maxFrameAge * 3)
+                    + "）⇒ **不走兜底空转**（否则白等 \(Int(Double(max(1, ocrMaxTries / 10)) * (grabTimeout + 4)))s）"
+                    + " ⇒ 去点「开录屏」→ 系统面板「开始直播」")
+                return nil
+            }
+        }
         for attempt in 0..<max(1, ocrMaxTries / 10) {
             if cancelFlag { return nil }
             let sem = DispatchSemaphore(value: 0)
