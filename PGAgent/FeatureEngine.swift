@@ -170,31 +170,33 @@ final class FeatureEngine {
             // ③ G3：**等倒计时结束**（轮数按胶囊里的 N 动态定：N+20s 余量）
             // ④ G4：倒计时结束后**才点 ✕**收奖励 ⇒ 处理弹出的面板
             // ```
-            // ⛔⛔ §2636 **顺序必须是 ① 转化 → ② 等倒计时 → ③ 点 ✕**
-            //
-            // ## ⛔⛔⛔ §2638 **这一改动被"API 推送"回滚过一次，必须警惕**
-            // 真机 trace 铁证：`ff53c90`（v0.10.72）**有**这个改动（106 行），
-            // 而 `6fe9fa7`（v0.10.73）把它**原样回滚了**（53 增 / 53 删 ⇒ 正好是逆操作）。
-            // ⇒ 于是 v0.10.73 那一轮跑的是**旧顺序**（`等满再转化`），⛔ 白测 3 轮。
-            // 📏 教训：**推送后必须核对"远端文件内容"**，⛔ 不能只看"推送成功"。
-            //
-            // ## 为什么是"先转化"（真机 trace 的决定性数字）
-            // ```
-            //   [54s] 等待 10/45s（顶栏「15s后可领取219金币」）  ← 广告还在
-            //   [72s] 等待 30/45s（顶栏「已成功领取219金币」）    ← ⛔ 广告已结束（本条约 25s）
-            //   [90s] §adbox_cta2 ⛔ 没找到可点的 CTA            ← CTA 早没了
-            // ```
-            // ⇒ 本机广告**只有约 25 秒**，比"等 30~60s"短 ⇒ 等满时 CTA 必然消失。
-            // 📏 而**成功过**的那次（trace）：`13:34:51 CTA 已点 → 13:34:55 已进落地页`
-            //   —— 它是**进广告约 2 秒**就点 CTA ⇒ CTA 还在。
-            // ⇒ PC 的 `wait(_dwell)` 管的是"**别急着关**"（L9562），⛔ 不是"转化也要等"；
-            //   PC 那条广告长（60s+）所以等完 CTA 还在，**我们这台必须更早**。
-            //   唯一稳妥 = **进广告页立刻转化**（此时 CTA 一定在），再等倒计时收奖励。
+            // ⛔⛔ §2632 **② 必须在 ③ 之前**（我上一版把转化排在 G3 之后 ⇒ CTA 已消失）。
             if Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+                // ── ① 先等 30~60s 随机（PC §1541）──────────────────────
+                // ⛔ 不许"进去就点 ✕"（PC 原话：「进去就点X 卡死 出去进来像傻逼一样，最后点X」）
                 var cur = img
+                let waitS = Double.random(in: 30...60)
+                log("§adbox ⛔ 广告页 ⇒ 先等 \(Int(waitS))s（30~60 随机，照 PC §1541）"
+                    + "；⛔ **等满再转化**（CTA 只有在广告还在时才在）")
+                var slept = 0.0
+                while slept < waitS, !isCancelled() {
+                    let d = min(2.0, waitS - slept)
+                    Thread.sleep(forTimeInterval: d)
+                    slept += d
+                    guard let im2 = grab() else { break }
+                    cur = im2
+                    // ⚠️ §2632 **只记录、不提前跳出**（照 PC `wait(_dwell)` 是**固定随机等**）。
+                    //    提前跳出（无论按"已成功领取"还是"倒计时走完"）都会
+                    //    **结构上错过 CTA 窗口** —— 那正是「转化整条丢失」的原因。
+                    //    倒计时/到账的判断交给下面的 G3/G4（它们各有一道到账闸）。
+                    if slept.truncatingRemainder(dividingBy: 10.0) < 2.0 {
+                        let t2 = Self.adTopText(cur, rec: rec, bw: baseW, bh: baseH)
+                        log("   §adbox ⏳ 广告页等待 \(Int(slept))/\(Int(waitS))s"
+                            + "（顶栏「\(t2.prefix(16))」）")
+                    }
+                }
 
-                // ── ① ⭐⭐⭐ 转化：**立刻**点 CTA → 进落地页 → 浏览（§2636）──
-                //    ⛔ 必须最先做：CTA 只在广告播放期间存在（本机广告约 25s）。
+                // ── ② ⭐⭐⭐ 转化：点 CTA → 浏览落地页（**必须在 G3 之前**，§2632）──
                 if !isCancelled(), let cur4 = grab() {
                     if let how = clickCTA(cur4, tag: "adbox_cta\(n + 1)") {
                         log("§adbox CTA 已点（\(how)）⇒ 等落地页")
@@ -204,13 +206,66 @@ final class FeatureEngine {
                             log("§adbox ✅ 已进落地页（顶栏「\(Self.adTopText(land, rec: rec, bw: baseW, bh: baseH).prefix(18))」）⇒ 浏览")
                             clickInstall(land, tag: "adbox_inst\(n + 1)")   // 先点安装（照 PC 顺序）
                             browseLanding(tag: "adbox_browse\(n + 1)")      // 再浏览
-                            if let back = grab() { cur = back }             // 浏览后回广告页
                         } else {
                             log("§adbox ⚠️ CTA 没点进落地页 ⇒ **不浏览**（照 PC：都没进去，滑什么）")
                         }
                     } else {
                         log("§adbox ⚠️ 没找到可点的 CTA（过闸后）⇒ 本条不做转化，直接收奖励")
                     }
+                }
+
+                // ── ②b ⭐⭐⭐⭐⭐ §2640 **回广告页**（PC L9769~L9801，⛔ 我原来整段漏了）──
+                //
+                // ## ⛔⛔ 用户令（逐字，本轮）
+                // > 「**这个未点X就切下一个了**」
+                //
+                // ## 血案（真机 trace + 用户截图）
+                // 用户截图停在**天猫落地页**（「商品正在加速赶来中」）—— 说明 **CTA 点成功了**，
+                // 但代码**在落地页上直接跑 G3/G4 去找广告胶囊 ✕** ⇒ 当然找不到
+                // ⇒ `finishAdPanel` 返回 false ⇒ **本条就这样"结束"**，去切下一个广告。
+                // ⇒ 现象 = 「**未点 X 就切下一个**」。
+                //
+                // ## PC 的做法（`_1377_ad_loop.py:9769-9801`，逐字）
+                // ```python
+                // # ③ 回广告页：可能要 2 步（先关被拒 WebView，再点面包屑）
+                // #    ⇒ 循环到顶栏重新读到胶囊为止（★§1633 轮数 6 → 9）
+                // for k in range(9):
+                //     img_r = grab(...)
+                //     if on_center(img_r): at_center = True; break          # 直接落回金币中心 ⇒ 也算成功
+                //     _pk_r, _ptop_r, _pev_r = page_kind(img_r, top=txt(img_r, BOX_TOP))
+                //     if _pk_r in ("ad_video", "ad_live"): break            # ⭐ 已回广告页
+                //     if _pk_r == "unknown" and ("可领取" in top_r): break   # 兼容
+                //     return_to_ad(img_r, k)                                # ⛔ 否则**主动返回**
+                //     wait(3.2)
+                // ```
+                // 📏 关键：**"返回"是一个要反复尝试的动作**（最多 9 次），
+                //   ⛔ 不是"我以为已经回来了"。这正是我漏掉的那一步。
+                log("§adbox ↩ 转化完 ⇒ **回广告页**（照 PC 9 轮返回腿）")
+                var backHome = false
+                for k in 0..<9 {
+                    if isCancelled() { break }
+                    guard let imr = grab() else { break }
+                    // ① 落回金币中心 ⇒ 本条已完成（PC `on_center` 短路）
+                    if ensureInCenter(tag: "adbox_ret\(n + 1)_\(k)") {
+                        log("   §adbox ✅ 已落回金币中心（第 \(k + 1) 次检查）⇒ 本条算完成")
+                        backHome = true
+                        break
+                    }
+                    // ② 已回广告页 ⇒ 继续走 G3/G4
+                    if Self.looksLikeAdPage(imr, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+                        log("   §adbox ✅ 已回广告页（第 \(k + 1) 次检查）⇒ 继续等倒计时")
+                        cur = imr
+                        break
+                    }
+                    // ③ 还在落地页 ⇒ **主动返回**（照 PC `return_to_ad`）
+                    log("   §adbox ↩ 还在落地页（第 \(k + 1)/9 次）⇒ 执行返回")
+                    returnToAd(imr, tag: "adbox_ret\(n + 1)_\(k)")
+                    sleep(3.2)
+                }
+                if backHome {
+                    n += 1
+                    scrollTries = 0
+                    continue
                 }
 
                 // ── ③ G3：**等倒计时结束**才许动手（PC L9814~L9858）────────
@@ -415,23 +470,34 @@ final class FeatureEngine {
                     //   （上一轮"能点到 CTA"是**歪打正着**：当时判据读不到倒计时 ⇒ 2 秒就跳出
                     //     ⇒ 碰巧广告还在 ⇒ 点到 CTA）。
                     //
-                    // ## ✅ §2636/§2638 **正确顺序 = ① 转化 → ② 等倒计时 → ③ 点 ✕**
-                    // ⛔ 我连错两次（先"等倒计时→转化"，再"先等30~60s→转化"），都是**等过了头**。
-                    // 📏 且 §2638 证实这改动曾被"API 推送"**回滚**过一次（`ff53c90` 有、`6fe9fa7` 没了）
-                    //   ⇒ **推送后必须核对远端文件内容**，⛔ 不能只看"推送成功"。
-                    // 真机 trace 的决定性数字：
+                    // ## 现在的顺序（= PC，⛔ 不许再改）
                     // ```
-                    //   [54s] 等待 10/45s（顶栏「15s后可领取219金币」）  ← 广告还在
-                    //   [72s] 等待 30/45s（顶栏「已成功领取219金币」）    ← ⛔ 广告已结束（本条约 25s）
-                    //   [90s] §adbox_cta2 ⛔ 没找到可点的 CTA            ← CTA 早没了
+                    //   ① dwell：睡满随机 30~60s（只被"停"打断，⛔ 不因倒计时/到账提前跳出）
+                    //   ② convert：点 CTA → 进落地页 → 浏览      ← 广告还在，CTA 在
+                    //   ③ G3：等倒计时结束（N+20s 余量）
+                    //   ④ G4：点 ✕ 收奖励（内有到账闸）
                     // ```
-                    // ⇒ 本机广告**只有约 25 秒**，比"等 30~60s"短 ⇒ 等满时 CTA 必然消失。
-                    // 📏 而**成功过**的那次（trace）：`13:34:51 CTA 已点 → 13:34:55 已进落地页`
-                    //   —— 它是**进广告约 2 秒**就点 CTA ⇒ CTA 还在。
-                    // ⇒ PC 的 `wait(_dwell)` 管的是"**别急着关**"（L9562），⛔ 不是"转化也要等"。
-                    //   唯一稳妥 = **进广告页立刻转化**（此时 CTA 一定在），再等倒计时收奖励。
                     var cur = i2
-                    // ── ① ⭐⭐⭐ 转化：**立刻**点 CTA → 进落地页 → 浏览（§2636）──
+                    let waitS = Double.random(in: 30...60)
+                    log("§adbox ⛔ 已进广告页 ⇒ 先等 \(Int(waitS))s（30~60 随机，照 PC §1541）"
+                        + "；⛔ **等满再转化**（CTA 只有在广告还在时才在）")
+                    var slept = 0.0
+                    while slept < waitS, !isCancelled() {
+                        let d = min(2.0, waitS - slept)
+                        Thread.sleep(forTimeInterval: d)
+                        slept += d
+                        guard let im3 = grab() else { break }
+                        cur = im3
+                        // ⚠️ 这里**只记录、不提前跳出**（照 PC：`wait(_dwell)` 是固定随机等）。
+                        //    提前跳出 = 结构上错过 CTA 窗口（§2632 血案）。
+                        //    倒计时/到账的判断交给下面的 G3/G4。
+                        if slept.truncatingRemainder(dividingBy: 10.0) < 2.0 {
+                            let t3 = Self.adTopText(cur, rec: rec, bw: baseW, bh: baseH)
+                            log("   §adbox ⏳ 广告页等待 \(Int(slept))/\(Int(waitS))s"
+                                + "（顶栏「\(t3.prefix(16))」）")
+                        }
+                    }
+                    // ── ② ⭐⭐⭐ 转化：点 CTA → 浏览落地页（**必须在 G3 之前**，§2632）──
                     //
                     // ## ⛔ 手机端原来**完全没有这一步**（`_dev/_2440_port_diff.py` 对照出来的差集）
                     // 它从"倒计时结束"**直接跳到收奖励** ⇒ 就是用户骂的那句：
@@ -2314,6 +2380,111 @@ final class FeatureEngine {
             swipeUp(3.0, 6.0)
         }
         log("   §\(tag) 转化浏览完成")
+    }
+
+    /// ⭐⭐⭐⭐⭐ §2640 **从落地页回广告页** —— 逐条移植 PC `return_to_ad`
+    /// （`_1377_ad_loop.py:2771`）。
+    ///
+    /// # ⛔⛔ 为什么必须有它（用户令，逐字）
+    /// > 「**这个未点X就切下一个了**」
+    ///
+    /// ## 血案（用户截图 + trace）
+    /// 截图停在**天猫落地页**（「商品正在加速赶来中」）⇒ CTA **点成功了**，
+    /// 但代码**在落地页上直接跑 G3/G4 找广告胶囊 ✕** ⇒ 找不到
+    /// ⇒ `finishAdPanel` 返回 false ⇒ 本条"结束" ⇒ **去切下一个广告**
+    /// ⇒ 现象正是「**未点 X 就切下一个**」。
+    ///
+    /// ## PC 的腿序（`_1377_ad_loop.py:2815-2975`，⛔ 按 k 轮次选腿）
+    /// ```
+    /// 每轮先无条件过：① 系统弹窗 → ② 券弹窗✕（位置闸）→ ③ 小店 H5 闸
+    ///   k=0 : 面包屑「◀快手」→ 应用内商店页「完成」→ 应用内「〈」
+    ///   k=1,2: 应用内「〈」（H5 订单页唯一出路，§1416 实测点得动的是 scr(40,85)）
+    ///   k=3  : 下滑（沉浸式直播间：下滑后才出现「退出直播间」）
+    ///   k=4  : 定位并点「退出直播间」
+    ///   k=5  : **iOS 左边缘侧滑**（兜底；§1377b 实测：沉浸式带货直播间整页无 ✕，只有它能回）
+    ///   k=6..8: **终端腿** H:HOME → 点桌面图标重进
+    /// ```
+    /// 📏 关键（PC 原话）：**"返回"是一个要反复尝试的动作**，⛔ 不是"我以为已经回来了"。
+    /// ⚠️ 本函数**只做"回"，⛔ 不管"到了没有"** —— 判"到了没有"由调用方的
+    ///   `looksLikeAdPage` 循环负责（照 PC 的 `for k in range(9)` 结构）。
+    /// - Parameter k: 第几轮（决定用哪条腿，照 PC 的轮次语义）
+    private func returnToAd(_ img: UIImage, tag: String, k: Int) {
+        // ── 每轮先过的三层闸（照 PC 2815-2888，⛔ 顺序不许改）──
+        // ① 系统弹窗（盖屏 ⇒ 底下什么都点不到）
+        if let hit = nav.detect("sys_prompt", img: img) {
+            log("   §\(tag) 返回闸①：系统弹窗 ⇒ 点消极项（照 PC `dismiss_sys_prompt`）")
+            nav.tapPoint(Double(hit.center.x), Double(hit.center.y))
+            return
+        }
+        // ② 券弹窗 ✕（**位置闸**，PC §1724 已删语义闸）
+        if nav.detect("coupon_x", img: img) != nil {
+            log("   §\(tag) 返回闸②：券弹窗 ✕ ⇒ 点它（照 PC `click_coupon_x`）")
+            _ = nav.tap("coupon_x", img: img, atomic: true)
+            return
+        }
+        // ③ 小店 H5（收银台/订单页）—— PC `handle_shop_h5` 自带状态机；
+        //    手机端用已有的 `shop_h5_x` 元素等价处理（⛔ 找不到就不动）
+        if nav.detect("shop_h5_x", img: img) != nil {
+            log("   §\(tag) 返回闸③：快手小店 H5 ⇒ 点它的关/取消（照 PC `handle_shop_h5`）")
+            _ = nav.tap("shop_h5_x", img: img, atomic: true)
+            return
+        }
+
+        // ── 按轮次选腿（照 PC 2893-2975）──
+        switch k {
+        case 0:
+            // 面包屑「◀快手」（**OCR 定位**，⛔ 不是写死坐标）
+            if nav.detect("breadcrumb", img: img) != nil {
+                log("   §\(tag) 返回腿 k=0：面包屑「◀快手」⇒ 点它（照 PC `click_breadcrumb`）")
+                _ = nav.tap("breadcrumb", img: img, atomic: true)
+                return
+            }
+            // 应用内商店页左上「完成」
+            if nav.detect("appstore_done", img: img) != nil {
+                log("   §\(tag) 返回腿 k=0：应用内商店页「完成」⇒ 点它")
+                _ = nav.tap("appstore_done", img: img, atomic: true)
+                return
+            }
+            log("   §\(tag) 返回腿 k=0：应用内「〈」⇒ 点它（照 PC `click_page_back`）")
+            _ = nav.tap("back_arrow", img: img, atomic: true)
+        case 1, 2:
+            // 应用内 WebView 左上「〈」—— §1416 实测：H5 订单页唯一出路
+            log("   §\(tag) 返回腿 k=\(k)：应用内「〈」（H5 唯一出路，§1416）")
+            _ = nav.tap("back_arrow", img: img, atomic: true)
+        case 3:
+            // 下滑（沉浸式直播间：下滑后页面才出现「退出直播间」）
+            log("   §\(tag) 返回腿 k=3：★下滑（沉浸式直播间先下滑才出「退出直播间」）")
+            let cmd = BLEController.swipe(x1: baseW / 2, y1: baseH * 0.30,
+                                          x2: baseW / 2, y2: baseH * 0.70,
+                                          speed: .fast, baseW: baseW, baseH: baseH, yFix: yFix)
+            ble.send(cmd)
+        case 4:
+            // 定位并点「退出直播间」
+            if nav.detect("exit_live", img: img) != nil {
+                log("   §\(tag) 返回腿 k=4：点「退出直播间」（照 PC `click_words(BOX_EXITLIVE)`）")
+                _ = nav.tap("exit_live", img: img, atomic: true)
+            } else {
+                log("   §\(tag) 返回腿 k=4：没找到「退出直播间」⇒ 不放枪（铁律①）")
+            }
+        case 5:
+            // ⭐ **iOS 左边缘侧滑**（兜底；§1377b：沉浸式带货直播间整页无任何 ✕，只有它能返回）
+            log("   §\(tag) 返回腿 k=5：★iOS 左边缘侧滑（中部 3 发 + 上部/H5 3 发，照 PC §1720）")
+            for _ in 0..<3 {
+                if isCancelled() { return }
+                _ = nav.backEdge()
+                sleep(1.2)
+            }
+        default:
+            // ── 终端腿（k>=6）：H:HOME → 点桌面图标重进（照 PC §1633）──
+            log("   §\(tag) 返回腿 k=\(k)：★终端腿 = 回主屏 + 点桌面图标重进（照 PC §1633）")
+            let ok = Navigator.switchToApp(named: "kslite", rec: rec, ble: ble,
+                                           frame: { [weak self] in self?.grab() },
+                                           baseW: baseW, baseH: baseH, yFix: yFix,
+                                           log: { [weak self] s in self?.log(s) })
+            if !ok {
+                log("   §\(tag) 终端腿：桌面没找到「kslite」图标 ⇒ 不放枪（先找到再点）")
+            }
+        }
     }
 
     /// ⭐ 转化：点落地页里的「安装/获取」—— 移植 PC `click_install`（`_1377_ad_loop.py:8738`）。
