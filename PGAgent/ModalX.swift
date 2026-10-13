@@ -78,95 +78,30 @@ enum ModalX {
         ctx.draw(cg, in: CGRect(x: -cropPx.minX, y: -(CGFloat(cg.height) - cropPx.maxY),
                                 width: CGFloat(cg.width), height: CGFloat(cg.height)))
         // ⚠️ CGContext 原点在**左下** ⇒ 缓冲第 0 行是 ROI 的底行 ⇒ 读时翻回来
-        var w = 0, h = 0
-        // ⭐⭐⭐⭐⭐ §2705 **外接框/填充率只算「最大连通分量」**，⛔ 不算整个 ROI
-        //
-        // ## 真根因（真机帧像素实测，两台独立取证）
-        // 弹窗盖屏时 PC 判据**本该命中**却返回 nil。同一帧上量出来：
-        // ```
-        //   ✕ 本体窗口内        : n=416  28×23  fill=0.646   ⇒ 过闸 ✅
-        //   整个 boxModalX 内    : n=510  86×168 fill=0.035   ⇒ ⛔ 被两个闸同时拒
-        // ```
-        // ⇒ 根因：**外接框与填充率是按 ROI 里"所有"命中像素算的**。
-        //   而弹窗的**圆角与深色遮罩渐变**也有像素落进暖灰区（[118,142]）
-        //   ⇒ 与 ✕ 的命中集**合并**成一个 86×168 的大外接框
-        //   ⇒ 尺寸闸（≤42）与填充率闸（≥0.45）**同时**把它判成"细而散" ⇒ nil。
-        //
-        // ## 为什么这正是任务中心那个弹窗（用户口径）
-        // > 「**任务中心有弹窗，弹窗一般出现在任务中心 主页和直播间。**」
-        // 真机 trace 逐字：`§adbox ⚠️ 点了任务但没进广告页 ⇒ 重试`（连 3 轮 ⇒ 收手），
-        // 而取证帧 `ev_233427_01.jpg` 上**正是那个弹窗**（「限时邀1位好友立得现金」）
-        // 盖住了任务行 ⇒ 点击全落在弹窗上。
-        //
-        // ## ✅ 修法（⛔ 阈值一个字不改）
-        // 先求**最大 4-连通分量**，只对那个分量算 w/h/fill 再过**同样的**闸。
-        // 真机两帧验证：
-        // ```
-        //   新算法 ⇒ 28×28 fill=0.631 / 29×29 fill=0.543  ⇒ ✅ 命中（质心 (409,260)）
-        //   其余散点分量 ⇒ 最大只有 5 个点 ⇒ 仍被 minN=250 挡住 ✅（⛔ 不放松）
-        // ```
-        var comp = [UInt8](repeating: 0, count: rw * rh)
-        var bestN = 0, bestSx = 0, bestSy = 0
-        var bestMinX = 0, bestMaxX = 0, bestMinY = 0, bestMaxY = 0
-        var queue = [Int](repeating: 0, count: rw * rh)
+
+        var sx = 0, sy = 0, n = 0
+        var minX = Int.max, maxX = Int.min, minY = Int.max, maxY = Int.min
         for j in 0..<rh {
-            let srcRow = (rh - 1 - j) * rw * 4
+            let srcRow = (rh - 1 - j) * rw * 4      // 翻 y
             for i in 0..<rw {
-                if comp[j * rw + i] != 0 { continue }
                 let p = srcRow + i * 4
                 let r = Int(buf[p]), g = Int(buf[p + 1]), b = Int(buf[p + 2])
                 guard r >= thrLo, r <= thrHi,
                       g >= thrLo, g <= thrHi,
                       b >= thrLo, b <= thrHi,
-                      (max(r, max(g, b)) - min(r, min(g, b))) <= spread else {
-                    comp[j * rw + i] = 2      // 标记"已看不命中"，⛔ 不再重复判
-                    continue
-                }
-                // 4-连通洪泛（显式队列，⛔ 不递归 —— ROI 可能很大）
-                var head = 0, tail = 0
-                queue[tail] = j * rw + i; tail += 1
-                comp[j * rw + i] = 1
-                var cn = 0, csx = 0, csy = 0
-                var cminX = Int.max, cmaxX = Int.min, cminY = Int.max, cmaxY = Int.min
-                while head < tail {
-                    let cur = queue[head]; head += 1
-                    let cy = cur / rw, cx = cur % rw
-                    cn += 1; csx += cx; csy += cy
-                    if cx < cminX { cminX = cx }; if cx > cmaxX { cmaxX = cx }
-                    if cy < cminY { cminY = cy }; if cy > cmaxY { cmaxY = cy }
-                    for (dy, dx) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                        let ny = cy + dy, nx = cx + dx
-                        guard ny >= 0, ny < rh, nx >= 0, nx < rw else { continue }
-                        let ni = ny * rw + nx
-                        if comp[ni] != 0 { continue }
-                        let qp = (rh - 1 - ny) * rw * 4 + nx * 4
-                        let qr = Int(buf[qp]), qg = Int(buf[qp + 1]), qb = Int(buf[qp + 2])
-                        guard qr >= thrLo, qr <= thrHi,
-                              qg >= thrLo, qg <= thrHi,
-                              qb >= thrLo, qb <= thrHi,
-                              (max(qr, max(qg, qb)) - min(qr, min(qg, qb))) <= spread else {
-                            comp[ni] = 2
-                            continue
-                        }
-                        comp[ni] = 1
-                        queue[tail] = ni; tail += 1
-                    }
-                }
-                if cn > bestN {
-                    bestN = cn; bestSx = csx; bestSy = csy
-                    bestMinX = cminX; bestMaxX = cmaxX; bestMinY = cminY; bestMaxY = cmaxY
-                }
+                      (max(r, max(g, b)) - min(r, min(g, b))) <= spread else { continue }
+                n += 1; sx += i; sy += j
+                if i < minX { minX = i }; if i > maxX { maxX = i }
+                if j < minY { minY = j }; if j > maxY { maxY = j }
             }
         }
-        guard bestN > 0 else { return nil }
-        // ⭐ 对**最大分量**过与 PC 逐字相同的闸
-        guard bestN >= minN else { return nil }
-        w = bestMaxX - bestMinX + 1
-        h = bestMaxY - bestMinY + 1
+        guard n >= minN else { return nil }
+        let w = maxX - minX + 1, h = maxY - minY + 1
+        // ⭐ 紧凑度闸（PC：18 ≤ w,h ≤ 42 且 填充率 ≥ 0.45）
         guard w >= sideLo, h >= sideLo, w <= sideHi, h <= sideHi else { return nil }
-        guard Double(bestN) / Double(w * h) >= fill else { return nil }
-        return CGPoint(x: CGFloat(x0) + CGFloat(bestSx) / CGFloat(bestN),
-                       y: CGFloat(y0) + CGFloat(bestSy) / CGFloat(bestN))
+        guard Double(n) / Double(w * h) >= fill else { return nil }
+        return CGPoint(x: CGFloat(x0) + CGFloat(sx) / CGFloat(n),
+                       y: CGFloat(y0) + CGFloat(sy) / CGFloat(n))
     }
 
     /// ⭐ 券弹窗的 ✕（PC `find_coupon_x` 用的 ROI = `BOX_COUPON_X` 比例 (0.42,0.64,0.58,0.78)）
