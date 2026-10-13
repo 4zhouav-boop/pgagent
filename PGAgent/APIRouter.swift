@@ -204,7 +204,15 @@ final class APIRouter {
 
         case ("POST", "/reload"):
             let ok = cfgStore.reload()
+            // ⭐⭐⭐⭐⭐ §2645 **回带配置自检结果**（照 `Runner` 的「帧龄自检」范式，§2631）
+            //
+            // ⛔ 为什么要单独回一个字段（而不是只看 `ok`）：
+            //   自检不过时 `reload()` **故意不覆盖 `cfg`**（保留上一份有效配置继续跑）
+            //   ⇒ 拿 `cfg` 反查**看不到错误** ⇒ 必须由这里把**刚推上来的那个文件**的问题带回来。
+            // ✅ **加字段是零破坏性的**：老调用方只读 `ok` / `error` 时行为不变。
+            // ⚠️ 语义：`configErrors` 空 = **这次加载通过**；非空 = **这次被拒绝**（`ok=false`）。
             return .json(["ok": ok, "error": cfgStore.lastError,
+                          "configErrors": cfgStore.lastConfigErrors,
                           "elements": cfgStore.cfg?.elements.count ?? 0,
                           "pages": cfgStore.cfg?.pages.count ?? 0],
                          status: ok ? 200 : 500)

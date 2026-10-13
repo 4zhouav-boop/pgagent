@@ -17,8 +17,8 @@ targets:
         CFBundleDisplayName: PGAgent
         # ⭐ 版本号**唯一来源**（界面标题从 Info.plist 读，见 AppVersion）
         #    发版时只改这里 ⇒ 界面/接口/包 三处自动一致（§2239 的教训）
-        CFBundleShortVersionString: "0.10.77"
-        CFBundleVersion: "65"
+        CFBundleShortVersionString: "0.10.78"
+        CFBundleVersion: "66"
         UILaunchScreen: {}
         # ⭐ 关键 1：让 App 的 Documents 暴露给「文件」App
         #   ⇒ 快捷指令「存储到文件」才能把截图写进来（这是「眼」的命门）
@@ -120,7 +120,28 @@ targets:
           RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: run.pgagent.PGAgent.PGShot
+        # ⛔⛔⛔ §2679 **扩展的 bundle id 必须是主 App 的 bundle id + 后缀**
+        #
+        # ## 血案（用户令，逐字）
+        # > 「**软件也被你搞坏了 录屏完全失效了**」
+        #
+        # ## 根因
+        # ```
+        #   主 App :  run.pgagent.PGAgent.8W9ZSMW4UW     ← 带 8W9ZSMW4UW 后缀
+        #   扩展   :  run.pgagent.PGAgent.PGShot         ← ⛔ 原来少了 8W9ZSMW4UW
+        # ```
+        # iOS **硬性要求**：扩展的 bundle id 必须**以主 App 的 bundle id 为前缀**。
+        # ⇒ 前缀不匹配 ⇒ 描述文件（`8W9ZSMW4UW.run.pgagent.PGAgent.8W9ZSMW4UW`）
+        #   **不覆盖这个扩展** ⇒ 签名时报
+        #   `IXErrorDomain Code=8 … does not match required prefix of
+        #    run.pgagent.PGAgent.8W9ZSMW4UW`
+        # ⇒ 当时为了绕开这个报错，**把扩展整个剥掉**（做成 `-noplug` 包）⇒
+        #   **录屏彻底失效**（`/rec/start` → 404、`frames=0`、App 变成瞎子）。
+        #
+        # ## ✅ 正解：把扩展 id 改成主 App id + `.PGShot`
+        # ⇒ 前缀匹配 ⇒ 描述文件覆盖它 ⇒ 可以正常签名 ⇒ **扩展保住**。
+        # ⚠️ 与 `PGAgent` 的 `PRODUCT_BUNDLE_IDENTIFIER`（第 85 行）必须保持这个关系。
+        PRODUCT_BUNDLE_IDENTIFIER: run.pgagent.PGAgent.8W9ZSMW4UW.PGShot
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_VERSION: "5.0"
         CODE_SIGN_STYLE: Manual

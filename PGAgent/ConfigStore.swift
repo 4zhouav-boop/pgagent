@@ -14,6 +14,13 @@ final class ConfigStore: ObservableObject {
     @Published private(set) var loadedAt: Date?
     @Published private(set) var lastError = ""
 
+    /// ⭐⭐⭐⭐⭐ §2645 **上一次 `reload()` 的配置自检结果**（空 = 通过）
+    ///
+    /// 由 `POST /reload` 的响应字段 `configErrors` 返回（**加字段是零破坏性的**）。
+    /// ⛔ 语义：这里报的是**刚推上来的那个文件**的问题，⛔ 不是"当前生效配置"的问题——
+    ///   自检不过时 `cfg` **保持上一份有效配置不动**，所以拿 `cfg` 反查会看不到错误。
+    @Published private(set) var lastConfigErrors: [String] = []
+
     static func configDir() -> URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         return docs.appendingPathComponent("pgconfig", isDirectory: true)
@@ -38,25 +45,102 @@ final class ConfigStore: ObservableObject {
     }
 
     /// 读配置（⛔ 失败不抛，只记 lastError）
+    ///
+    /// ⭐⭐⭐⭐⭐ §2645 **自检不过 ⇒ 拒绝加载**（`validate()`）。
+    ///
+    /// ## 为什么必须"拒绝"而不是"警告后照用"（真机红线）
+    /// 配置化之后，`forbid_keys`（禁点词 = **支付红线**）也在文件里了。
+    /// 若只是打个警告就用新表 ⇒ **一个手滑就能把"确认支付"从黑名单里删掉**
+    /// ⇒ App 会去帮用户点支付（PC §1449 那个血案的原样重演）。
+    /// ⇒ 判据是**加法校验**：配置只能**加**禁点词，⛔ 不能减（见 `validate()`）。
+    /// ⛔ 因此这里**不覆盖 `cfg`** —— 保留**上一份已验证过**的配置继续跑。
+    ///
+    /// 📏 自检范式照 `Runner.swift` 的「帧龄自检」（§2631 已证明有效）：
+    ///   把"配错会出人命/会全盘失效"的项在**加载点**拦下来，并**说清改哪里**。
     @discardableResult
     func reload() -> Bool {
         Self.ensureDirs()
         let p = Self.configPath()
         guard FileManager.default.fileExists(atPath: p.path) else {
             lastError = "配置不存在: \(p.path)"
+            lastConfigErrors = ["配置不存在: \(p.path)"]
             return false
         }
         do {
             let data = try Data(contentsOf: p)
             let c = try JSONDecoder().decode(PGConfig.self, from: data)
+            // ⭐ §2645 自检（空 = 通过；⛔ 非空 ⇒ 拒绝加载，cfg 保持上一份）
+            let errs = Self.validate(c)
+            guard errs.isEmpty else {
+                lastConfigErrors = errs
+                lastError = "配置自检不过（已**拒绝加载**，仍用上一份有效配置）: "
+                    + errs.joined(separator: " ｜ ")
+                // ⛔ 注意：**不动 `cfg`**（这就是"拒绝加载"）
+                return false
+            }
             cfg = c
             loadedAt = Date()
             lastError = ""
+            lastConfigErrors = []
             return true
         } catch {
             lastError = "解析失败: \(error)"
+            lastConfigErrors = ["解析失败: \(error)"]
             return false
         }
+    }
+
+    // MARK: - ⭐⭐⭐⭐⭐ §2645 配置自检（照 `Runner` 的「帧龄自检」范式，§2631）
+
+    /// ⛔ **禁点词（支付红线）的硬编码基线** —— 配置化之后**只许加，⛔ 不许减**。
+    ///
+    /// ⚠️ 这张表必须与 `FeatureEngine.forbidKeys` **逐字一致**
+    ///   （`validate()` 与执行点读的是**同一张表**，⛔ 不许各写一份）。
+    ///   来源：PC `FORBID_KEYS`（`_1377_ad_loop.py:448`）逐字移植 + §1449 血案。
+    static let forbidKeysBaseline: [String] = FeatureEngine.forbidKeys
+
+    /// ⭐⭐⭐⭐⭐ §2645 **配置自检** —— 返回错误清单（空 = 通过）。
+    ///
+    /// ## 只查"配错会出人命"的那一项（⛔ 不扩大成通用 schema 校验）
+    /// `forbid_keys` 是**用户红线**（「可以浏览，绝不做支付/购买」）。
+    /// 配置化之后必须防"配错导致帮用户买东西" ⇒ 做**加法校验**：
+    /// ```
+    /// ① 配置里的词 **少于** 基线        ⇒ ⛔ 拒绝
+    /// ② 配置里**删掉了基线的任何一条**   ⇒ ⛔ 拒绝（逐条点名）
+    /// ③ 配置里**新增**的词              ⇒ ✅ 允许（只加不减是安全方向）
+    /// ```
+    /// ⛔ 不许静默接受 —— 错误串会被 `POST /reload` 的 `configErrors` 字段带回。
+    ///
+    /// ## 逐字证据（PC `_1377_ad_loop.py:448` + §1449）
+    /// > 货速发那条广告底部的「**立即秒杀**」是红色药丸，`pink_bands` 按**形状**直接命中并点下去
+    /// > ⇒ 打开了快手小店收银台「待支付 ¥9.9」，屏幕上出现「确认支付 / 继续支付」，
+    /// >   用户看见以为在买东西。
+    /// > 用户口径：**可以浏览，绝不做支付/购买**。
+    static func validate(_ c: PGConfig) -> [String] {
+        var errs: [String] = []
+        // ⚠️ 未配置 `forbid_keys` ⇒ 用硬编码基线 ⇒ **天然安全**，⛔ 不报错（向后兼容）
+        if let configured = c.settings?.forbid_keys {
+            let base = forbidKeysBaseline
+            // ② 删掉了基线的任何一条 ⇒ 逐条点名（这是最危险的一种配错）
+            let missing = base.filter { !configured.contains($0) }
+            if !missing.isEmpty {
+                errs.append("`forbid_keys` **删掉了支付红线里的词** "
+                    + missing.map { "「\($0)」" }.joined()
+                    + " ⇒ ⛔ 拒绝加载（禁点词只许加、⛔ 不许减）")
+            }
+            // ① 数量少于基线 ⇒ 也拒绝（兜住"用同义词换掉基线"那种绕过）
+            if configured.count < base.count {
+                errs.append("`forbid_keys` 只有 \(configured.count) 条，"
+                    + "少于硬编码基线 \(base.count) 条 ⇒ ⛔ 拒绝加载"
+                    + "（只允许在基线之上**追加**，⛔ 不允许缩减）")
+            }
+            // ④ 空串会 `t.contains("")` **恒真** ⇒ 所有点击全被拒 ⇒ App 一步都走不动（也是配错）
+            if configured.contains(where: { $0.isEmpty }) {
+                errs.append("`forbid_keys` 里有空串 ⇒ `contains(\"\")` 恒真 ⇒ "
+                    + "**任何点击都会被拒** ⇒ ⛔ 拒绝加载")
+            }
+        }
+        return errs
     }
 
     // MARK: - ⭐⭐⭐⭐⭐ §2269 保存（控制台改设置用）
@@ -266,6 +350,89 @@ struct PGConfig: Codable {
 
         /// ⭐ 各功能的**默认分钟数**（PC 控制台 `FEATURE_OPTS` 的第三列）
         var feat_min: [String: Double]?
+
+        // ══════════════════════════════════════════════════════════════
+        // ⭐⭐⭐⭐⭐ §2645 **本次新增的 6 组「硬编码 → 配置」字段**
+        //
+        // 用户令（逐字，这就是本组字段的由来）：
+        // > 「**你直接在软件留可以更改的容量不行么，每次更改都要签名。太浪费时间了**」
+        // > 「**你不是留了通道么，直接用通道调试 最快**」
+        //
+        // ⇒ 推送方式：`POST /write?name=pgconfig/config.json` + `POST /reload`
+        //   ⇒ **秒级生效，⛔ 不需要重编译/签名/安装**（一次编译安装 ≈ 3 分钟）。
+        //
+        // ⛔⛔ **兼容性硬要求**：下面每一个都是 **Optional**；
+        //   老 `config.json` **一个老键都不用改**，新键可以**先不写**
+        //   ⇒ 缺省路径与改动前的硬编码**逐字一致**（每处读取都带 `?? 默认值`）。
+        // ══════════════════════════════════════════════════════════════
+
+        /// ⭐⭐⭐⭐⭐ **广告顶栏 ROI** `[x, y, w, h]`（默认 `[0, 62, 451, 78]`）。
+        ///
+        /// ## 为什么必须可配（真机实测，本轮）
+        /// 硬编码是 `CGRect(x: 0, y: 62, width: bw, height: 78)`（`bw` = `base_w` = 451）。
+        /// 而真机上**胶囊文字实际在 y=85~105** ⇒ 用整块 ROI 做 OCR 时，
+        /// 上方**大标题**会把胶囊挤掉 ⇒ 读出的是「地政费用/方案查询告…」
+        /// 而**不是**「已成功领取982金币」⇒ `looksLikeAdPage`/倒计时判据**全错**。
+        /// ⇒ 配置化后可以直接把 ROI 收到 `[0,80,451,110]` 试，⛔ 不用重编译。
+        ///
+        /// ⚠️ 唯一读取点 = `FeatureEngine.adTopROI(...)`（⛔ 不许各写一份）。
+        var ad_top_roi: [Double]?
+
+        /// ⭐⭐⭐ **CTA 文案兜底词表**（默认 = `FeatureEngine.ctaKeys` 那 12 条）。
+        ///
+        /// 真机实测：底部按钮实际是「**在线咨询**」(OCR conf 0.99)
+        /// ⇒ 原来那 12 条**无一命中** ⇒ 文案兜底腿全废。
+        ///
+        /// ⚠️ 唯一读取点 = `FeatureEngine.ctaKeysCfg`（⛔ 不许各写一份）。
+        var cta_keys: [String]?
+
+        /// ⛔⛔⛔ **禁点词（支付红线）** —— 默认 = `FeatureEngine.forbidKeys` 那 25 条。
+        ///
+        /// ⚠️ 本字段**受自检保护**：只许在基线之上**追加**，⛔ **不许删减**
+        ///    （见 `ConfigStore.validate()`；配错 ⇒ `/reload` **拒绝加载**并报 `configErrors`）。
+        /// ⚠️ 唯一读取点 = `FeatureEngine.forbidKeysCfg`（⛔ 不许各写一份）。
+        var forbid_keys: [String]?
+
+        /// ⭐⭐ **CTA 药丸的颜色判据**（默认 `r_min=200, g_max=120, b_max=150` = 粉色）。
+        ///
+        /// 真机实测：底部按钮是 **RGB(240,72,0)**（橙色）—— 恰好也满足粉色判据，
+        /// 所以形状腿（`widestPinkBand`）**其实能命中**。仍配置化以便换版式时不必重编译。
+        /// 键名：`r_min` / `g_max` / `b_max`（三个**各自**可选 ⇒ 只调一个也安全）。
+        ///
+        /// ⚠️ 唯一读取点 = `FeatureEngine.widestPinkBand(..., color:)`。
+        var cta_color: CtaColor?
+
+        /// ⭐⭐⭐⭐ **倒计时「还在走」的正则表**（默认逐字照抄现有判据，见
+        ///   `FeatureEngine.runningPatternsDefault`）。
+        ///
+        /// ⚠️ JSON 里写 `\s` 要转义成 `\\s`（与 Swift 源码里 `"\\s"` 同一个意思）。
+        /// ⚠️ 唯一读取点 = `FeatureEngine.adCountdownRunning(..., runningPatterns:)`。
+        var countdown_running_regex: [String]?
+
+        /// ⭐⭐⭐ **倒计时「还剩几秒」的正则表**（默认逐字照抄现有 4 条，见
+        ///   `FeatureEngine.secondsPatternsDefault` / `secondsFallbackDefault`）。
+        ///
+        /// ⚠️ **必须带捕获组 1**（`([0-9]+)…`）—— 读取点取的就是第 1 个捕获组。
+        /// ⚠️ 唯一读取点 = `FeatureEngine.adCountdownSeconds(..., secondsPatterns:)`。
+        var countdown_seconds_regex: [String]?
+
+        /// ⭐⭐⭐ **回广告页的腿序轮数**（默认 **9**，照 PC `for k in range(9)`）。
+        ///
+        /// ⛔ 注意：**腿的顺序本身没有配置化**（那需要 mini-language，风险大）—— 只配置化数字。
+        var return_to_ad_rounds: Int?
+
+        /// ⭐⭐⭐ **回广告页每轮之间的等待（秒）**（默认 **3.2**，照 PC `wait(3.2)`）。
+        var return_to_ad_wait: Double?
+
+        /// ⭐⭐ **CTA 药丸的颜色判据**（`settings.cta_color` 的子对象）。
+        struct CtaColor: Codable {
+            /// 红色**下界**（默认 **200**）—— 判据是 `r > r_min`
+            var r_min: Double?
+            /// 绿色**上界**（默认 **120**）—— 判据是 `g < g_max`
+            var g_max: Double?
+            /// 蓝色**上界**（默认 **150**）—— 判据是 `b < b_max`
+            var b_max: Double?
+        }
 
         /// 转化关键词数组
         var conversionKeywords: [String] {

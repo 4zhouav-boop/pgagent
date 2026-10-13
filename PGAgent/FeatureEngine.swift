@@ -80,6 +80,83 @@ final class FeatureEngine {
     ///    ⛔ 不硬编码两处不同的数（否则又是一处"改了 A 忘了 B"）。
     private var maxFrameAgeCfg: Double { s?.loop_frame_max_age ?? 7.0 }
 
+    // ══════════════════════════════════════════════════════════════════
+    // ⭐⭐⭐⭐⭐ §2645 **本次新增的 6 组「硬编码 → 配置」读取点**
+    //
+    // 用户令（逐字，这就是本组读取点的由来）：
+    // > 「**你直接在软件留可以更改的容量不行么，每次更改都要签名。太浪费时间了**」
+    // > 「**你不是留了通道么，直接用通道调试 最快**」
+    //
+    // ⇒ 推送 `POST /write?name=pgconfig/config.json` + `POST /reload` = **秒级生效**，
+    //   ⛔ 不再需要「改代码 → 编译 → 签名 → 安装」（一次 ≈ 3 分钟）。
+    //
+    // ⛔⛔ **兼容性硬要求**：每个读取点**都必须**带 `?? 默认值`，且默认值与
+    //   改动前的硬编码**逐字一致** ⇒ 老配置（新键全不写）走**完全一样**的行为。
+    // ══════════════════════════════════════════════════════════════════
+
+    /// ⭐⭐⭐⭐⭐ §2645 **广告顶栏 ROI 的默认值** `[x, y, w, h]`。
+    ///
+    /// ⛔ 逐字等于改动前两处共用的硬编码 `CGRect(x: 0, y: 62, width: bw, height: 78)`
+    ///   （`bw` 默认 = `base_w` = 451 ⇒ 即 `[0, 62, 451, 78]`）。
+    static let adTopRoiDefault: [Double] = [0, 62, 451, 78]
+
+    /// ⭐⭐⭐⭐⭐ §2645 **广告顶栏 ROI 的「唯一」读取函数**（⛔ 不许各写一份）
+    ///
+    /// 下面**所有**要读广告顶栏的地方（`looksLikeAdPage` / `adTopText` ⇒ 进而
+    /// `adCountdownRunning` / `adCountdownSeconds` / `finishAdPanel`）**一律**走这里 ——
+    /// 这正是「§2265 改了一处忘了另一处」那类血案的**结构性**防法。
+    ///
+    /// - Parameter cfgRoi: `settings.ad_top_roi`（⛔ nil = 用现在的硬编码默认值）
+    /// - Returns: **基准坐标**（451×977）下的 ROI；
+    ///   配置缺失 / 不足 4 个数 / `w`或`h` ≤ 0（会被下游 OCR 拒绝）⇒ 一律回默认值
+    static func adTopROI(_ cfgRoi: [Double]?, bw: Double, bh: Double) -> CGRect {
+        let d = adTopRoiDefault
+        guard let r = cfgRoi, r.count >= 4, r[2] > 0, r[3] > 0 else {
+            // ⛔ 逐字等于改动前的硬编码：`CGRect(x: 0, y: 62, width: bw, height: 78)`
+            // ⚠️ 宽度用 `bw`（⛔ 不是 `d[2]`）—— 改动前写的就是 `width: bw`，
+            //    所以 `base_w` 被配成非 451 时也**逐字一致**。
+            return CGRect(x: d[0], y: d[1], width: bw, height: d[3])
+        }
+        return CGRect(x: r[0], y: r[1], width: r[2], height: r[3])
+    }
+
+    /// ⭐⭐⭐⭐⭐ §2645 **广告页停留秒** —— 优先级的**唯一**读取点（⛔ 不许各写一份）
+    ///
+    /// ## ⛔⛔ 为什么优先级必须这么排（向后兼容的命门）
+    /// ```
+    /// ① `settings.ad_dwell`          —— 有 ⇒ **逐字用现在的值**（config.json 里 = 30）
+    /// ② `settings.ad_stay_min/max`   —— ⭐ 没有 `ad_dwell` 时才用区间随机（照荔枝 40/60）
+    /// ③ 30                            —— 都没有 ⇒ 改动前的硬编码默认值
+    /// ```
+    /// ⚠️ `config.json` 里 `ad_dwell = 30` **一直存在** ⇒ 真机行为**一个字都不变**；
+    ///   而 `ad_stay_min/ad_stay_max`（40/60）从此**真的被用上**了
+    ///   （改动前它们在 `FeatureEngine` 里**完全没被读过** —— 只在 `Runner` 里被读）。
+    /// 📏 用户口径：把停留调到几秒就能**验证**「等满 ⇒ CTA 消失」这个判断，⛔ 不用重编译。
+    private var adDwellSeconds: Double {
+        if let d = s?.ad_dwell { return d }
+        if let lo = s?.ad_stay_min, let hi = s?.ad_stay_max {
+            // ⚠️ `min...max` 里 upper < lower 会**崩**（Swift 运行时陷阱）⇒ 先排序
+            return Double.random(in: min(lo, hi)...max(lo, hi))
+        }
+        if let lo = s?.ad_stay_min { return lo }
+        return 30
+    }
+
+    /// ⭐⭐⭐ §2645 **CTA 文案兜底词表** —— 配置优先，⛔ 缺省 = 现在的硬编码 12 条
+    private var ctaKeysCfg: [String] { s?.cta_keys ?? Self.ctaKeys }
+
+    /// ⛔⛔⛔ §2645 **禁点词（支付红线）** —— 配置优先，⛔ 缺省 = 现在的硬编码 25 条
+    ///
+    /// ⚠️ 配置化**受** `ConfigStore.validate()` 的**加法校验**保护：
+    ///   只许在基线之上追加，⛔ 删减任何一条 ⇒ `/reload` **拒绝加载**并报 `configErrors`。
+    private var forbidKeysCfg: [String] { s?.forbid_keys ?? Self.forbidKeys }
+
+    /// ⭐⭐⭐⭐⭐ §2645 **回广告页的腿序轮数** —— 默认 **9**（照 PC `for k in range(9)`）
+    private var returnToAdRounds: Int { max(1, s?.return_to_ad_rounds ?? 9) }
+
+    /// ⭐⭐⭐ §2645 **回广告页每轮之间的等待（秒）** —— 默认 **3.2**（照 PC `wait(3.2)`）
+    private var returnToAdWait: Double { s?.return_to_ad_wait ?? 3.2 }
+
     // MARK: - ⭐ 对外入口：跑**一轮完整闭环**
 
     /// 跑一轮：按 `order` 依次跑「勾到的」功能。
@@ -137,7 +214,19 @@ final class FeatureEngine {
     /// ⭐ 照 PC 主循环：回中心 → 找广告任务 → 点进去 → **广告页待够时间** → 回中心。
     private func runAdbox() -> Bool {
         let count = max(1, s?.ad_count ?? 6)          // PC 控制台「条数」默认 6
-        let dwell = s?.ad_dwell ?? 30                  // PC 控制台「广告停留秒」默认 30
+        // ⭐⭐⭐⭐⭐ §2645 **广告页停留时长改走 `adDwellSeconds`（唯一读取点）**
+        //
+        // ## 改动前后的**逐字等价**证明
+        // 改动前：`let dwell = s?.ad_dwell ?? 30`
+        // 改动后：`s?.ad_dwell` **有值** ⇒ `adDwellSeconds` 第一分支 `return d` ⇒ **一模一样**；
+        //        `s?.ad_dwell` 为 nil ⇒ 落到第三分支 `return 30` ⇒ **仍然是 30**。
+        // ⇒ 老配置（含现在这份 `ad_dwell = 30`）**行为一个字都不变**。
+        //
+        // ## 为什么这件事**价值最大**（用户令 + 真机 trace 铁证）
+        // trace 证明「**等满 51s 才去点 CTA**」⇒ 广告已结束 ⇒ **CTA 消失** ⇒ 转化恒失败。
+        // 配置化后可以直接把停留调到**几秒**来验证这个判断，⛔ 不用重编译（省 3 分钟/次）。
+        // ⚠️ 优先级：`ad_dwell` > `ad_stay_min/max`（后者改动前在本文件里**根本没被读过**）。
+        let dwell = adDwellSeconds
         log("§adbox 条数=\(count) 广告停留=\(Int(dwell))s 入口=\(s?.entry ?? "auto")")
 
         guard ensureInCenter(tag: "adbox_boot") else {
@@ -171,7 +260,8 @@ final class FeatureEngine {
             // ④ G4：倒计时结束后**才点 ✕**收奖励 ⇒ 处理弹出的面板
             // ```
             // ⛔⛔ §2632 **② 必须在 ③ 之前**（我上一版把转化排在 G3 之后 ⇒ CTA 已消失）。
-            if Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+            if Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH,
+                                       roi: s?.ad_top_roi) {
                 // ⭐⭐⭐⭐⭐ §2641 **转化必须在最前**（照 PC `_1377_ad_loop.py:9560`）
                 // ⛔ 等 30~60s 再转化 = 本机广告只有约 25s ⇒ 等满时 **CTA 必然消失**
                 // 真机 trace：`[72s] 顶栏已成功领取` → `[90s] 没找到可点的 CTA`
@@ -183,8 +273,9 @@ final class FeatureEngine {
                         log("§adbox CTA 已点（\(how)）⇒ 等落地页")
                         sleep(3.2)
                         if let land = grab(),
-                           !Self.looksLikeAdPage(land, rec: rec, nav: nav, bw: baseW, bh: baseH) {
-                            log("§adbox ✅ 已进落地页（顶栏「\(Self.adTopText(land, rec: rec, bw: baseW, bh: baseH).prefix(18))」）⇒ 浏览")
+                           !Self.looksLikeAdPage(land, rec: rec, nav: nav, bw: baseW, bh: baseH,
+                                                 roi: s?.ad_top_roi) {
+                            log("§adbox ✅ 已进落地页（顶栏「\(Self.adTopText(land, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi).prefix(18))」）⇒ 浏览")
                             clickInstall(land, tag: "adbox_inst\(n + 1)")   // 先点安装（照 PC 顺序）
                             browseLanding(tag: "adbox_browse\(n + 1)")      // 再浏览
                         } else {
@@ -221,14 +312,15 @@ final class FeatureEngine {
                 // ```
                 // 📏 关键：**"返回"是一个要反复尝试的动作**（最多 9 次），
                 //   ⛔ 不是"我以为已经回来了"。这正是我漏掉的那一步。
-                log("§adbox ↩ 转化完 ⇒ **回广告页**（照 PC 9 轮返回腿）")
+                log("§adbox ↩ 转化完 ⇒ **回广告页**（照 PC `for k in range(9)` 返回腿，轮数可配）")
                 var backHome = false
-                for k in 0..<9 {
+                for k in 0..<returnToAdRounds {
                     if isCancelled() { break }
                     guard let imr = grab() else { break }
                     // ① ⭐⭐⭐⭐⭐ **已回广告页** ⇒ 继续走 G3/G4
                     //    ⛔⛔ **必须在"中心判据"之前**（§2644 真机血案，子智能体核对逮到）
-                    if Self.looksLikeAdPage(imr, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+                    if Self.looksLikeAdPage(imr, rec: rec, nav: nav, bw: baseW, bh: baseH,
+                                            roi: s?.ad_top_roi) {
                         log("   §adbox ✅ 已回广告页（第 \(k + 1) 次检查）⇒ 继续等倒计时")
                         cur = imr
                         break
@@ -251,9 +343,9 @@ final class FeatureEngine {
                         break
                     }
                     // ③ 还在落地页 ⇒ **主动返回**（照 PC `return_to_ad`）
-                    log("   §adbox ↩ 还在落地页（第 \(k + 1)/9 次）⇒ 执行返回")
+                    log("   §adbox ↩ 还在落地页（第 \(k + 1)/\(returnToAdRounds) 次）⇒ 执行返回")
                     returnToAd(imr, tag: "adbox_ret\(n + 1)_\(k)", k: k)
-                    sleep(3.2)
+                    sleep(returnToAdWait)
                 }
                 if backHome {
                     n += 1
@@ -273,13 +365,15 @@ final class FeatureEngine {
                 var waited = 0.0
                 let needS: Double = {
                     if let n0 = Self.adCountdownSeconds(cur, rec: rec,
-                                                        bw: baseW, bh: baseH) {
+                                                        bw: baseW, bh: baseH,
+                                                        roi: s?.ad_top_roi,
+                                                        secondsPatterns: s?.countdown_seconds_regex) {
                         return Double(n0) + 20.0
                     }
                     return 45.0          // 读不到 N ⇒ PC 的默认（`_need … else 45`）
                 }()
                 log("   §adbox G3 胶囊倒计时 N ⇒ 最多等 \(Int(needS))s（N+20 余量，照 PC）")
-                while Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH),
+                while Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex),
                       waited < needS, !isCancelled() {
                     sleep(3.0)
                     waited += 3.0
@@ -292,12 +386,12 @@ final class FeatureEngine {
                 //   「顶栏只要还有倒计时 ⇒ 倒计时没走完 ⇒ 不点 X」。
                 //   ⚠️ 这里再等一轮（预算是上面那个 `needS` 的余量），因为
                 //      G3 可能在**读不到 N** 时用了默认 45s 而广告实际更长。
-                if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH) {
+                if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex) {
                     log("   §adbox ⛔ 顶栏**还有倒计时** ⇒ **这次不点 ✕**（照 PC 到账闸）⇒ 继续等")
                     var extra = 0.0
                     // 补等预算：再来一个 N+20（照 PC 的余量思想），上限 180s 防死等
                     let extraNeed = min(180.0, needS)
-                    while Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH),
+                    while Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex),
                           extra < extraNeed, !isCancelled() {
                         sleep(3.0)
                         extra += 3.0
@@ -307,7 +401,7 @@ final class FeatureEngine {
                     }
                     log("   §adbox ✅ 到账闸放行（补等 \(Int(extra))s）⇒ 现在才点 ✕")
                 }
-                if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH) {
+                if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex) {
                     log("   §adbox ⛔⛔ 等满预算**倒计时仍未走完** ⇒ **本条不点 ✕**"
                         + "（照 PC「不硬撑」）；交给下一轮重判")
                     continue
@@ -384,7 +478,8 @@ final class FeatureEngine {
                     nav.tapPoint(Double(cta.x), Double(cta.y))
                     // 进了广告链 ⇒ 交给下一轮循环的“广告页”分支处理
                     if let i3 = grabFresh(since: ip, maxWait: maxFrameAgeCfg + 3.0),
-                       Self.looksLikeAdPage(i3, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+                       Self.looksLikeAdPage(i3, rec: rec, nav: nav, bw: baseW, bh: baseH,
+                                            roi: s?.ad_top_roi) {
                         for _ in 0..<6 {
                             if isCancelled() { break }
                             guard let im4 = grab() else { break }
@@ -423,7 +518,8 @@ final class FeatureEngine {
                 //    **读不出** ⇒ 恒 false ⇒ 日志刷「点了任务但没进广告页 ⇒ 重试」
                 //    而**人其实已经进去了**（真机 trace 那几行正是这个假阴性）。
                 if let i2 = i2,
-                   Self.looksLikeAdPage(i2, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+                   Self.looksLikeAdPage(i2, rec: rec, nav: nav, bw: baseW, bh: baseH,
+                                        roi: s?.ad_top_roi) {
                     // ⛔⛔ **必须先等倒计时结束，才许点 ✕**（用户令 + PC G3）
                     // > 「**倒计时是广告没结束 你没结束去点 不是傻逼。广告结束了你不点了。**」
                     // ⚠️ 而且**不能盲等**（§2278）：边等边看顶栏，广告一结束就立刻去点。
@@ -487,8 +583,9 @@ final class FeatureEngine {
                             log("§adbox CTA 已点（\(how)）⇒ 等落地页")
                             sleep(3.2)
                             if let land = grab(),
-                               !Self.looksLikeAdPage(land, rec: rec, nav: nav, bw: baseW, bh: baseH) {
-                                log("§adbox ✅ 已进落地页（顶栏「\(Self.adTopText(land, rec: rec, bw: baseW, bh: baseH).prefix(18))」）⇒ 浏览")
+                               !Self.looksLikeAdPage(land, rec: rec, nav: nav, bw: baseW, bh: baseH,
+                                                 roi: s?.ad_top_roi) {
+                                log("§adbox ✅ 已进落地页（顶栏「\(Self.adTopText(land, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi).prefix(18))」）⇒ 浏览")
                                 clickInstall(land, tag: "adbox_inst\(n + 1)")   // ④a 先点安装（照 PC 顺序）
                                 browseLanding(tag: "adbox_browse\(n + 1)")      // ④b 再浏览
                             } else {
@@ -516,13 +613,14 @@ final class FeatureEngine {
                     //     return_to_ad(img_r, k)            # ⛔ 否则**主动返回**
                     //     wait(3.2)
                     // ```
-                    log("§adbox ↩ 转化完 ⇒ **回广告页**（照 PC 9 轮返回腿）")
+                    log("§adbox ↩ 转化完 ⇒ **回广告页**（照 PC `for k in range(9)` 返回腿，轮数可配）")
                     var backHome = false
-                    for k in 0..<9 {
+                    for k in 0..<returnToAdRounds {
                         if isCancelled() { break }
                         guard let imr = grab() else { break }
                         // ⭐ §2644 **"已回广告页"必须排在"中心判据"之前**（血案见分支① 注释）
-                        if Self.looksLikeAdPage(imr, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+                        if Self.looksLikeAdPage(imr, rec: rec, nav: nav, bw: baseW, bh: baseH,
+                                            roi: s?.ad_top_roi) {
                             log("   §adbox ✅ 已回广告页（第 \(k + 1) 次检查）⇒ 继续等倒计时")
                             cur = imr
                             break
@@ -534,9 +632,9 @@ final class FeatureEngine {
                             backHome = true
                             break
                         }
-                        log("   §adbox ↩ 还在落地页（第 \(k + 1)/9 次）⇒ 执行返回")
+                        log("   §adbox ↩ 还在落地页（第 \(k + 1)/\(returnToAdRounds) 次）⇒ 执行返回")
                         returnToAd(imr, tag: "adbox_ret\(n + 1)_\(k)", k: k)
-                        sleep(3.2)
+                        sleep(returnToAdWait)
                     }
                     if backHome {
                         n += 1
@@ -556,13 +654,15 @@ final class FeatureEngine {
                     var waited = 0.0
                     let needS: Double = {
                         if let n0 = Self.adCountdownSeconds(cur, rec: rec,
-                                                            bw: baseW, bh: baseH) {
+                                                            bw: baseW, bh: baseH,
+                                                            roi: s?.ad_top_roi,
+                                                            secondsPatterns: s?.countdown_seconds_regex) {
                             return Double(n0) + 20.0
                         }
                         return 45.0          // 读不到 N ⇒ PC 的默认（`_need … else 45`）
                     }()
                     log("   §adbox G3 胶囊倒计时 N ⇒ 最多等 \(Int(needS))s（N+20 余量，照 PC）")
-                    while Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH),
+                    while Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex),
                           waited < needS, !isCancelled() {
                         sleep(3.0)
                         waited += 3.0
@@ -575,12 +675,12 @@ final class FeatureEngine {
                     //   「顶栏只要还有倒计时 ⇒ 倒计时没走完 ⇒ 不点 X」。
                     //   ⚠️ 这里再等一轮（预算是上面那个 `needS` 的余量），因为
                     //      G3 可能在**读不到 N** 时用了默认 45s 而广告实际更长。
-                    if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH) {
+                    if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex) {
                         log("   §adbox ⛔ 顶栏**还有倒计时** ⇒ **这次不点 ✕**（照 PC 到账闸）⇒ 继续等")
                         var extra = 0.0
                         // 补等预算：再来一个 N+20（照 PC 的余量思想），上限 180s 防死等
                         let extraNeed = min(180.0, needS)
-                        while Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH),
+                        while Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex),
                               extra < extraNeed, !isCancelled() {
                             sleep(3.0)
                             extra += 3.0
@@ -590,7 +690,7 @@ final class FeatureEngine {
                         }
                         log("   §adbox ✅ 到账闸放行（补等 \(Int(extra))s）⇒ 现在才点 ✕")
                     }
-                    if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH) {
+                    if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex) {
                         log("   §adbox ⛔⛔ 等满预算**倒计时仍未走完** ⇒ **本条不点 ✕**"
                             + "（照 PC「不硬撑」）；交给下一轮重判")
                         continue
@@ -632,7 +732,8 @@ final class FeatureEngine {
             // ```
             // PC 判据（L3609）是**顶栏原文子串**：`("可领取" in t) or ("已成功领取" in t)`
             // ⇒ ⛔ 不经过元素表 ⇒ 不受 OCR 词表/阈值影响。
-            if Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+            if Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH,
+                                       roi: s?.ad_top_roi) {
                 // ⛔⛔⛔ §2277 **绝不能只"傻等"**（我 v0.10.35 的错：用户令「**能等个屁**」）
                 //
                 // 真机 `_var/_stuck1.png`：屏幕上明摆着奖励面板
@@ -694,7 +795,8 @@ final class FeatureEngine {
                         log("§adbox ⬇ 翻到了目标行 ⇒ 按钮 \(btn2.evidence) @(\(Int(btn2.point.x)),\(Int(btn2.point.y)))")
                         nav.tapPoint(Double(btn2.point.x), Double(btn2.point.y))
                         if let i3 = grabFresh(since: img2, maxWait: maxFrameAgeCfg + 3.0),
-                           Self.looksLikeAdPage(i3, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+                           Self.looksLikeAdPage(i3, rec: rec, nav: nav, bw: baseW, bh: baseH,
+                                            roi: s?.ad_top_roi) {
                             for _ in 0..<6 {
                                 if isCancelled() { break }
                                 guard let im4 = grab() else { break }
@@ -763,9 +865,13 @@ final class FeatureEngine {
     /// ```
     /// ⛔ 三级**都是"广告页独有"的信号**，⛔ 不是放宽（快手内容页没有胶囊 ✕）。
     static func looksLikeAdPage(_ img: UIImage, rec: Recognizer, nav: Navigator,
-                               bw: Double, bh: Double) -> Bool {
+                               bw: Double, bh: Double, roi: [Double]? = nil) -> Bool {
         // ① PC 原判据（顶栏原文子串，⛔ 不靠元素匹配）
-        let items = rec.ocrRegion(img, rect: CGRect(x: 0, y: 62, width: bw, height: 78),
+        //
+        // ⭐⭐⭐⭐⭐ §2645 **ROI 改走 `adTopROI(...)`（唯一读取点）**
+        //   改动前这里硬编码 `CGRect(x: 0, y: 62, width: bw, height: 78)`；
+        //   `roi == nil`（老配置 / 调用方没传）⇒ `adTopROI` 返回的**逐字就是它**。
+        let items = rec.ocrRegion(img, rect: adTopROI(roi, bw: bw, bh: bh),
                                   minConfidence: 0.3)
         let t = items.map(\.0).joined()
         if t.contains("可领取") || t.contains("已成功领取") { return true }
@@ -845,7 +951,7 @@ final class FeatureEngine {
         //   ⇒ 循环断在这里（用户看到"每次就看一个就强行退出"）。
         if nav.detect("pill_x", img: img) != nil {
             // ⭐ 到账闸：只在**没有倒计时数字**时才允许点这个 ✕
-            if Self.adCountdownRunning(img, rec: rec, bw: baseW, bh: baseH) {
+            if Self.adCountdownRunning(img, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex) {
                 log("   §\(tag) ⛔ 顶栏**还有倒计时** ⇒ **不点胶囊 ✕**（照 PC 到账闸）"
                     + "⇒ 本层不处理，交回主循环继续等")
                 return false
@@ -864,8 +970,10 @@ final class FeatureEngine {
     ///   · 到账闸        = 还有没有 `\d+秒 / \d+s`
     /// ⇒ 手机端统一用本函数取原文，⛔ 不各写一份（⛔ 免得判据漂移）。
     static func adTopText(_ img: UIImage, rec: Recognizer,
-                          bw: Double, bh: Double) -> String {
-        rec.ocrRegion(img, rect: CGRect(x: 0, y: 62, width: bw, height: 78),
+                          bw: Double, bh: Double, roi: [Double]? = nil) -> String {
+        // ⭐⭐⭐⭐⭐ §2645 **与 `looksLikeAdPage` 走同一个 `adTopROI(...)`**
+        //   （⛔ 不许各写一份 —— 否则"改了 ROI 只改了一处"⇒ 判据互相打架）
+        rec.ocrRegion(img, rect: adTopROI(roi, bw: bw, bh: bh),
                       minConfidence: 0.3)
             .map(\.0).joined()
     }
@@ -916,22 +1024,28 @@ final class FeatureEngine {
     ///   （用户明令：「**倒计时是广告没结束 你没结束去点 不是傻逼**」）。
     ///
     /// - Returns: true = **倒计时还在走**（广告没结束 ⇒ 只等，⛔ 不点）
+    ///
+    /// ⭐⭐⭐⭐ §2645 **正则表现在可配**（`settings.countdown_running_regex`）。
+    ///   ⛔ 缺省 = `runningPatternsDefault`，**逐字照抄**改动前那两条（⛔ 语义不许改）。
     static func adCountdownRunning(_ img: UIImage, rec: Recognizer,
-                                  bw: Double, bh: Double) -> Bool {
-        let t = adTopText(img, rec: rec, bw: bw, bh: bh)
+                                  bw: Double, bh: Double,
+                                  roi: [Double]? = nil,
+                                  runningPatterns: [String]? = nil) -> Bool {
+        let t = adTopText(img, rec: rec, bw: bw, bh: bh, roi: roi)
             .replacingOccurrences(of: " ", with: "")
         // ① 明确到账 ⇒ 倒计时已结束（放行）
         if t.contains("已成功领取") { return false }
         // ② ⭐ PC 主力判据：`\d+[sS秒]?后`（= `19s后` / `19秒后` / **`19后`**）
         //    ⛔ 这才是抗错字的写法 —— `s`/`秒` 丢了也能命中（因为靠 `后` 定位）
-        if let re = try? NSRegularExpression(pattern: "[0-9]+\\s*[sS秒]?\\s*后") {
-            let r = NSRange(t.startIndex..<t.endIndex, in: t)
-            if re.firstMatch(in: t, range: r) != nil { return true }
-        }
         // ③ 兜底：旧的严格式（`\d+秒` / `\d+s`）—— 有的版式没有「后」
-        if let re = try? NSRegularExpression(pattern: "[0-9]+\\s*(?:秒|[sS])") {
-            let r = NSRange(t.startIndex..<t.endIndex, in: t)
-            if re.firstMatch(in: t, range: r) != nil { return true }
+        //
+        // ⭐ §2645 两条**合并成一张可配的表**（`runningPatternsDefault` 就是它们**逐字**）。
+        //    ⚠️ 合并不改语义：原来 ②/③ **都 return true** ⇒ 谁先命中结果一样。
+        for pat in (runningPatterns ?? Self.runningPatternsDefault) {
+            if let re = try? NSRegularExpression(pattern: pat) {
+                let r = NSRange(t.startIndex..<t.endIndex, in: t)
+                if re.firstMatch(in: t, range: r) != nil { return true }
+            }
         }
         // ④ ⭐ 保守兜底：胶囊句式「后可领取」在、且**没有**「已成功领取」
         //    ⇒ 说明**倒计时还没走完**（只是数字没读出来）⇒ 也算"在走"
@@ -939,6 +1053,15 @@ final class FeatureEngine {
         if t.contains("后可领取") || t.contains("可领取") { return true }
         return false
     }
+
+    /// ⭐⭐⭐⭐ §2645 **「倒计时还在走」的默认正则表** —— 逐字照抄改动前的两条。
+    ///
+    /// ⚠️ Swift 源码里的 `\\s` 是**转义写法**，运行时 pattern 是 `\s`；
+    ///   配置里写 JSON 时用 `\\s`（JSON 转义）才等价。默认值**语义逐字**不变。
+    static let runningPatternsDefault: [String] = [
+        "[0-9]+\\s*[sS秒]?\\s*后",
+        "[0-9]+\\s*(?:秒|[sS])",
+    ]
 
     /// ⭐⭐ 从顶栏读出**倒计时还剩几秒**（照 PC `_1377_ad_loop.py:9723`）
     ///
@@ -949,11 +1072,18 @@ final class FeatureEngine {
     /// ⭐ 用途：PC 用 `N + 20s` 定**等多久**（`_need = int(_m.group(1)) + 20`），
     ///    ⛔ 不是固定 45s —— 多长的广告都等得起。
     static func adCountdownSeconds(_ img: UIImage, rec: Recognizer,
-                                   bw: Double, bh: Double) -> Int? {
-        let t = adTopText(img, rec: rec, bw: bw, bh: bh)
+                                   bw: Double, bh: Double,
+                                   roi: [Double]? = nil,
+                                   secondsPatterns: [String]? = nil,
+                                   fallbackPatterns: [String]? = nil) -> Int? {
+        let t = adTopText(img, rec: rec, bw: bw, bh: bh, roi: roi)
             .replacingOccurrences(of: " ", with: "")
         // 顺序照 PC：先 `s后`，再 `秒后`；再看**宽松形**（`19后`）
-        for pat in ["([0-9]+)[sS]后", "([0-9]+)秒后", "([0-9]+)后"] {
+        //
+        // ⭐⭐⭐⭐ §2645 **两张表现在都可配**（`secondsPatterns` / `fallbackPatterns`）：
+        //   · `secondsPatterns`  缺省 = `secondsPatternsDefault`（**逐字**照抄原来那 3 条）
+        //   · `fallbackPatterns` 缺省 = `secondsFallbackDefault`（**逐字**照抄原来最后那 1 条）
+        for pat in (secondsPatterns ?? Self.secondsPatternsDefault) {
             if let re = try? NSRegularExpression(pattern: pat),
                let m = re.firstMatch(in: t, range: NSRange(t.startIndex..<t.endIndex, in: t)),
                m.numberOfRanges > 1,
@@ -963,15 +1093,29 @@ final class FeatureEngine {
             }
         }
         // 最后兜底：任意 `\d+秒/s`
-        if let re = try? NSRegularExpression(pattern: "([0-9]+)\\s*(?:秒|[sS])"),
-           let m = re.firstMatch(in: t, range: NSRange(t.startIndex..<t.endIndex, in: t)),
-           m.numberOfRanges > 1,
-           let rr = Range(m.range(at: 1), in: t),
-           let n = Int(t[rr]) {
-            return n
+        for pat in (fallbackPatterns ?? Self.secondsFallbackDefault) {
+            if let re = try? NSRegularExpression(pattern: pat),
+               let m = re.firstMatch(in: t, range: NSRange(t.startIndex..<t.endIndex, in: t)),
+               m.numberOfRanges > 1,
+               let rr = Range(m.range(at: 1), in: t),
+               let n = Int(t[rr]) {
+                return n
+            }
         }
         return nil
     }
+
+    /// ⭐⭐⭐⭐ §2645 **「倒计时还剩几秒」的主正则表** —— 逐字照抄改动前的 3 条。
+    static let secondsPatternsDefault: [String] = [
+        "([0-9]+)[sS]后",
+        "([0-9]+)秒后",
+        "([0-9]+)后",
+    ]
+
+    /// ⭐⭐⭐ §2645 **「倒计时还剩几秒」的最后兜底正则** —— 逐字照抄改动前那 1 条。
+    static let secondsFallbackDefault: [String] = [
+        "([0-9]+)\\s*(?:秒|[sS])",
+    ]
 
     /// PC `AD_ROW_Y_WIN = 26` —— 行内 y 容差（同一张卡片的标题与按钮落在此窗口内）
     private static let adRowYWin: Double = 26
@@ -1340,7 +1484,8 @@ final class FeatureEngine {
             // ⛔ 而我的 `ad_capsule` 走 OCR 元素匹配 ⇒ 真机 `已成功领取438金币 ×`
             //   **读不出** ⇒ 页型 `unknown` ⇒ 防线失效 ⇒ 点✕。
             // ✅ 所以这里**直接对顶栏做子串判断**，⛔ 不经过元素表。
-            if Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH) {
+            if Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH,
+                                       roi: s?.ad_top_roi) {
                 log("   §\(tag) ⛔ 这是**视频广告页**（顶栏含「可领取/已成功领取」）"
                     + " ⇒ **放行**（⛔ 不碰，交给广告模块；⛔ 绝不点 ✕）")
                 return true
@@ -2221,9 +2366,18 @@ final class FeatureEngine {
     /// 移植自 PC `forbidden()`（`_1377_ad_loop.py:474`）——**语义逐字一致**。
     /// ⚠️ 用法契约（照 PC）：**调用方拿到非 nil 就必须放弃这次点击**，
     ///    ⛔ 不是"换个坐标再试"、⛔ 不是"只记日志"。
-    static func forbidden(_ text: String?) -> String? {
+    ///
+    /// ⭐⭐⭐⭐⭐ §2645 **配置化**（`settings.forbid_keys`，缺省 = 上面那 25 条硬编码）。
+    ///
+    /// ## ⛔⛔ 为什么配置化**必须**配自检（用户红线：支付）
+    /// 这张表是「**可以浏览，绝不做支付/购买**」的唯一执行点。
+    /// 放进文件后，一个手滑就能把「确认支付」删掉 ⇒ 真去帮用户买东西。
+    /// ⇒ `ConfigStore.validate()` 做**加法校验**：只许加、⛔ 不许减；
+    ///   删了任何一条基线 ⇒ `/reload` **拒绝加载**并把错误塞进 `configErrors`。
+    static func forbidden(_ text: String?, extraKeys: [String]? = nil) -> String? {
         let t = text ?? ""
-        for k in forbidKeys where t.contains(k) { return k }
+        // ⭐ 读调用方传进来的**配置表**；⛔ 不传（nil）⇒ 逐字走原来的硬编码 25 条
+        for k in (extraKeys ?? forbidKeys) where t.contains(k) { return k }
         for k in rejectClickKeys where t.contains(k) { return k }
         return nil
     }
@@ -2254,6 +2408,13 @@ final class FeatureEngine {
         "立即查看", "点击查看", "去逛逛", "立即参与", "去体验", "去咨询",
     ]
 
+    /// ⭐⭐⭐ §2645 **CTA 药丸颜色判据的默认值** —— 改动前的硬编码 `r>200 && g<120 && b<150`。
+    ///
+    /// ⚠️ 真机实测：底部按钮是 **RGB(240,72,0)**（**橙色**）—— 恰好也满足粉色判据，
+    ///   所以形状腿**其实能命中**（离线 18/18 帧命中且居中）。
+    ///   ⇒ 配置化**不改行为**（默认值逐字相同），只是让"换版式换颜色"不必重编译。
+    static let ctaColorDefault = (rMin: 200.0, gMax: 120.0, bMax: 150.0)
+
     /// ⭐ 点广告页底部的 CTA —— 逐条移植 PC `click_cta`（`_1377_ad_loop.py:1044`）。
     ///
     /// ## PC 的三步（⛔ 顺序不能变）
@@ -2279,7 +2440,8 @@ final class FeatureEngine {
         // 而这里原来拿 `img.size.width`（**原始帧宽**，888）来比 ⇒ 基准坐标 vs 原始宽
         // ⇒ 永远不"居中" ⇒ 形状腿恒废（⛔ 又一个我没适配的点）。
         // ✅ 改成按 `baseW`（基准宽）比。
-        if let band = Self.widestPinkBand(img, box: Self.boxCta) {
+        if let band = Self.widestPinkBand(img, box: Self.boxCta,
+                                          color: s?.cta_color) {
             let cx = band.0, cy = band.1
             let off = abs(cx - baseW / 2.0)
             if off <= 10 {
@@ -2287,7 +2449,7 @@ final class FeatureEngine {
                 let t = rec.ocrRegion(img, rect: CGRect(x: 0, y: max(0, cy - 26),
                                                         width: 442, height: 52),
                                       minConfidence: 0.3).map(\.0).joined()
-                if let bad = Self.forbidden(t) {
+                if let bad = Self.forbidden(t, extraKeys: forbidKeysCfg) {
                     log("   §\(tag) ⛔ 形状命中的药丸文案含违规词「\(bad)」⇒ **拒绝点击**")
                     return nil
                 }
@@ -2300,8 +2462,8 @@ final class FeatureEngine {
         // ③ 文案兜底
         let ws = rec.ocrRegion(img, rect: Self.boxCta, minConfidence: 0.3)
         for (t, r, _c) in ws {
-            guard Self.ctaKeys.contains(where: { t.contains($0) }) else { continue }
-            if let bad = Self.forbidden(t) {
+            guard ctaKeysCfg.contains(where: { t.contains($0) }) else { continue }
+            if let bad = Self.forbidden(t, extraKeys: forbidKeysCfg) {
                 log("   §\(tag) ⛔ CTA 文案「\(t)」含违规词「\(bad)」⇒ 跳过")
                 continue
             }
@@ -2340,10 +2502,19 @@ final class FeatureEngine {
     /// ```
     /// ⇒ 本函数以及同类的像素函数（`looksLikeAppStorePage` / `findDownloadCloud` /
     ///   `clickCTA` 的居中判据）**一律照此办理** —— 这才是"全局适配"。
-    static func widestPinkBand(_ img: UIImage, box: CGRect) -> (Double, Double, Int)? {
+    /// ⭐⭐⭐ §2645 **颜色判据可配**（`settings.cta_color`）。
+    ///
+    /// ⛔ 缺省（`color == nil` 或字段缺失）⇒ **逐字**用改动前的 `r > 200 && g < 120 && b < 150`。
+    /// ⚠️ 三个分量**各自**带默认值 ⇒ 只配一个（如只调 `g_max`）也是安全的。
+    static func widestPinkBand(_ img: UIImage, box: CGRect,
+                               color: PGConfig.Settings.CtaColor? = nil) -> (Double, Double, Int)? {
         // ⭐ §2631 **先归一到基准**（451×977）⇒ `box` 的基准坐标才成立
         let base = FrameNormalizer.normalize(img)
         guard let cg = base.cgImage else { return nil }
+        // ⭐ §2645 颜色判据（⛔ 缺省逐字 = 改动前的粉色判据 R>200 且 G<120 且 B<150）
+        let rMin = color?.r_min ?? ctaColorDefault.rMin
+        let gMax = color?.g_max ?? ctaColorDefault.gMax
+        let bMax = color?.b_max ?? ctaColorDefault.bMax
         let W = cg.width, H = cg.height
         let bx = max(0, Int(box.minX)), by = max(0, Int(box.minY))
         let bw = min(W - bx, Int(box.width)), bh = min(H - by, Int(box.height))
@@ -2358,7 +2529,8 @@ final class FeatureEngine {
                 let o = y * bpr + x * bpp
                 let r = Int(ptr[o]), g = Int(ptr[o + 1]), b = Int(ptr[o + 2])
                 // PC 的粉色判据：R>200 且 G<120 且 B<150
-                if r > 200 && g < 120 && b < 150 {
+                // ⭐ §2645 三个阈值现在来自配置（`cta_color`）；⛔ 缺省逐字等于上面那句
+                if Double(r) > rMin && Double(g) < gMax && Double(b) < bMax {
                     if minX < 0 { minX = x }
                     maxX = x
                 }
@@ -2533,7 +2705,7 @@ final class FeatureEngine {
         for (t, r, _c) in rec.ocrRegion(img, rect: CGRect(x: 0, y: 320, width: baseW, height: 440),
                                         minConfidence: 0.3) {
             if ["获取", "安装", "下载", "免费"].contains(where: { t.contains($0) }) {
-                if let bad = Self.forbidden(t) {
+                if let bad = Self.forbidden(t, extraKeys: forbidKeysCfg) {
                     log("   §\(tag) ⛔ 安装文案「\(t)」含违规词「\(bad)」⇒ 跳过")
                     continue
                 }
