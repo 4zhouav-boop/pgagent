@@ -17,8 +17,8 @@ targets:
         CFBundleDisplayName: PGAgent
         # ⭐ 版本号**唯一来源**（界面标题从 Info.plist 读，见 AppVersion）
         #    发版时只改这里 ⇒ 界面/接口/包 三处自动一致（§2239 的教训）
-        CFBundleShortVersionString: "0.11.0"
-        CFBundleVersion: "67"
+        CFBundleShortVersionString: "0.11.1"
+        CFBundleVersion: "68"
         UILaunchScreen: {}
         # ⭐ 关键 1：让 App 的 Documents 暴露给「文件」App
         #   ⇒ 快捷指令「存储到文件」才能把截图写进来（这是「眼」的命门）
@@ -145,7 +145,12 @@ targets:
         # ## ✅ 正解：把扩展 id 改成主 App id + `.PGShot`
         # ⇒ 前缀匹配 ⇒ 描述文件覆盖它 ⇒ 可以正常签名 ⇒ **扩展保住**。
         # ⚠️ 与 `PGAgent` 的 `PRODUCT_BUNDLE_IDENTIFIER`（第 85 行）必须保持这个关系。
-        PRODUCT_BUNDLE_IDENTIFIER: run.pgagent.PGAgent.8W9ZSMW4UW.PGShot
+        # ⛔⛔⛔ §2703 **更正 §2679：扩展 id ⛔ 不要预置 team 后缀**
+        #   爱思签名的规则（REPORT_2701 解包实证）：把前缀 run.pgagent.PGAgent 替换成 run.pgagent.PGAgent.8W9ZSMW4UW，
+        #   主 App 和扩展**都改**。预置了后缀 ⇒ 签完变成 …8W9ZSMW4UW.8W9ZSMW4UW.PGShot（两遍）。
+        #   构建时写 run.pgagent.PGAgent.PGShot ⇒ 签完正好是 run.pgagent.PGAgent.8W9ZSMW4UW.PGShot
+        #   （与 §2090 跑通的 v090-extprov 同形；BroadcastStarter.extensionBundleID 的注释也是这么记的）。
+        PRODUCT_BUNDLE_IDENTIFIER: run.pgagent.PGAgent.PGShot
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_VERSION: "5.0"
         CODE_SIGN_STYLE: Manual
