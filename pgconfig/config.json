@@ -2166,7 +2166,7 @@
       "⭐ OCR 找不到时的兜底（荔枝有 YOLOv8）。",
       "我们暂用「模板池」当兜底，这里配它的阈值。"
     ],
-    "ad_count" : 2,
+    "ad_count" : 6,
     "ad_dwell" : 30,
     "ad_stay_max" : 60,
     "ad_stay_min" : 40,
