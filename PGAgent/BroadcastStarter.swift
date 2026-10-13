@@ -115,6 +115,29 @@ final class BroadcastStarter: ObservableObject {
     /// ⭐⭐ 帧是否**已验证**在进（`startAndVerify` 的结论；诊断用）
     private(set) var framesVerified = false
     private var lastSeq = -1
+
+    /// ⭐⭐⭐⭐⭐ §2705 **扩展重启后 seq 会从 0 重来** —— 这是「投屏半死」的真根因
+    ///
+    /// ## 血案（真机实测，两条硬证据）
+    /// 扩展 `SampleHandler.seq` 是**进程内**计数器（`private var seq = 0`），
+    /// 广播一停再开 ⇒ **新进程 ⇒ seq 归 0**。
+    /// 而主 App 的 `lastSeq` 是**跨会话累积**的（已经 4000+）。
+    /// 旧判据 `if seq >= 0 && seq < lastSeq { 丢帧 }` ⇒ 扩展重启后
+    /// **每一帧都被当成"旧帧"丢掉** ⇒ 永久死锁：
+    /// ```
+    ///   /frame POST 每 2s 到达一次（60 分钟 1805 次，一次没断）
+    ///   而 /rec/state frames 冻在 4341 一分不动   ← 到了但全被丢
+    /// ```
+    /// 当场对照实验（`pg.api('POST','/frame',...)`，同一进程）：
+    /// ```
+    ///   seq=0     ⇒ ok=false  frames=4342（不变）   ← 被丢
+    ///   不带 seq  ⇒ ok=true   frames=4343（+1）     ← 收下
+    /// ```
+    /// ⇒ **判据必须容错"大幅倒退"**：那代表扩展换了一轮，⛔ 不是旧帧。
+    /// 只忽略**轻微**倒退（乱序/重复），大幅倒退 ⇒ 重新对齐并**收下**。
+    private static let seqRestartGap = 32
+    /// ⭐ 被 seq 判据丢掉的帧数（诊断用 —— 这个数涨 = 又踩了这个坑）
+    private var droppedBySeq = 0
     /// ⭐ 上一帧的修改时间（判新用；见 `pollFrame`）
     private var lastFrameMTime: Date?
     /// ⭐ 最近一帧来自哪个文件（诊断用）
@@ -414,13 +437,26 @@ final class BroadcastStarter: ObservableObject {
     func startAndVerify(tries: Int = 3, waitSec: Double = 8) -> (ok: Bool, waited: Double) {
         let t0 = Date()
 
-        guard let dir = Self.framesDir() else {
-            setLastError("⛔ 没有 App Group 共享容器 ⇒ 扩展写了也读不到")
-            return (false, 0)
+        // ⭐⭐⭐⭐⭐ §2705 **没有共享容器也要能启动**（⛔ 不再当场放弃）
+        //
+        // ## 血案（真机实测）
+        // 旧代码在这里 `guard let dir = ... else { return (false, 0) }` ——
+        // **没有 App Group 容器就直接失败，连 picker 都不触发**。
+        // 而本机实测容器候选**全部** `containerURL = nil`
+        // （`/framediag` 的 `appGroup.probed` 四条全是 nil）⇒ `/rec/start` **恒定失败**
+        // ⇒ 「录屏起不来」且**无法自愈**。
+        // ⚠️ 但帧其实**一直有另一条路**：扩展每帧 `POST /frame` 到 127.0.0.1:8899
+        //   （实测 60 分钟 1805 次、一次没断）⇒ **那条路不依赖容器**。
+        // ⇒ 修法：容器可用 ⇒ 用 mtime 验证（原逻辑）；
+        //         容器不可用 ⇒ 用 **HTTP 帧计数（`frameCount`）** 验证。
+        let dir = Self.framesDir()
+        if dir == nil {
+            NSLog("PGAgent BroadcastStarter: ⛔ 无共享容器 ⇒ 改用 HTTP 帧计数验证（扩展仍会 POST /frame）")
+        } else {
+            NSLog("PGAgent BroadcastStarter: 共享容器 = %@", dir!.path)
         }
-        NSLog("PGAgent BroadcastStarter: 共享容器 = %@", dir.path)
 
-        // 起始 mtime（用容器里的 lastframe.jpg 或任一 frame_*.jpg）
+        // 起始 mtime（用容器里的 lastframe.jpg 或任一 frame_*.jpg）；无容器 ⇒ nil
         func newestFrameMTime() -> Date? {
             let fm = FileManager.default
             var best: Date?
@@ -434,14 +470,15 @@ final class BroadcastStarter: ObservableObject {
         }
 
         var baseline = newestFrameMTime()
-        NSLog("PGAgent BroadcastStarter: 起始帧 mtime = %@",
-              baseline.map { "\($0)" } ?? "(还没有帧)")
+        let baseCount = frameCount            // ⭐ HTTP 路的基线
+        NSLog("PGAgent BroadcastStarter: 起始帧 mtime = %@，起始帧计数 = %d",
+              baseline.map { "\($0)" } ?? "(还没有帧)", baseCount)
 
         for attempt in 1...max(1, tries) {
             NSLog("PGAgent BroadcastStarter: 触发第 %d/%d 次", attempt, tries)
             _ = start()                      // ← 触发 picker（内部已回主线程）
 
-            // 等帧时间戳**变新**
+            // 等帧时间戳**变新**（有容器）/ 帧计数**变大**（无容器）
             let deadline = Date().addingTimeInterval(waitSec)
             while Date() < deadline {
                 Thread.sleep(forTimeInterval: 0.5)
@@ -449,7 +486,15 @@ final class BroadcastStarter: ObservableObject {
                 if let m = newestFrameMTime(), (baseline == nil || m > baseline!) {
                     let dt = Date().timeIntervalSince(t0)
                     // ⭐ 帧在进 = 录屏**真的**跑起来了
-                    NSLog("PGAgent BroadcastStarter: ✅ 帧开始进（%.1fs）", dt)
+                    NSLog("PGAgent BroadcastStarter: ✅ 帧开始进（%.1fs，文件路）", dt)
+                    setLastError("")
+                    framesVerified = true
+                    return (true, dt)
+                }
+                // ⭐ §2705 无共享容器 ⇒ 用 HTTP 帧计数判活（扩展 POST /frame 一直在走）
+                if dir == nil && frameCount > baseCount {
+                    let dt = Date().timeIntervalSince(t0)
+                    NSLog("PGAgent BroadcastStarter: ✅ 帧开始进（%.1fs，HTTP 路）", dt)
                     setLastError("")
                     framesVerified = true
                     return (true, dt)
@@ -495,15 +540,33 @@ final class BroadcastStarter: ObservableObject {
     @discardableResult
     func onFrame(_ data: Data, seq: Int) -> Bool {
         // ⭐ 临界区：只做纯内存更新
+        var seqRolledBack = false
         frameLock.lock()
-        if seq >= 0 && seq < lastSeq { frameLock.unlock(); return false }
-        if seq >= 0 { lastSeq = seq }
+        if seq >= 0 {
+            if lastSeq >= 0 && seq < lastSeq {
+                // ⭐⭐⭐ §2705 只忽略**轻微**倒退（乱序/重复）；
+                //    大幅倒退 = 扩展重启（seq 归 0）⇒ **必须收下**（见 lastSeq 的注释）
+                if lastSeq - seq <= Self.seqRestartGap {
+                    droppedBySeq += 1
+                    frameLock.unlock()
+                    return false
+                }
+                seqRolledBack = true
+            }
+            lastSeq = seq
+        }
         _lastFrame = data
         _frameCount += 1
         let n = _frameCount
         lastFrameReceivedAt = Date()
         let at = lastFrameReceivedAt
         frameLock.unlock()
+
+        // ⛔ 日志放在锁外（本文件铁律：持锁期间⛔ 不调用任何外部代码）
+        if seqRolledBack {
+            NSLog("PGAgent: 检测到扩展 seq 回退 ⇒ 当作新一轮重新对齐（原先被丢帧数=%d）",
+                  droppedBySeq)
+        }
 
         // ⛔ `@Published`（frames / lastFrameAt）**只能在主线程改**
         if Thread.isMainThread {
@@ -526,6 +589,9 @@ final class BroadcastStarter: ObservableObject {
         let path = lastFramePath
         let mtime = lastFrameMTime
         let recvAt = lastFrameReceivedAt
+        // ⭐ §2705 诊断：seq 对齐状态（`droppedBySeq` 涨 = 又踩了「扩展重启被丢帧」的坑）
+        let seqNow = lastSeq
+        let dropped = droppedBySeq
         frameLock.unlock()
         return [
             "started": started,
@@ -535,6 +601,9 @@ final class BroadcastStarter: ObservableObject {
                 .map { Date().timeIntervalSince($0) } ?? -1,
             "lastFrameBytes": bytes,
             "lastFramePath": path,
+            // ⭐ §2705：seq 对齐状态（⛔ 不看这两个数就没法判「扩展重启被丢帧」）
+            "lastSeq": seqNow,
+            "droppedBySeq": dropped,
             "lastFrameMTime": mtime
                 .map { ISO8601DateFormatter().string(from: $0) } ?? "-",
             "error": lastError,

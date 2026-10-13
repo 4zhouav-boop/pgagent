@@ -19,6 +19,16 @@ final class BLEController: NSObject, ObservableObject {
     private var writeChar: CBCharacteristic?
     private var scanStore: ((String) -> Void)?
 
+    // ⭐⭐ §2705 自动重连（蓝牙开启 / 意外断开）
+    /// 退避档位（秒）—— ⛔ 不连发，连发会把刚建起的链路打崩
+    private static let reconnectBackoff: [Double] = [2, 5, 15, 60]
+    /// 连续重连次数（成功就清零；用于选退避档）
+    private var reconnectAttempt = 0
+    /// 待执行的重连（重连前先 cancel，避免排队叠加）
+    private var reconnectWork: DispatchWorkItem?
+    /// ⭐ 重连「代数」—— 每次排程 +1，旧的回调凭代数作废（⛔ 防叠加）
+    private var reconnectGeneration = 0
+
     // ⭐⭐ §2252 NUS 命令通道 + 诊断
     /// 认到 NUS 的 RX 特征（`6E400002-…`）—— 手机往这写命令
     private(set) var nusRxFound = false
@@ -320,7 +330,50 @@ final class BLEController: NSObject, ObservableObject {
 extension BLEController: CBCentralManagerDelegate {
     func centralManagerDidUpdateState(_ c: CBCentralManager) {
         state = "bt-\(c.state.rawValue)"
-        if c.state != .poweredOn { lastError = "蓝牙不可用 (state=\(c.state.rawValue))" }
+        if c.state != .poweredOn {
+            lastError = "蓝牙不可用 (state=\(c.state.rawValue))"
+            return
+        }
+        // ⭐⭐⭐⭐⭐ §2705 蓝牙**变成可用**时补一次重连
+        //
+        // ## 真根因（REPORT_2703 + 实机复现）
+        // App 原来**只在开机试一次**重连（`boot()` 里 `asyncAfter(1.5s){ connectPaired() }`）。
+        // 而那一刻蓝牙往往**还是关的**（`state=bt-4`）⇒ 那次 `retrieveConnectedPeripherals`
+        // 返回 0 个 ⇒ 之后**再也不会重连**。
+        // ⇒ 表现：「明明连了蓝牙，App 状态还是灰的/`disconnected`」，直到手动调
+        //   `/ble/connect-paired` 才变 `ready:…`（实测：调一次立刻好，90s 稳定不掉）。
+        // ⇒ 修法：**状态一变 poweredOn 就补连**（这才是"蓝牙开了就连"的正确语义）。
+        lastError = ""
+        scheduleReconnect(reason: "蓝牙已开启")
+    }
+
+    /// ⭐ §2705 带**退避**的重连（⛔ 不连发 —— 连发会把刚建起的链路打崩）
+    ///
+    /// 退避档：2s / 5s / 15s / 60s，到顶后维持 60s。
+    /// 只重连**没有就绪通道**的情况（`ready*` 时不打扰）。
+    private func scheduleReconnect(reason: String) {
+        guard central.state == .poweredOn else { return }
+        guard !state.hasPrefix("ready") else { return }
+        reconnectAttempt += 1
+        reconnectGeneration += 1
+        let gen = reconnectGeneration
+        let idx = min(reconnectAttempt - 1, Self.reconnectBackoff.count - 1)
+        let delay = Self.reconnectBackoff[idx]
+        NSLog("PGAgent BLE: %@ ⇒ %.0fs 后重连（第 %d 次）", reason, delay, reconnectAttempt)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            // ⛔ 已经排了更新的一次 ⇒ 这次作废（⛔ 不要叠加重连，避免把链路打崩）
+            guard gen == self.reconnectGeneration else { return }
+            guard self.central.state == .poweredOn else { return }
+            guard !self.state.hasPrefix("ready") else { return }
+            let n = self.connectPaired()
+            NSLog("PGAgent BLE: 补连尝试打到 %d 个外设 state=%@", n, self.state)
+            // 还是没就绪 ⇒ 继续退避重试（⛔ 不放弃：板子可能还没上电）
+            if !self.state.hasPrefix("ready") { self.scheduleReconnect(reason: "仍未就绪") }
+        }
+        reconnectWork?.cancel()
+        reconnectWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     func centralManager(_ c: CBCentralManager, didDiscover p: CBPeripheral,
@@ -337,6 +390,8 @@ extension BLEController: CBCentralManagerDelegate {
         state = "connected:\(p.name ?? "?")"
         // ⭐ 记住它 ⇒ 下次开机自动重连（板子已连时**不广播**，只能靠这个）
         lastKnownID = p.identifier
+        // ⭐ §2705 连上了 ⇒ 退避计数清零（下一次断开从最短档重来）
+        reconnectAttempt = 0
         p.discoverServices(nil)
     }
 
@@ -348,6 +403,13 @@ extension BLEController: CBCentralManagerDelegate {
     func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral, error: Error?) {
         state = "disconnected"
         writeChar = nil
+        nusRxFound = false
+        // ⭐ §2705 记下 error 原文（区分「加密失败」还是「板子复位」，见 SWIFT_BATCH #3）
+        lastError = error.map { "断开: \($0.localizedDescription)" } ?? ""
+        NSLog("PGAgent BLE: 断开 %@ error=%@", p.name ?? "?", lastError.isEmpty ? "(无)" : lastError)
+        // ⭐⭐⭐ §2705 意外断开 ⇒ **自动重连**（板子还在的话几秒内就回来）
+        //   ⛔ 原来这里什么都不做 ⇒ 掉一次就永久黑，直到手动 `/ble/connect-paired`。
+        scheduleReconnect(reason: "意外断开")
     }
 }
 
@@ -393,6 +455,8 @@ extension BLEController: CBPeripheralDelegate {
         if nusRxFound {
             state = "ready:\(p.name ?? "?")"
             lastError = ""
+            // ⭐ §2705 通道真就绪 ⇒ 重连退避计数清零
+            reconnectAttempt = 0
         } else if writeChar != nil {
             state = "ready(非NUS):\(p.name ?? "?")"
             lastError = "板子没有 NUS 命令特征（固件要烧 v2251 双向版）"
