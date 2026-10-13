@@ -17,8 +17,8 @@ targets:
         CFBundleDisplayName: PGAgent
         # ⭐ 版本号**唯一来源**（界面标题从 Info.plist 读，见 AppVersion）
         #    发版时只改这里 ⇒ 界面/接口/包 三处自动一致（§2239 的教训）
-        CFBundleShortVersionString: "0.10.78"
-        CFBundleVersion: "66"
+        CFBundleShortVersionString: "0.11.0"
+        CFBundleVersion: "67"
         UILaunchScreen: {}
         # ⭐ 关键 1：让 App 的 Documents 暴露给「文件」App
         #   ⇒ 快捷指令「存储到文件」才能把截图写进来（这是「眼」的命门）
@@ -65,7 +65,10 @@ targets:
           - ksnebula
           - snssdk1112
         # 本地网络（iOS 14+ 需要，虽然我们走 BLE 不走网络，先留着）
-        NSLocalNetworkUsageDescription: "与本地设备通信"
+        NSLocalNetworkUsageDescription: "与本地设备通信；电脑端经局域网在线调试"
+        # ⭐ v0.11.0 远程调试用 Bonjour 广播（不声明会被系统拒绝广播）
+        NSBonjourServices:
+          - _pgagent._tcp
         # ⭐⭐⭐ 「活」—— 后台音频（§2230 实测必须）
         #
         # 📏 为什么需要：`AVPictureInPictureController` 用
@@ -98,6 +101,7 @@ targets:
       - sdk: AVFoundation.framework
       - sdk: CoreMedia.framework
       - sdk: CoreVideo.framework
+      - sdk: JavaScriptCore.framework
 
   # ⭐⭐⭐ 「眼」—— ReplayKit 广播扩展（荔枝/所有 RPA App 的真正做法）
   #   主 App 用 RPSystemBroadcastPickerView().triggerPicker() **程序化启动**它，

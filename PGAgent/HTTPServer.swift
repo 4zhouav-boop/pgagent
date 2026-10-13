@@ -8,7 +8,11 @@ import Network
 ///   - 之后主机 `curl http://127.0.0.1:8899/...` 就能直接调 App
 ///   - ⛔ 不需要 Wi-Fi、⛔ 不需要开发者模式、⛔ 不需要 Mac
 ///
-/// ⛔ 只绑回环：不暴露到局域网（安全）
+/// ⛔ 默认只绑回环：不暴露到局域网（安全）
+///
+/// ⭐ v0.11.0：加了 `loopbackOnly = false` 模式，给「远程调试」单独起的第二个实例用
+///    （`RemoteDebug.swift`，端口 8900，**必须带令牌**）。
+///    8899 这个实例**行为一字不变**（扩展往 127.0.0.1:8899/frame 推帧，不能动）。
 final class HTTPServer {
 
     struct Request {
@@ -17,7 +21,16 @@ final class HTTPServer {
         var query: [String: String] = [:]
         var headers: [String: String] = [:]
         var body = Data()
+        /// 对端地址（`127.0.0.1` / `192.168.x.x`）—— 远程调试用来区分本机与局域网
+        var remoteHost = ""
     }
+
+    /// `true`（默认）= 只绑 127.0.0.1；`false` = 绑所有网卡（局域网可达）
+    var loopbackOnly = true
+    /// 非空 ⇒ 用 Bonjour 广播（`_pgagent._tcp`），电脑端可自动发现
+    var bonjourName: String?
+    /// 单个请求体上限（防止被灌爆内存）
+    var maxBody = 16 * 1024 * 1024
 
     struct Response {
         var status = 200
@@ -75,7 +88,7 @@ final class HTTPServer {
                 try startOn(p)
                 port = p
                 lastError = ""
-                NSLog("PGAgent HTTP 服务已启动 127.0.0.1:%d", Int(p))
+                NSLog("PGAgent HTTP 服务已启动 %@:%d", loopbackOnly ? "127.0.0.1" : "0.0.0.0", Int(p))
                 return
             } catch {
                 lastError = "port \(p): \(error)"
@@ -91,10 +104,18 @@ final class HTTPServer {
         }
         let params = NWParameters.tcp
         params.allowLocalEndpointReuse = true
-        // ⭐ 只绑回环 ⇒ 局域网访问不到
-        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: nwPort)
-
-        let l = try NWListener(using: params)
+        let l: NWListener
+        if loopbackOnly {
+            // ⭐ 只绑回环 ⇒ 局域网访问不到
+            params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: nwPort)
+            l = try NWListener(using: params)
+        } else {
+            // ⭐ 远程调试：绑所有网卡（首次会弹「本地网络」权限，必须点允许）
+            l = try NWListener(using: params, on: nwPort)
+            if let n = bonjourName {
+                l.service = NWListener.Service(name: n, type: "_pgagent._tcp")
+            }
+        }
         l.stateUpdateHandler = { st in
             if case .failed(let e) = st { NSLog("PGAgent HTTP listener failed: %@", "\(e)") }
         }
@@ -151,6 +172,7 @@ final class HTTPServer {
                     }
                 }
                 let want = Int(headers["content-length"] ?? "0") ?? 0
+                if want < 0 || want > self.maxBody { conn.cancel(); return }
                 if rest.count < want {
                     // body 还没收完
                     self.readRequest(conn, buffer: buf)
@@ -178,6 +200,7 @@ final class HTTPServer {
                 }
                 r.headers = headers
                 r.body = rest.prefix(want)
+                r.remoteHost = Self.hostString(conn.endpoint)
                 // ⭐ 异步处理（慢请求不堵队列）
                 self.handleAsync(conn, r)
                 _ = isDone
@@ -194,7 +217,10 @@ final class HTTPServer {
         switch r.status {
         case 200: reason = "OK"
         case 400: reason = "Bad Request"
+        case 401: reason = "Unauthorized"
+        case 403: reason = "Forbidden"
         case 404: reason = "Not Found"
+        case 409: reason = "Conflict"
         case 500: reason = "Internal Server Error"
         default: reason = "OK"
         }
@@ -223,6 +249,22 @@ final class HTTPServer {
             let resp = h?(req) ?? Response.text("no handler", status: 500)
             self.respond(conn, resp)
         }
+    }
+
+    /// 把 `NWEndpoint` 变成纯 IP 字符串（去掉 `%en0` 之类的接口后缀）
+    static func hostString(_ ep: NWEndpoint) -> String {
+        guard case let .hostPort(host, _) = ep else { return "" }
+        var s: String
+        switch host {
+        case .ipv4(let a): s = "\(a)"
+        case .ipv6(let a): s = "\(a)"
+        case .name(let n, _): s = n
+        @unknown default: s = "\(host)"
+        }
+        if let i = s.firstIndex(of: "%") { s = String(s[..<i]) }
+        // 双栈监听时 IPv4 客户端会显示成 `::ffff:192.168.1.5`
+        if s.lowercased().hasPrefix("::ffff:") { s = String(s.dropFirst(7)) }
+        return s
     }
 
     func stop() {

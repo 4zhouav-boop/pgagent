@@ -205,6 +205,11 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
 
+                // ⭐ v0.11.0 远程调试：地址 + 令牌（电脑端 pgdbg.py 要用）
+                RemoteDebugBar()
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+
                 // ── 「眼」的备用路 + 保活 + 诊断（低频用，收在底部一条）──
                 //   ⭐ 常用操作都在上面的控制台里；这里只放**排查用**的次要按钮。
                 DisclosureGroup("更多（保活 / 快捷指令 / 诊断）") {
@@ -299,6 +304,9 @@ struct ContentView: View {
         http.lastError = http.server.lastError
         rt.httpPort = http.server.port
         store.log("HTTP 已起 127.0.0.1:\(http.server.port)  err=\(http.server.lastError)")
+
+        // ⭐⭐⭐ v0.11.0 局域网在线调试（8900，带令牌）—— 改流程推脚本，⛔ 不用重签
+        RemoteDebug.shared.start(router: rt, log: store)
 
         // ⭐ 读运行时配置（改逻辑只推这个文件，⛔ 不重装）
         ConfigStore.ensureDirs()
