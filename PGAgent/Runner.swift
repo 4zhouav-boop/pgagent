@@ -294,6 +294,29 @@ final class Runner: ObservableObject {
         // ⚠️ 这样「只跑导航」的老用法**完全不受影响**（用户令：旧行为零改动）。
         let feats = cfg.settings?.features?.filter { FeatureEngine.order.contains($0) } ?? []
         if !feats.isEmpty {
+            // ⭐⭐⭐⭐⭐ §2705 **进功能闭环之前，先确认"眼"还活着**（用户令：「死机了 无限循环」）
+            //
+            // ## ⛔ 为什么必须在这里加（我上一版把闸装错了位置）
+            // 旧帧闸（`lastFrameAge()`）原本只装在 `page == "unknown"` 分支里（本文件 L363）。
+            // 而**功能路根本不看帧龄**：`fe.runRound()` 直接往下跑。
+            // 于是当录屏死了（PGShot 会话失效 ⇒ 帧冻结）：
+            //   · 冻结帧上的内容**仍然"认得出来"**（`§adbox_row`、`§funnel` 都在正常打日志）
+            //   · ⇒ **永远不进 `unknown` 分支 ⇒ 那道旧帧闸永远不触发**
+            //   · ⇒ 拿着**同一张死帧**无限重复同一动作 = 用户看到的「死机 + 无限循环」。
+            // 📏 教训：**闸要装在"所有路径的必经之处"，⛔ 不是装在某个分支里。**
+            //
+            // ## ✅ 做法
+            // 进 `runRound()` 之前查一次帧龄：超上限 ⇒ **立刻停手并说清怎么修**。
+            // ⛔ 不拿旧帧糊弄下游（照 `grabSync` 的既有原则）。
+            if let b = broadcaster, let age = b.lastFrameAge(), age > maxFrameAge {
+                let msg = String(format: "⛔ 画面是**旧帧**（帧龄 %.1fs > %.1fs）⇒ **录屏已停**，"
+                                 + "⛔ 不是识别问题 ⇒ 不跑功能（否则拿死帧空转 = 无限循环）"
+                                 + "。请到手机上：点「开录屏」→ 系统面板「开始直播」",
+                                 age, maxFrameAge)
+                log("§run \(msg)")
+                finish(msg)
+                return
+            }
             log("§run ⭐ 走功能闭环（\(feats.count) 个功能：\(feats.map(FeatureEngine.cn).joined(separator: " / "))）")
             let fe = FeatureEngine(cfgStore: cfgStore, nav: nav, rec: rec, ble: ble,
                                    grab: { [weak self] in self?.grabSync() },

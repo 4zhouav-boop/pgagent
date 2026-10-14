@@ -238,8 +238,59 @@ final class FeatureEngine {
         var emptyRounds = 0
         var scrollTries = 0          // ⭐ §2309 任务列表翻页次数
         var adEntryToggle = 0        // ⭐ §2315 入口轮换计数（宝箱 ↔ 看广告得金币）
+
+        // ⭐⭐⭐⭐⭐ §2705 **无进展闸（"无限循环"的正解）**
+        //
+        // ## 真机血案（用户令，逐字）
+        // > 「**死机了 无限循环**」/「**又死机了**」
+        //
+        // ## ⛔ 根因：`runFunnel` 那条 `continue` **一个计数器都不加**
+        // ```swift
+        // if nav.runFunnel(img) { log("漏斗处理了一层"); sleep(1.0); continue }
+        // ```
+        // `runFunnel` 只要**一直返回 true**（弹窗没被点掉 / 在冻结帧上反复"认出"同一个弹窗），
+        // 这个 `continue` 就**绕过了本函数里所有的闸**：
+        //   · `n`            不涨 ⇒ `while n < count` 永远成立
+        //   · `scrollTries`  不涨 ⇒ 6 次翻页预算永远用不完
+        //   · `emptyRounds`  不涨 ⇒ "连续 3 轮找不到就收手"永远不触发
+        // ⇒ **真·无限循环**（真机 trace 逐字：`§funnel friend_popup_x` 反复刷、`n` 一直不动）。
+        //
+        // ## ✅ 做法：**按"有没有进展"计数**，⛔ 不按"跑到哪一步"计数
+        // 判据用**已有的量**（⛔ 不新造判据）：`n`（真正收到奖励的条数）。
+        //   · `n` 涨了 ⇒ 有进展 ⇒ 归零
+        //   · `n` 没涨 ⇒ 记一次"空转"
+        // 连续空转超过 `stallLimit` ⇒ **停手并说清原因**（⛔ 不装死、⛔ 不空转）。
+        //
+        // 📏 为什么放在**循环头**而不是各个 `continue` 之前：
+        //    出口有 10 多个（每条腿都有 `continue`），逐个加**必然漏**；
+        //    放循环头 ⇒ **任何**路径绕回来都会被记一次 ⇒ 结构上不可能再漏。
+        //    （这正是我上一版把旧帧闸只装在 `unknown` 分支里踩的同一个坑。）
+        var lastN = 0
+        var stallIters = 0
+        /// 空转上限：一轮正常广告约 40~60s、每次循环 1~2s ⇒ 40 次 ≈ 1~2 分钟毫无进展，
+        /// 已经远超"正常慢"，够判死。⛔ 不设成几百（那等于没闸）。
+        let stallLimit = 40
+
         while n < count {
             if isCancelled() { log("§adbox ⛔ 被中断"); break }
+
+            // ── ⭐ §2705 无进展闸：**循环头统一记一次**（见上方长注释）──
+            if n > lastN {
+                lastN = n
+                stallIters = 0
+            } else {
+                stallIters += 1
+                if stallIters >= stallLimit {
+                    log("§adbox ⛔ **连续 \(stallIters) 次循环毫无进展**（收奖励条数停在 \(n)）"
+                        + " ⇒ **停手**（照 §2705 无进展闸）")
+                    log("§adbox ⛔ 多半是这两个原因之一："
+                        + "① **录屏已停**（帧不再更新，画面永远是同一张 ⇒ 点哪都没用）；"
+                        + "② **有弹窗/面板盖住任务列表**且漏斗点不掉它。"
+                        + " ⇒ **请到手机上确认画面**（重开录屏 / 手动关掉弹窗）后再跑")
+                    break
+                }
+            }
+
             guard let img = grab() else { log("§adbox ⛔ 抓帧失败"); break }
             beat(["phase": "adbox-step", "n": n, "of": count])
 
@@ -2621,14 +2672,43 @@ final class FeatureEngine {
         // ── 按轮次选腿（照 PC 2893-2975）──
         switch k {
         case 0:
+            // ⭐⭐⭐⭐⭐ §2722 **苹果 App 广告落地页：点左上那个 ✕**
+            //
+            // ## 用户令（逐字）
+            // > 「就把这个X当锚点做为快手苹果APP落地页」「即是锚点也是返回链路」
+            // > 「刚刚要是能识别是苹果应用落地页他就该走苹果落地页面返回链路。
+            // >   而不是外部返回链路。」
+            //
+            // ## 真机实测（⛔ 不是推测）
+            // ```
+            //   截图 _var/_2722_page0.png  ✕ 笔画 暗=802 盒 51×51  中心基准 (43.2,110.4)
+            //   点它(43,110) ⇒ 全屏像素差 79.3 = 生效
+            //   结果：一步回到广告页（顶栏「已成功领取811金币」+ 右上「广告」+ 底部粉色 CTA）
+            // ```
+            // 📏 与 PC 权威一致：`_1377_ad_loop.py` X_REFS 注释 ——「App Store 页上
+            //   **必然出现、且唯一**的关闭入口 = App 隐私页左上的圆圈 ✕」。
+            //
+            // ## ⛔ 为什么必须排在最前（血案）
+            // 原来这里是 `nav.detect("appstore_done")` —— 而 **config 里没有这个名字**
+            // （`elements` 里从来没有 `appstore_done`）⇒ `detect` 直接返回 nil
+            // ⇒ 这条腿**静默失败**（`tap()` 失败不打日志）⇒ 一路掉到 k=1/2 点 `〈`
+            // ⇒ 在苹果落地页上点「返回」= 按外部页处理 ⇒ **退出快手** ⇒ k=6..8 退到桌面。
+            // 📏 真机 trace 铁证：整轮 **0 条 `§click`**（什么都没点到），
+            //   然后 `§adbox_ret N_6/7/8 返回腿 k=6/7/8：★终端腿 = 回主屏`。
+            if nav.detect("appstore_x", img: img) != nil {
+                log("   §\(tag) 返回腿 k=0：⭐ 苹果 App 落地页左上 ✕ ⇒ 点它（§2722 实测唯一出路）")
+                _ = nav.tap("appstore_x", img: img, atomic: true)
+                return
+            }
             // 面包屑「◀快手」（**OCR 定位**，⛔ 不是写死坐标）
             if nav.detect("breadcrumb", img: img) != nil {
                 log("   §\(tag) 返回腿 k=0：面包屑「◀快手」⇒ 点它（照 PC `click_breadcrumb`）")
                 _ = nav.tap("breadcrumb", img: img, atomic: true)
                 return
             }
-            // 应用内商店页左上「完成」
-            if nav.detect("appstore_done", img: img) != nil {
+            // 旧版式 App Store 页左上「完成」（新版式是上面的 ✕；两者并存）
+            if nav.detect("appstore_page", img: img) != nil,
+               nav.detect("appstore_done", img: img) != nil {
                 log("   §\(tag) 返回腿 k=0：应用内商店页「完成」⇒ 点它")
                 _ = nav.tap("appstore_done", img: img, atomic: true)
                 return
@@ -2663,15 +2743,36 @@ final class FeatureEngine {
                 sleep(1.2)
             }
         default:
-            // ── 终端腿（k>=6）：H:HOME → 点桌面图标重进（照 PC §1633）──
-            log("   §\(tag) 返回腿 k=\(k)：★终端腿 = 回主屏 + 点桌面图标重进（照 PC §1633）")
-            let ok = Navigator.switchToApp(named: "kslite", rec: rec, ble: ble,
-                                           frame: { [weak self] in self?.grab() },
-                                           baseW: baseW, baseH: baseH, yFix: yFix,
-                                           log: { [weak self] s in self?.log(s) })
-            if !ok {
-                log("   §\(tag) 终端腿：桌面没找到「kslite」图标 ⇒ 不放枪（先找到再点）")
-            }
+            // ⛔⛔⛔ §2722 **删掉「终端腿 = 回主屏」** —— 用户令：「他会返回是因为他认为是外部页面」
+            //
+            // ## 为什么删（用户令 + PC 权威 + 真机 trace 三重证据）
+            // > 「**广告转化 怎么一直抽风退出到桌面啊**」
+            // > 「刚刚要是能识别是苹果应用落地页他就该走苹果落地页面返回链路。
+            // >   而不是外部返回链路。」
+            //
+            // 📏 真机 trace（`_var/_2721_logs/run_trace2.log`）逐字：
+            // ```
+            //   06:41:16 §adbox_ret1_6 返回腿 k=6：★终端腿 = 回主屏 + 点桌面图标重进
+            //   06:41:16    ① H:HOME 退出当前 App        ← 退到桌面
+            //   06:41:32 §adbox_ret1_7 返回腿 k=7：★终端腿  ← 又退
+            //   06:41:48 §adbox_ret1_8 返回腿 k=8：★终端腿  ← 第三次
+            // ```
+            // ⇒ 每条广告都退桌面 3 次（本轮共 7 次）。用户看到的「抽风退出到桌面」就是它。
+            //
+            // ## ⛔ 依据：PC **权威导航引擎**里根本没有这条腿
+            // ```
+            //   _1765_nav.py（PC 权威引擎）  'H:HOME' = 0 次  '回主屏' = 0 次  '终端腿' = 0 次
+            //   _1377_ad_loop.py（实验脚本） 'H:HOME' = 24 次 '回主屏' = 49 次 '终端腿' = 7 次
+            // ```
+            // PC 权威引擎是**页面图**：每页声明**唯一**出路（`ext_landing` ⇒ `go="breadcrumb"`，
+            // 苹果落地页 ⇒ 就是它左上那个 ✕）。**没有「回主屏重进」这种兜底。**
+            // ⇒ 手机端照抄的是实验脚本的那个兜底，**架构上就错了**。
+            //
+            // ## ✅ 现在的行为
+            // 返回链只试「页面自己的出路」（k=0..5，其中 k=0 已是 §2722 的苹果落地页 ✕）；
+            // 全试不通 ⇒ **如实说清并停手**，⛔ 不再靠退桌面碰运气（那既毁现场又浪费时间）。
+            log("   §\(tag) 返回腿 k=\(k)：⛔ k≥6 的「终端腿/回主屏」已按 §2722 删除"
+                + "（PC 权威引擎无此腿；它会退到桌面）。本轮到此为止，交回主循环重判。")
         }
     }
 

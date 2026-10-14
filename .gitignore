@@ -6,7 +6,3 @@ DerivedData/
 build/
 *.ipa
 *.xcarchive
-
-# §2704 取证副本：手机上那份 config（`_2704_cfgdiff.py` 拉的）
-# ⛔ 它不是 push-config 的源（推的是 config.json），只是「以手机为准」那次对齐的证据。
-pgconfig/config.phone.json
