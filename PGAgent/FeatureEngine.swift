@@ -164,6 +164,9 @@ final class FeatureEngine {
     ///   只许在基线之上追加，⛔ 删减任何一条 ⇒ `/reload` **拒绝加载**并报 `configErrors`。
     private var forbidKeysCfg: [String] { s?.forbid_keys ?? Self.forbidKeys }
 
+    /// ⭐⭐⭐ §2896 **安装/打开腿的词表** —— 配置优先，⛔ 缺省 = 现在的硬编码 8 条
+    private var installWordsCfg: [String] { s?.install_words ?? Self.installWords }
+
     /// ⭐⭐⭐⭐⭐ §2645 **回广告页的腿序轮数** —— 默认 **9**（照 PC `for k in range(9)`）
     private var returnToAdRounds: Int { max(1, s?.return_to_ad_rounds ?? 9) }
 
@@ -2612,6 +2615,25 @@ final class FeatureEngine {
     ///   ⇒ 配置化**不改行为**（默认值逐字相同），只是让"换版式换颜色"不必重编译。
     static let ctaColorDefault = (rMin: 200.0, gMax: 120.0, bMax: 150.0)
 
+    /// ⭐⭐⭐ §2896 **安装/打开腿的词表**（默认 7 条）—— 配置 `install_words` 可覆盖。
+    ///
+    /// ## 用户令（逐字）
+    /// > 「**没下载的要做下载一般是云图标或者获取 已经下载的要去打开**」
+    ///
+    /// ## ⛔ 为什么必须补「打开」（两端都缺的 MISSING）
+    /// PC `click_install`（`_1377_ad_loop.py:8758`）词表逐字：
+    /// ```python
+    /// if _w.strip() in ("获取","安装","下载","免费","获取APP","获取App"):
+    /// ```
+    /// ⇒ **不含「打开」**；手机移植时照抄了这个缺口 ⇒ **已下载态两端都不做**。
+    /// 真机 `_v2885`（百度地图，**已安装**）实测：`打开` @(370,106) **conf=1.00**
+    /// —— 正是页首右上那枚按钮。⇒ 这是一条**PC 本身也漏**的腿，⛔ 不是"手机漏移植"。
+    static let installWords: [String] = [
+        "获取", "安装", "下载", "免费", "获取APP",
+        "打开",     // ⭐ §2896 用户令「已经下载的要去打开」（PC 词表里没有）
+        "更新",     // ⭐ 已安装且可更新时 iOS 显示的就是它（同一枚按钮）
+    ]
+
     /// ⭐ 点广告页底部的 CTA —— 逐条移植 PC `click_cta`（`_1377_ad_loop.py:1044`）。
     ///
     /// ## PC 的三步（⛔ 顺序不能变）
@@ -2956,7 +2978,7 @@ final class FeatureEngine {
         }
     }
 
-    /// ⭐ 转化：点落地页里的「安装/获取」—— 移植 PC `click_install`（`_1377_ad_loop.py:8738`）。
+    /// ⭐ 转化：点落地页里的「安装/获取/打开」—— 移植 PC `click_install`（`_1377_ad_loop.py:8738`）。
     ///
     /// ## PC 的来历（用户令）
     /// > 「**现在安装的链路也不对，你看看是点击当前屏幕这个云的位置下载。**」
@@ -2968,61 +2990,266 @@ final class FeatureEngine {
     ///   ① 主体**横宽**：w ≥ 1.25·h          （云 30/20=1.50 ✅ ／ 分享方框 20/19=1.05 ✗）
     ///   ② **箭头在主体正下方**：x 相差 ≤10 且 0 < Δy ≤ 25（分享的箭头在上方 ✗）
     /// ```
-    /// ⚠️ 本函数**先过 App Store 页闸**（左上蓝像素）—— PC §1620：光靠形状有 **29% 误报**
-    ///   （美团「镜」/淘宝商品图/微信头像/直播间贴图都会命中），没有这层闸就会在落地页乱点蓝块。
+    ///
+    /// ---
+    ///
+    /// # ⛔⛔⛔ §2896 **本函数被整段重写** —— 三处错，逐条有真机取证
+    ///
+    /// ## 错①：页型闸**提到了文字腿之前**（PC 在**之后**）
+    /// 旧版第①道就是 `guard looksLikeAppStorePage`，不过就 `return`
+    /// ⇒ **把文字腿一起挡死了**。PC 逐字（`_1377_ad_loop.py:8757-8767`）：
+    /// ```python
+    /// for _w,_x,_y in words(img,(0,280,451,977)):   # ① 文字腿：**先跑，无页面闸**
+    ///     if _w.strip() in ("获取","安装","下载","免费",...): click_at(...); return True
+    /// if not is_appstore_page(img): return False     # ② 闸**只挡形状腿**
+    /// _c = find_cloud(img)                           # ③ 形状腿（云朵）
+    /// ```
+    /// 📏 真机铁证（`_v2885`，百度地图 App Store sheet）：
+    /// ```
+    /// 全屏蓝像素 9787，而 BOX_DONE_BLUE=(0,85,140,150) 内 = 0  ⇒ ⛔ 恒不过闸
+    /// §adbox_inst6 不是 App Store 页 ⇒ 跳过点安装        ← 明明就在 App Store 页
+    /// ```
+    ///
+    /// ## 错②：页型判据本身**已过期**（新版 iOS 版式变了）
+    /// 旧判据数「**左上**那一带够不够 iOS 蓝」（PC 标定：App Store 页 289~290，其它页 0）。
+    /// 但新版式（叠加图 `_verify2894/diagnosis.png`）是：
+    /// ```
+    ///   [黑 ✕ 支持] (43,110)              [du]        [ 打开 ] (389,115)  ← 蓝胶囊 3388px
+    /// ```
+    /// ⇒ 左上换成了**黑色 ✕**（`appstore_x` 就是它），蓝色**搬到了右上**。
+    ///   蓝色实测：BOX(左上) = **0**；右上胶囊带(x300..451,y80..160) = **3409**。
+    /// ⚠️ 而且旧判据还会**误判**：H5 落地页 `_stuck2855.jpg`（「了解更多」蓝条）
+    ///   在 BOX 内竟有 **256** 个蓝像素 ⇒ 旧闸**两头都不对**（既漏真、又认假）。
+    /// 📏 `_dev/_2897` 在 **43 张**本地帧上量过分离度：
+    ///   「右上胶囊蓝」在这 43 张里 **App Store sheet = 3409，其余全部 = 0**（干净分开）。
+    ///
+    /// ## 错③：**无闸照抄 PC 会点到诱饵**（这条 PC 自己也踩）
+    /// PC 文字腿 ROI = `(0,280,451,977)`。而真机上 App Store sheet 的结构是：
+    /// ```
+    ///   y=106  打开        ← ⭐ 本 App 自己的按钮（唯一）
+    ///   y=418  获取        ┐
+    ///   y=508  获取        │ ⛔ 全是「更多来自…的 App」/「你可能还喜欢」
+    ///   y=684  获取        │    列表里**别的 App**（百度贴吧/腾讯地图/高德/地铁通）
+    ///   y=773  获取        │    ⇒ 点它 = 下载一堆无关 App，**且都不给广告奖励**
+    ///   y=864  获取        ┘
+    /// ```
+    /// ⇒ PC 的 ROI(y≥280) **恰好把真按钮(y=106)排除、把 5 个诱饵全包进来**。
+    ///   ⛔ 若照 PC 抄 ⇒ **比"什么都不点"更糟**。
+    /// 📏 实测判别特征 = **y 位置**（本 App 按钮在**页首带**；诱饵全在 y≥418），
+    ///   ⛔ 不是词表本身：`_dev/_2895` 逐条量过 6 个候选，
+    ///   页首带 y<200 内**只有 1 个**按钮（唯一性 ✅），其余 5 个「获取」的
+    ///   蓝底只有 273~285 px（小图标），而真按钮有 **3129 px**（实心胶囊）。
+    ///
+    /// ## ✅ 现在的腿序（= PC 顺序 + 一条防诱饵的 ROI 选择）
+    /// ```
+    /// ① 文字腿（**先跑，无页面闸** —— 照 PC）—— ROI 按"是不是 sheet"**二选一**：
+    ///      · 是 App Store sheet ⇒ 扫**页首带** y55..205（本 App 自己的按钮）
+    ///        ⛔ 这就是防诱饵那条：推荐列表里的「获取」全在 y≥418
+    ///      · 不是 sheet（H5 落地页）⇒ 扫 PC 原 ROI y280..977（照抄，⛔ 不改）
+    ///    词表含「打开/更新」（用户令：已下载要去打开；PC 词表缺这条）
+    /// ② 形状腿（云朵）—— **这里才过页型闸**（照 PC §1620 的 29% 误报闸）
+    /// ③ 点完补一枪「安装」确认弹层（照 PC §1728/§1783）
+    /// ```
+    /// ⚠️ 文字腿过 `forbidden()` 支付红线闸（照 PC：⛔ 绝不点支付/购买）。
     private func clickInstall(_ img: UIImage, tag: String) {
-        // ① App Store 页闸（照 PC `is_appstore_page`，BOX_DONE_BLUE）
-        guard Self.looksLikeAppStorePage(img) else {
-            log("   §\(tag) 不是 App Store 页 ⇒ 跳过点安装（照 PC §1620 的误报闸）")
+        // ⭐ 判「这是不是 App Store sheet」——只用来**选文字腿扫哪一带**
+        //   （⛔ 不用它当"允许/禁止点安装"的闸 —— 那正是错①）
+        //   两条并列：新判据（右上蓝胶囊）或 `appstore_x`（左上黑 ✕，实测有命中）
+        let onSheet = Self.looksLikeAppStorePage(img) || nav.detect("appstore_x", img: img) != nil
+
+        // ── ① 文字腿（**先跑，无页面闸** —— 照 PC `click_install` 的腿序）──
+        let textROI = onSheet ? Self.boxInstallTop : Self.boxInstallWide
+        let where_ = onSheet ? "页首带(本 App 自己的按钮)" : "宽 ROI(H5 落地页，照 PC)"
+        if onSheet {
+            log("   §\(tag) 安装文字腿：⭐ 判为 **App Store sheet** ⇒ 只扫**页首带**"
+                + "（⛔ 不扫宽 ROI：那 5 个「获取」是推荐列表里**别的 App**，点了会下错 App）")
+        }
+        if let hit = Self.findInstallWord(img, rec: rec, roi: textROI,
+                                         words: installWordsCfg, extraKeys: forbidKeysCfg) {
+            log("   §\(tag) 安装文字腿[\(where_)]：「\(hit.0)」"
+                + "@(\(Int(hit.1.midX)),\(Int(hit.1.midY)))⇒ 点它")
+            nav.tapPoint(Double(hit.1.midX), Double(hit.1.midY), why: "安装文字腿（\(where_)）")
+            Self.waitAndClickInstallConfirm(rec: rec, nav: nav, log: log, tag: tag,
+                                            extraKeys: forbidKeysCfg, grab: grab,
+                                            isCancelled: isCancelled)
             return
         }
-        // ② 形状判据（云朵：横宽 + 箭头在下方）
-        if let p = Self.findDownloadCloud(img) {
-            log("   §\(tag) 云朵下载钮 @(\(Int(p.x)),\(Int(p.y)))（横宽+箭头在下方 双判据）⇒ 点它")
-            nav.tapPoint(Double(p.x), Double(p.y), why: "云朵下载钮（App Store）")
-            return
+
+        // ── ② 形状腿（云朵）—— **必须过页型闸**（照 PC §1620）──────────────
+        if Self.looksLikeAppStorePage(img) {
+            if let p = Self.findDownloadCloud(img) {
+                log("   §\(tag) 云朵下载钮 @(\(Int(p.x)),\(Int(p.y)))（横宽+箭头在下方 双判据）⇒ 点它")
+                nav.tapPoint(Double(p.x), Double(p.y), why: "云朵下载钮（App Store）")
+                Self.waitAndClickInstallConfirm(rec: rec, nav: nav, log: log, tag: tag,
+                                                extraKeys: forbidKeysCfg, grab: grab,
+                                                isCancelled: isCancelled)
+                return
+            }
+        } else {
+            log("   §\(tag) 安装形状腿：不在 App Store 模态页 ⇒ **不找云朵**"
+                + "（照 PC §1620：光靠形状有 29% 误报）")
         }
-        // ③ 文案兜底（⛔ 过后只有文字版式才有用）
-        for (t, r, _c) in rec.ocrRegion(img, rect: CGRect(x: 0, y: 320, width: baseW, height: 440),
-                                        minConfidence: 0.3) {
-            if ["获取", "安装", "下载", "免费"].contains(where: { t.contains($0) }) {
-                if let bad = Self.forbidden(t, extraKeys: forbidKeysCfg) {
-                    log("   §\(tag) ⛔ 安装文案「\(t)」含违规词「\(bad)」⇒ 跳过")
-                    continue
-                }
-                log("   §\(tag) 安装文案兜底：「\(t)」⇒ 点它")
-                nav.tapPoint(Double(r.midX), Double(r.midY), why: "安装文案兜底")
+        log("   §\(tag) ⚠️ 没找到安装/打开钮（文字腿/云朵都没中）⇒ 不点")
+    }
+
+    /// §2896 **安装/打开腿的两条 ROI**（基准 451×977 像素）
+    ///
+    /// · `boxInstallTop`  —— **页首带**：App Store sheet **本 App 自己**的按钮
+    ///   （新版式右上「打开/获取」@y≈106；旧版式左上「完成」@y≈85..150）。
+    ///   ⛔ 上沿取 55（避开状态栏时间/电量），下沿取 205（⛔ 不到推荐列表 y≈418）。
+    /// · `boxInstallWide` —— **宽 ROI（照 PC `words(img,(0,280,451,977))`）**：
+    ///   给 **H5 落地页**用（真机 `_v2890`：`下载应用`@735、`立即下载`@837）。
+    ///   ⛔ 在 App Store sheet 上**禁用**（会命中别的 App 的「获取」）。
+    static let boxInstallTop = CGRect(x: 0, y: 55, width: 451, height: 150)
+    static let boxInstallWide = CGRect(x: 0, y: 280, width: 451, height: 697)
+
+    /// §2896 在 `roi` 内找**安装/打开词**（先精确匹配，再子串匹配）。
+    ///
+    /// ## ⛔ 为什么分两遍（精确优先）
+    /// 「打开」这类词很容易**出现在一句话里**（如「打开APP」「点击打开」）——
+    /// 而按钮上的字是**独立**的（`text == "打开"`）。
+    /// ⇒ 先收**独立成词**的（可信度高），再退到**子串**（覆盖「获取APP」这类变体）。
+    /// 两遍都过 `forbidden()` 支付红线闸（照 PC：⛔ 绝不点支付/购买）。
+    ///
+    /// - Returns: (命中的文字, 它的框)；⛔ 没有 ⇒ nil（调用方**不放枪**）
+    static func findInstallWord(_ img: UIImage, rec: Recognizer, roi: CGRect,
+                                words: [String], extraKeys: [String]?)
+        -> (String, CGRect)? {
+        let items = rec.ocrRegion(img, rect: roi, minConfidence: 0.3)
+        // ① 精确匹配（去掉空白后**整体等于**某个词）
+        for (t, r, _c) in items {
+            let s = t.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard words.contains(where: { s == $0 || s == $0 + "APP" || s == $0 + "App" })
+            else { continue }
+            if forbidden(t, extraKeys: extraKeys) != nil { continue }
+            return (t, r)
+        }
+        // ② 子串匹配（兜底）
+        for (t, r, _c) in items {
+            guard words.contains(where: { t.contains($0) }) else { continue }
+            if forbidden(t, extraKeys: extraKeys) != nil { continue }
+            return (t, r)
+        }
+        return nil
+    }
+
+    /// §2896 **点完下载钮后的「安装」确认弹层补枪**（照 PC §1728/§1783 `_wait_and_click_install`）。
+    ///
+    /// ## 为什么必须有（PC 逐字 `_1377_ad_loop.py:8753-8755`）
+    /// > 点完下载钮后**再抓一帧、只认「安装」两个字补一枪** ——
+    /// > iOS 会拿「App Store / 账户 / 安装」确认弹层盖住整屏，
+    /// > 不点掉它后面的浏览/返回全打在弹层上。⛔ 无弹层就不动。
+    ///
+    /// ## PC 的改法（§1783，逐字）
+    /// ```python
+    /// # ⭐§1783 **轮询等确认层**（⛔ 原来是固定 wait(3.0) 抓一帧 ⇒ 没等到就跳过）
+    /// _wait_and_click_install("inst")
+    /// ```
+    /// ⇒ ⭐ **轮询**（不是固定等一次）—— 弹层是异步出现的。
+    ///
+    /// - Parameter grab: 取**新帧**的闭包（⛔ 不用调用方那张旧帧 —— 弹层还没出现）
+    /// - Parameter isCancelled: ⛔ 不许用裸 `Thread.sleep`（本工程纪律：`sleepWithCancel`）
+    ///   —— 否则用户点「停止」后还要等满 6×1.2s 才停得下来。
+    static func waitAndClickInstallConfirm(rec: Recognizer, nav: Navigator,
+                                           log: (String) -> Void, tag: String,
+                                           extraKeys: [String]?,
+                                           grab: () -> UIImage?,
+                                           isCancelled: () -> Bool) {
+        // ⛔ 只认「安装」两个字（照 PC）；ROI = 屏幕中部（弹层按钮行）
+        let roi = CGRect(x: 0, y: 380, width: 451, height: 320)
+        for i in 0..<6 {
+            if isCancelled() { return }
+            // ⭐ 可中断的等待（每 0.2s 检查一次取消，照 `sleepWithCancel`）
+            var left = 1.2
+            while left > 0, !isCancelled() {
+                let d = min(0.2, left)
+                Thread.sleep(forTimeInterval: d)
+                left -= d
+            }
+            if isCancelled() { return }
+            // 每一轮**重新抓帧**（弹层会动/会晚到）
+            guard let cur = grab() else { continue }
+            let items = rec.ocrRegion(cur, rect: roi, minConfidence: 0.3)
+            for (t, r, _c) in items {
+                let s = t.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard s == "安装" || s == "安装APP" else { continue }
+                if forbidden(t, extraKeys: extraKeys) != nil { continue }
+                log("   §\(tag) 安装确认弹层：「\(t)」@(\(Int(r.midX)),\(Int(r.midY)))"
+                    + "（第 \(i + 1) 轮轮询命中）⇒ 补一枪")
+                nav.tapPoint(Double(r.midX), Double(r.midY), why: "安装确认弹层")
                 return
             }
         }
-        log("   §\(tag) ⚠️ 没找到安装钮（云朵/文案都没中）⇒ 不点")
+        log("   §\(tag) 安装确认弹层：6 轮都没出现 ⇒ ⛔ 不动（照 PC：无弹层就不动）")
     }
 
-    /// 照 PC `is_appstore_page`：左上「完成/打开」那一带是否够 **iOS 蓝**。
+    /// ⭐⭐⭐ §2896 **是不是 App Store 模态页** —— 判据已按**新版式**重写。
     ///
-    /// PC 全量真帧标定（5071 帧）：App Store 模态页 = **289~290** 个蓝像素；**其它任何页面 = 0**。
-    /// ⇒ 阈值取 **100**（两侧各留 ~3 倍余量）。
-    /// ⚠️ 真机实测（`_dev/_2423_appstore_page.py`）：新版 iOS 上这台机器只有 **25** 个蓝像素
-    ///   ⇒ 阈值 100 会**漏判**。⇒ 这里放宽到 15，并且**另配文案判据**（`更多来自/获取/打开`）。
+    /// # ⛔⛔⛔ 为什么必须重写（旧判据在新版 iOS 上**结构性恒 false**）
     ///
-    /// ⛔⛔ §2631 **全局适配**：`BOX_DONE_BLUE=(0,85,140,150)` 是**基准坐标**
-    ///   ⇒ 必须**先归一到基准**再索引像素（⛔ 否则帧 888 宽时会扫错区域）。
-    ///   （本函数属"像素类判据"；OCR 类走 `ocrRegion`，那里**已经**有比例换算，不受影响。）
+    /// ## 旧判据（PC `is_appstore_page`，`_1377_ad_loop.py:8584` 逐字）
+    /// ```python
+    /// _a = np.asarray(img.crop(BOX_DONE_BLUE)).astype(np.int16)   # (0,85,140,150) ← **左上**
+    /// return int(((_b > 170) & (_b - _r > 60) & (_g > 60) & (_g < 210)).sum()) >= 100
+    /// ```
+    /// PC 全量真帧标定：App Store 模态页 = **289~290** 个蓝像素；其它任何页面 = **0**。
+    /// ⇒ 前提是「App Store 页**左上**有块蓝色的『完成』」—— ⛔ **那是旧版式**。
+    ///
+    /// ## ⛔ 新版式（真机 `_v2885`，叠加图 `_verify2894/diagnosis.png`）
+    /// ```
+    ///   [黑 ✕ 支持] (43,110)              [du]        [ 打开 ] (389,115)  ← 蓝胶囊
+    /// ```
+    /// ⇒ 左上换成了**黑色 ✕**（`appstore_x` 就是它），**蓝色搬到了右上**。
+    ///
+    /// ## 📏 实测（`_dev/_2892` + `_dev/_2897`，43 张帧）
+    /// | 位置 | 蓝像素 |
+    /// |---|---|
+    /// | 旧 `BOX_DONE_BLUE`(0,85,140,150) 左上 | **0** ⇒ ⛔ 恒不过闸 |
+    /// | 右上胶囊带(300..451, 80..160) | **3409** ⇒ ✅ 干净命中 |
+    ///
+    /// ⚠️ 旧判据还会**误判**：H5 落地页 `_stuck2855.jpg`（「了解更多」蓝条）
+    ///   在旧 BOX 内竟有 **256** 个蓝像素（> 手机端阈值 15）⇒ 旧闸**两头都不对**。
+    ///
+    /// ## ✅ 新判据 = **两条并列**（覆盖新旧两种版式，⛔ 不是"都要"）
+    /// ① **右上蓝胶囊**：新版式 sheet 的「打开/获取」按钮（实测 3409 vs 其余 0）
+    /// ② **左上蓝「完成」**：旧版式（PC 原判据，保留 ⇒ ⛔ 不互斥）
+    ///
+    /// ⛔⛔ §2631 **全局适配**：基准坐标 ⇒ **必须先归一到基准**再索引像素。
     static func looksLikeAppStorePage(_ img: UIImage) -> Bool {
         let base = FrameNormalizer.normalize(img)      // ⭐ §2631 先归一
         guard let cg = base.cgImage, let data = cg.dataProvider?.data,
               let ptr = CFDataGetBytePtr(data) else { return false }
         let bpr = cg.bytesPerRow, bpp = cg.bitsPerPixel / 8
-        // BOX_DONE_BLUE = (0, 85, 140, 150)
-        var n = 0
-        for y in 85..<min(150, cg.height) {
-            for x in 0..<min(140, cg.width) {
-                let o = y * bpr + x * bpp
-                let r = Int(ptr[o]), g = Int(ptr[o + 1]), b = Int(ptr[o + 2])
-                if b > 180 && r < 120 && g > 80 && g < 190 { n += 1 }
+
+        /// iOS 蓝（与 PC `_b > 170 && _b-_r > 60 && _g in 60..210` 同口径）
+        func isBlue(_ x: Int, _ y: Int) -> Bool {
+            let o = y * bpr + x * bpp
+            let r = Int(ptr[o]), g = Int(ptr[o + 1]), b = Int(ptr[o + 2])
+            return b > 180 && r < 120 && g > 80 && g < 190
+        }
+
+        // ① ⭐ 新版式：**页首右上那枚蓝胶囊**（「打开/获取」按钮本体）
+        //
+        // ⛔ 阈值取 **1200**：实测真 sheet = **3409**，而 43 张其它帧**全 0**
+        //   ⇒ 放这里有两倍余量，且离"0"极远（⛔ 不会被小蓝图标蹭到）。
+        //   复核（`_dev/_2895`）：5 个诱饵「获取」的蓝底只有 273~285 px ⇒ 远低于 1200。
+        // ⚠️ 下界 300 是本判据**新增**的（旧代码下界恒 0）⇒ 必须钳制，
+        //   ⛔ 免得 `300..<min(451, w)` 在 w<300 时崩（`Range requires lowerBound <= upperBound`）。
+        var capsule = 0
+        let capX1 = min(451, cg.width), capY1 = min(160, cg.height)
+        if capX1 > 300, capY1 > 80 {
+            for y in 80..<capY1 {
+                for x in 300..<capX1 where isBlue(x, y) { capsule += 1 }
             }
         }
-        return n >= 15
+        if capsule >= 1200 { return true }
+
+        // ② 旧版式的「左上蓝『完成』」—— 保留（两种版式并存，⛔ 不互斥）
+        var legacy = 0
+        for y in 85..<min(150, cg.height) {
+            for x in 0..<min(140, cg.width) where isBlue(x, y) { legacy += 1 }
+        }
+        return legacy >= 15
     }
 
     /// 找 App Store 详情页那个**蓝色云朵（下载/安装）**：主体横宽 + 箭头在正下方。

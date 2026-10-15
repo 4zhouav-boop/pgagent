@@ -386,6 +386,20 @@ struct PGConfig: Codable {
         /// ⚠️ 唯一读取点 = `FeatureEngine.ctaKeysCfg`（⛔ 不许各写一份）。
         var cta_keys: [String]?
 
+        /// ⭐⭐⭐ §2896 **安装/打开腿的词表** —— 默认 = `FeatureEngine.installWords` 那 7 条。
+        ///
+        /// ## ⛔ 为什么必须能配（用户令，逐字）
+        /// > 「**没下载的要做下载一般是云图标或者获取 已经下载的要去打开**」
+        ///
+        /// 📏 实测：PC `click_install`（`_1377_ad_loop.py:8758`）词表 =
+        ///   `("获取","安装","下载","免费","获取APP","获取App")` —— **不含「打开」**；
+        ///   手机移植时照抄了这个缺口 ⇒ **已下载态两端都不做**。
+        ///   真机 `_v2885`：`打开` @(370,106) conf=**1.00**（页首右上，正是本 App 的按钮）
+        ///   ⇒ 这是一条**两端都缺**的 MISSING，⛔ 不是"手机漏移植"。
+        ///
+        /// ⚠️ 唯一读取点 = `FeatureEngine.installWordsCfg`（⛔ 不许各写一份）。
+        var install_words: [String]?
+
         /// ⛔⛔⛔ **禁点词（支付红线）** —— 默认 = `FeatureEngine.forbidKeys` 那 25 条。
         ///
         /// ⚠️ 本字段**受自检保护**：只许在基线之上**追加**，⛔ **不许删减**
