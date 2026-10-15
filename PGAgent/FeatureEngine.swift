@@ -255,6 +255,7 @@ final class FeatureEngine {
         var emptyRounds = 0
         var scrollTries = 0          // ⭐ §2309 任务列表翻页次数
         var adEntryToggle = 0        // ⭐ §2315 入口轮换计数（宝箱 ↔ 看广告得金币）
+        var cooldownWaits = 0        // ⭐ §2911 目标行"在屏上但按钮冷却"的等待次数（有界）
 
         // ⭐⭐⭐⭐⭐ §2705 **无进展闸（"无限循环"的正解）**
         //
@@ -911,6 +912,45 @@ final class FeatureEngine {
             // ✅ 正解：在放弃之前，**先下滑让任务列表往上走**（方向真机实测过，见 `swipeDownList` 注释），再找一次。
             //    ⛔ 但仍守铁律②：只认「看广告得金币」那一行，换行一律不点。
             //    滚动也不是盲动：它是"把已知列表继续翻页"，不是"点某个固定坐标"。
+            // ⭐⭐⭐⭐⭐ §2911 **目标行"在屏上、但按钮是冷却态" ⇒ 等冷却**（⛔ 不滚动列表）
+            //
+            // ## ⛔ 真机现场（0.19，2026-10-16 00:31，用户报「卡死在任务中心 不看广告」）
+            // ```
+            // §adbox 按行定位到「看广告得金币」行 ⇒ 按钮 领福利 @(393,339)
+            // §tapPoint ★点坐标（按行定位的「看广告得金币」按钮）…
+            // §adbox ⚠️ 点了任务但没进广告页 ⇒ 重试
+            // §adbox_row ⏭ 「看广告得金币」行按钮是「冷却中」（**非动作态**）⇒ 本腿放弃
+            // §adbox ⬇ 本屏没有目标行 ⇒ 下滑任务列表再找（第 1/6 次）   ← ⛔ 滚了 4 次，全废
+            // §adbox ⛔ 被中断
+            // ```
+            // ⇒ 用户看到的就是「**卡死在任务中心、不往下看广告**」。
+            //
+            // ## ⛔ 根因：`findAdRowButton` 返回 nil 时**两种完全不同的情形被混为一谈**
+            // ```
+            //   ① 目标行**在屏幕下方**（没滚出来）    ⇒ 下滑列表**有用**   ✅ 现有滚动腿对
+            //   ② 目标行**就在屏上**，但按钮是冷却态  ⇒ 下滑列表**毫无用处** ⛔ 现有滚动腿错
+            // ```
+            // 📏 ② 的证据（PC `_1377_ad_loop.py:2112-2113` 逐字）：
+            // > 同屏并存两条广告行时，`看广告得金币` 那行右列是 **`冷却中`**（禁用；下方还有
+            // > `00:43 倒计时结束继续领金币`）⇒ **点它 3 轮毫无反应**
+            // ⇒ 冷却态的正确出路是 **等**（那行自己写着"倒计时结束继续领"），⛔ 不是滚动、⛔ 不是放弃。
+            //
+            // ✅ 现在：先判"行在屏上但按钮冷却"⇒ **按冷却剩余秒数等**，等完 `continue` 重判；
+            //    ⛔ 不滚动列表（省掉 6 次无效下滑），⛔ 也不立刻放弃。
+            // ⚠️ 有界：最多等 `cooldownWaits` 次（⛔ 免得"今日已领完"那种永久冷却把整轮耗死）。
+            if cooldownWaits < 6, let cd = adRowCooldown(img) {
+                cooldownWaits += 1
+                scrollTries = 0                       // ⭐ 行在屏上 ⇒ 滚动预算归零（下次仍先判冷却）
+                let secs = cd.seconds
+                let wait = min(max(secs ?? 15.0, 5.0) + 3.0, 90.0)
+                log("§adbox ⏳ 「看广告得金币」行按钮是「\(cd.button)」（冷却态）⇒ 等 \(Int(wait))s"
+                    + "（第 \(cooldownWaits)/6 次）"
+                    + (secs != nil ? "［行上写着约 \(Int(secs!))s］" : "")
+                    + " ⇒ ⛔ **不滚动列表**（行就在屏上，滚动没用）")
+                sleep(wait)
+                continue
+            }
+
             var found = false
             // ⭐ 预算 6 次：真机实测目标行在列表靠上位置，需 3~4 次下滑才露出来
             if scrollTries < 6 {
@@ -1331,6 +1371,76 @@ final class FeatureEngine {
     /// `冷却中`/`倒计时…`/`已领取`/`已完成` 都是**状态**（按了不会有任何事）」。
     private static let adRowDeadKeys = ["冷却中", "倒计时", "已领取", "已领完",
                                         "已完成", "已抢光", "明日再来", "已瓜分"]
+
+    /// ⭐⭐⭐ §2911 **「看广告得金币」行在屏上、但按钮是冷却态** ⇒ 返回 (按钮文案, 冷却秒数?)
+    ///
+    /// ## ⛔ 为什么必须单独一个判据（真机血案，用户报「卡死在任务中心 不看广告」）
+    /// `findAdRowButton` 返回 nil 时**两种情形被混为一谈**：
+    /// ```
+    ///   ① 目标行在屏幕下方（没滚出来）     ⇒ 下滑列表有用    ✅
+    ///   ② 目标行就在屏上，按钮冷却态       ⇒ 下滑毫无用处    ⛔ ← §2911 漏的就是这条
+    /// ```
+    /// PC 原文（`_1377_ad_loop.py:2112-2113` 逐字）：
+    /// > 同屏并存两条广告行时，`看广告得金币` 那行右列是 **`冷却中`**（禁用；下方还有
+    /// > `00:43 倒计时结束继续领金币`）⇒ 点它 3 轮毫无反应
+    /// ⇒ 冷却态的正确出路是**等**（行上自己写着"倒计时结束继续领"），⛔ 不是滚动、⛔ 不是放弃。
+    ///
+    /// ## 判据（照 PC 的行结构，⛔ 不新造）
+    /// ① 用同一套 `_ocr_rows` + `taskRowY` 找到「看广告得金币」那行的 y
+    /// ② 取该行 ±`AD_ROW_Y_WIN`、x ≥ `AD_ROW_X_MIN` 的**最右**词 = 按钮
+    /// ③ 按钮含 `AD_ROW_DEAD_KEYS` ⇒ 冷却态 ✅；否则（是"领福利"这种动作态）⇒ nil
+    ///
+    /// - Returns: `(按钮文案, 行上读到的剩余秒数)`；⛔ 行不在屏上 / 按钮是动作态 ⇒ nil
+    private func adRowCooldown(_ img: UIImage) -> (button: String, seconds: Double?)? {
+        let band = CGRect(x: 0, y: 250, width: baseW, height: baseH - 250)
+        let ws = rec.ocrRegion(img, rect: band, minConfidence: 0.3)
+        guard !ws.isEmpty else { return nil }
+        let rows = Self.ocrRows(ws, yWin: Self.adRowYWin)
+        guard let yRow = Self.taskRowY(rows, words: Self.adRowTaskWords) else { return nil }
+        // 该行 ±26 内、x≥330 的词 ⇒ 最右那个当按钮（照 PC 的排序）
+        var cands: [(String, CGPoint)] = []
+        for r in rows where abs(r.y - yRow) <= Self.adRowYWin {
+            for w in r.items where w.center.x >= Self.adRowXMin {
+                cands.append((w.text, w.center))
+            }
+        }
+        guard !cands.isEmpty else { return nil }
+        cands.sort { a, b in
+            if a.1.x != b.1.x { return a.1.x > b.1.x }
+            return abs(a.1.y - yRow) < abs(b.1.y - yRow)
+        }
+        let (bt, _) = cands[0]
+        // ⛔ 动作态（领福利/去观看…）⇒ 不是冷却，交给正常腿去点
+        guard Self.adRowDeadKeys.contains(where: { bt.contains($0) }) else { return nil }
+        // ⭐ 从**整行**文字里找剩余秒数（PC 原文：`00:43 倒计时结束继续领金币`）
+        //
+        // 支持两种写法：`00:43`（mm:ss）与 `43s`/`43秒`
+        let rowText = rows.filter { abs($0.y - yRow) <= Self.adRowYWin }
+                         .flatMap { $0.items.map(\.text) }.joined(separator: " ")
+        return (bt, Self.cooldownSeconds(in: rowText))
+    }
+
+    /// §2911 从一行文字里读**冷却剩余秒数**：支持 `mm:ss`（PC 原文的 `00:43`）与 `43s`/`43秒`。
+    /// ⛔ 读不到 ⇒ nil（调用方退回一个保守的默认等待，⛔ 不去猜）。
+    static func cooldownSeconds(in text: String) -> Double? {
+        let ns = text as NSString
+        let full = NSRange(location: 0, length: ns.length)
+        if let m = cooldownClockRx.firstMatch(in: text, options: [], range: full),
+           m.numberOfRanges >= 3 {
+            let mm = Double(ns.substring(with: m.range(at: 1))) ?? 0
+            let ss = Double(ns.substring(with: m.range(at: 2))) ?? 0
+            return mm * 60 + ss
+        }
+        if let m = cooldownSecsRx.firstMatch(in: text, options: [], range: full),
+           m.numberOfRanges >= 2 {
+            return Double(ns.substring(with: m.range(at: 1)))
+        }
+        return nil
+    }
+
+    /// §2911 冷却剩余时间：`mm:ss`（PC 原文的 `00:43`）与 `43s`/`43秒` 两种写法
+    private static let cooldownClockRx = try! NSRegularExpression(pattern: "(\\d{1,2})\\s*:\\s*(\\d{1,2})")
+    private static let cooldownSecsRx = try! NSRegularExpression(pattern: "(\\d{1,3})\\s*(?:s|S|秒)")
 
     /// ⭐⭐⭐ 按**行结构**定位「看广告得金币」那道任务行右侧的入口按钮。
     ///
@@ -2638,19 +2748,59 @@ final class FeatureEngine {
     ///
     /// ## PC 的三步（⛔ 顺序不能变）
     /// ```
-    /// ① 硬闸：is_shop_ad → 直接拒绝（购物广告不转化，用户口径）
-    /// ② 形状优先：底部**最宽**粉色药丸，且**必须居中**（|cx-225| ≤ 10）
+    /// ① 形状优先：底部**最宽**粉色药丸，且**必须居中**（|cx-225| ≤ 10）
     ///    ⛔ §1522 真机：不居中就点到 scr(88,886) 的创意红条 ⇒ "转化"名存实亡
     ///    命中后**再 OCR 复核文案**，含 FORBID_KEYS ⇒ 拒绝
-    /// ③ 文案兜底：CTA_KEYS 命中 + 粉色质心；再不行用偏心粉带当"一次广告点击"
+    /// ② 文案兜底：CTA_KEYS 命中 + 粉色质心
+    /// ③ 兜底之兜底：偏心粉带也点（点广告画面本身也算一次广告点击）
     /// ```
+    ///
+    /// ---
+    ///
+    /// # ⛔⛔⛔ §2911 **删掉「购物/电商型广告 ⇒ 拒绝点 CTA」那道闸**
+    ///
+    /// ## 用户令（逐字，本轮）
+    /// > 「**购物广告也要做浏览的 只是不支付 你看看PG控制器的基准**」
+    ///
+    /// ## 📏 PC 基准里，用户**说过三次**，而我抄的是被推翻的那一版
+    /// ```python
+    /// # L1540（用户 2026-10-04 14:03，逐字）
+    /// #   「**老子说的不是不转化 是不支付，你给我搞清楚**」
+    /// #   ⇒ 我一直在代码/日志里写「用户口径：购物广告不做转化」—— 那是**我编的**，不是用户的话。
+    /// #   ✅ **真正的红线只有一条：不支付 / 不购买**（由 FORBID_KEYS 硬闸守）。
+    /// #   ⇒ **转化照做**（点 CTA 互动）—— 购物型也一样，只要点的不是支付/购买钮。
+    ///
+    /// # L1564（用户纠正）
+    /// #   「**我说不支付 不是说不浏览**」⇒ **购物/电商型广告也要做转化**（点 CTA → 先安装 → 后浏览）。
+    ///
+    /// # L8542-8544（browse_landing 里，逐字）
+    /// #   「我上一版加的"购物/电商型跳过滑动"**是错的，已撤销** —— **购物广告也要浏览**。」
+    /// #   ⛔「**刚刚第一个购物广告 你一直在页面滑动。无效动作。**」
+    /// ```
+    /// ⇒ 📏 **`_note_2730`（PC 规格）已明确裁定这个矛盾**（L147-150 逐字）：
+    /// > ⚠️ 「`is_shop_ad` 那道闸的语义已被后续版本推翻 …… 移植时建议：
+    /// >   **以 L9640/9650 的用户口径为准**（购物广告做转化，只禁支付），并保留 `FORBID_KEYS` 硬闸。」
+    ///
+    /// ## ⛔ 我的错（真机 0.19 现场，2026-10-16 00:31）
+    /// ```
+    /// §adbox_cta1 ⛔ 购物/电商型广告（底栏命中 ["立即购买"]）⇒ **拒绝点 CTA**
+    /// §adbox ⚠️ 没找到可点的 CTA（过闸后）⇒ 本条不做转化，直接收奖励   ← ⛔ 零转化
+    /// ```
+    /// ⇒ 用户要的「**购物广告也要浏览**」**一次都没做**。
+    ///
+    /// ## ✅ 现在（照 PC 基准 + 用户令）
+    /// **购物型广告照做转化 + 浏览**；红线仍由 `forbidden()`（`forbid_keys` 32 条）守住 ——
+    /// 实测「立即购买/去购买/领券购买」都被 `购买` 拦、「秒杀/限时秒杀」被 `秒杀` 拦、
+    /// 「加购/购物车/进店」也都在表里 ⇒ ⛔ **点不到支付/购买钮**。
+    /// `isShopAd` 仍保留（只用于**日志**，说明本条是购物型），⛔ 不再当"拒绝"闸。
+    ///
     /// - Returns: 点到了哪条腿（供日志）；nil = 没点（⛔ 不放枪）
     private func clickCTA(_ img: UIImage, tag: String) -> String? {
-        // ① 硬闸：购物/电商型广告
+        // ⭐ §2911 购物型**不再拒绝转化** —— 只记一笔日志（照 PC L9652 的语义）
         let (shop, shopHit) = isShopAd(img)
         if shop {
-            log("   §\(tag) ⛔ 购物/电商型广告（底栏命中 \(shopHit.prefix(3))）⇒ **拒绝点 CTA**")
-            return nil
+            log("   §\(tag) ⭐ 购物/电商型广告（底栏命中 \(shopHit.prefix(3))）⇒ **照做转化**"
+                + "（用户令：不支付≠不转化、≠不浏览；⛔ 支付/购买由 forbid_keys 拦）")
         }
         // ② 形状优先：底部最宽粉色药丸（纯像素，⛔ 不过 OCR）
         //
