@@ -253,11 +253,16 @@ final class BLEController: NSObject, ObservableObject {
     /// ```
     enum SwipeSpeed: String {
         case fast, mid, slow
+        /// ⭐ 回主屏专用档（§1645 实测：**120ms 生效、250ms 无效**）
+        /// PC `HOME_FLING = (225,971,225,300,**120**)` —— 与 `.fast`(100) 不同，
+        /// ⛔ 不要用 `.fast` 代替：注释写 120 而代码发 100 是曾经的 bug。
+        case homeFling
         var ms: Int {
             switch self {
-            case .fast: return 100
-            case .mid:  return 220
-            case .slow: return 2000
+            case .fast:      return 100
+            case .mid:       return 220
+            case .slow:      return 2000
+            case .homeFling: return 120
             }
         }
     }
