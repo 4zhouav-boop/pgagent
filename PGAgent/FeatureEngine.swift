@@ -509,9 +509,22 @@ final class FeatureEngine {
                         let d = min(2.0, left)
                         sleep(d)
                         left -= d
-                        // ⭐ 等待期间看有没有面板冒出来（`继续观看` 要点了倒计时才走）
-                        if let im2 = grab(), finishAdPanel(im2, tag: "adbox_dwell\(n + 1)") {
-                            log("   §adbox 停留中面板出现 ⇒ 已处理")
+                        // ⭐⭐⭐⭐⭐ §2832 **只补全、不关闭**（照 PC `wait()` + `click_toast_x` 第一段）
+                        //
+                        // ## ⛔⛔ 血案（0.16 真机日志，用户报「没有等待 + 提前点 ✕」）
+                        // 这里原来调的是 `finishAdPanel()` —— 它**会点胶囊 ✕**（腿序第③条）
+                        // ⇒ 停留才 10 秒就把广告关掉了：
+                        // ```
+                        // 10:46:32  ⏳ 本条广告停留（还需 46s / 目标 46s）
+                        // 10:46:41  顶栏胶囊 ✕（面板已不在、且已无倒计时）⇒ 点它   ← ⛔ 自己点的
+                        // 10:46:42  §click pill_x @(220,89)
+                        // ```
+                        // ## ✅ 正解（PC `_1377_ad_loop.py:4395` 的 `wait()` 就是纯 `time.sleep`）
+                        //   等待期间**唯一**允许的动作 = 点「继续观看」把广告补全
+                        //   （PC `click_toast_x` L4333 那段：命中「继续观看」⇒ 点它 ⇒ **return**）
+                        //   ⛔ 绝不点胶囊 ✕ / 面板 ✕ —— 那是**等满之后** G4 的事。
+                        if let im2 = grab(), completeAdPanelOnly(im2, tag: "adbox_dwell\(n + 1)") {
+                            log("   §adbox 停留中面板需要补全 ⇒ 已点「继续观看」（⛔ 未关广告）")
                         }
                     }
                     // 停留结束后刷新一次（下面 G3 要用最新帧）
@@ -538,34 +551,65 @@ final class FeatureEngine {
                     return 45.0          // 读不到 N ⇒ PC 的默认（`_need … else 45`）
                 }()
                 log("   §adbox G3 胶囊倒计时 N ⇒ 最多等 \(Int(needS))s（N+20 余量，照 PC）")
-                while Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex),
-                      waited < needS, !isCancelled() {
+                // ⭐⭐⭐⭐⭐ §2832 **改成 fail-safe：等满预算，只在"正面看到已到账"时提前结束**
+                //
+                // ## ⛔⛔ 血案（0.16 真机日志，用户报「**在有倒计时的时候提前点击关闭**」）
+                // ```
+                // 10:46:41  顶栏胶囊 ✕（…且**已无倒计时**）⇒ 点它      ← 只因为那一刻 OCR 没读出数字
+                // 10:46:42  §click pill_x @(220,89)
+                // 10:46:48  顶栏**还有倒计时** ⇒ 不点胶囊 ✕            ← 6 秒后数字又读出来了！
+                // ```
+                // ⇒ **倒计时明明没走完**，只是 OCR **漏读了一次** ⇒ 旧代码就当成"结束了"去点 ✕。
+                //
+                // ## 根因：条件方向反了（fail-open ⇒ 应当 fail-safe）
+                // 旧代码：`while adCountdownRunning(...)` —— "**读不到倒计时**"就退出循环
+                //   ⇒ OCR 一次漏读（顶栏常被读成 `酱23°17°` 这类乱码）⇒ **立刻退出** ⇒ 点 ✕
+                //   ⇒ 这就是日志里 `G3 倒计时已结束（等了 0s）` 的来源（§2628 血案同源）。
+                //
+                // ## ✅ PC 的做法（`_1377_ad_loop.py:9837-9861`，逐字）
+                // ```python
+                // for k in range(_rounds):                      # ⭐ 按预算**等满**
+                //     if "已成功领取" in top3: break             # ⭐ **只在正面看到"已到账"时**才提前结束
+                //     wait(3.0)
+                // ```
+                // ⇒ 📏 PC 的闸是「**必须正面确认**（已成功领取）才收手；⛔ 不是"读不到就当结束"」。
+                //   PC 用 `_rounds` 预算兜底，等满后才进 G4 点 ✕。
+                //   ⛔ 注意：PC 的**点击闸**（`click_toast_x` L4349）确实是"读到数字就不点"（宽松），
+                //     但那是**安全**的 —— 因为它在 G3 **先等满了预算**。
+                //     ⇒ **顺序决定安全**：先"严格地等"，再"宽松地点"。我原来两处都宽松。
+                while !adRewardClaimed(cur), waited < needS, !isCancelled() {
                     sleep(3.0)
                     waited += 3.0
                     guard let im3 = grab() else { break }
                     cur = im3
-                    log("   §adbox G3 等倒计时结束（已等 \(Int(waited))s / \(Int(needS))s"
-                        + "；⛔ 没结束不点 ✕）")
-                }
-                // ⭐ §2628 **到账闸**（照 PC `click_toast_x` L4342，⛔ 点 ✕ 前最后确认一次）
-                //   「顶栏只要还有倒计时 ⇒ 倒计时没走完 ⇒ 不点 X」。
-                //   ⚠️ 这里再等一轮（预算是上面那个 `needS` 的余量），因为
-                //      G3 可能在**读不到 N** 时用了默认 45s 而广告实际更长。
-                if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex) {
-                    log("   §adbox ⛔ 顶栏**还有倒计时** ⇒ **这次不点 ✕**（照 PC 到账闸）⇒ 继续等")
-                    var extra = 0.0
-                    // 补等预算：再来一个 N+20（照 PC 的余量思想），上限 180s 防死等
-                    let extraNeed = min(180.0, needS)
-                    while Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex),
-                          extra < extraNeed, !isCancelled() {
-                        sleep(3.0)
-                        extra += 3.0
-                        guard let im4 = grab() else { break }
-                        cur = im4
-                        log("   §adbox G3 到账闸再等（已补等 \(Int(extra))s）；⛔ 不点 ✕）")
+                    if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex) {
+                        log("   §adbox G3 等倒计时结束（已等 \(Int(waited))s / \(Int(needS))s"
+                            + "；⛔ 没结束不点 ✕）")
+                    } else {
+                        // ⚠️ 读不到倒计时**不等于**走完（可能只是 OCR 漏读）⇒ 继续等满预算
+                        log("   §adbox G3 已等 \(Int(waited))s / \(Int(needS))s"
+                            + "；⚠️ 这一刻读不到倒计时，但**未看到「已成功领取」** ⇒ 继续等（⛔ 不当成结束）")
                     }
-                    log("   §adbox ✅ 到账闸放行（补等 \(Int(extra))s）⇒ 现在才点 ✕")
                 }
+                if adRewardClaimed(cur) {
+                    log("   §adbox ✅ G3 正面看到「已成功领取」（等了 \(Int(waited))s）⇒ 倒计时确实走完")
+                } else {
+                    log("   §adbox G3 等满预算 \(Int(needS))s（⛔ 没等到「已成功领取」字样）⇒ 按 PC 兜底进 G4")
+                }
+                // ⭐ §2832 **点 ✕ 前的最后一道到账闸**（照 PC `click_toast_x` L4342-4351）
+                //
+                // PC 原文：「② 到账闸：**只看「还有没有 N秒/Ns 倒计时」**」
+                // ```python
+                // _top = txt(img, BOX_TOP)
+                // if re.search(r"\d+\s*[sS秒]", _top):
+                //     print("   .. ⛔ 顶栏还有倒计时 ⇒ **没走完，这次不点 X**")
+                //     return False
+                // ```
+                // 📏 为什么这条**宽松**（读不到数字就放行）是安全的：
+                //   因为 G3 已经**等满了预算**（上面那个循环）⇒ 到这里倒计时本来就该走完了。
+                //   ⛔ 反过来（先宽松地判结束、再严格地点）就是我原来的 bug。
+                // ⚠️ §2832：原来这里还有一个"补等 180s"的块 —— **已删**：
+                //   G3 现在自己就等满预算，再补等一轮等于**等两倍**（白拖长每条广告）。
                 if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex) {
                     log("   §adbox ⛔⛔ 等满预算**倒计时仍未走完** ⇒ **本条不点 ✕**"
                         + "（照 PC「不硬撑」）；交给下一轮重判")
@@ -805,10 +849,13 @@ final class FeatureEngine {
                     let d = min(2.0, left)
                     Thread.sleep(forTimeInterval: d)
                     left -= d
-                    // ⭐ 等待期间**持续看有没有面板冒出来**（面板会在倒计时中途出现）
-                    if let im2 = grab(), finishAdPanel(im2, tag: "adbox_adw\(n + 1)") {
-                        log("   §adbox 等待中面板出现 ⇒ 已处理")
-                        break
+                    // ⭐⭐⭐⭐⭐ §2832 **只补全、不关闭**（照 PC `wait()` = 纯 sleep）
+                    //
+                    // ⛔ 血案同「广告页」分支：这里原来调 `finishAdPanel()`（**会点胶囊 ✕**）
+                    //    ⇒ 等待期间把广告关掉。PC 的 `wait()`（L4395）就是纯 `time.sleep`，
+                    //    等待期间**唯一**允许的动作是点「继续观看」补全（PC L4333 ⇒ 点了就 return）。
+                    if let im2 = grab(), completeAdPanelOnly(im2, tag: "adbox_adw\(n + 1)") {
+                        log("   §adbox 等待中面板需要补全 ⇒ 已点「继续观看」（⛔ 未关广告）")
                     }
                 }
                 // ⭐⭐⭐⭐⭐ §2824 **确认到账才计数**（⛔ 不再无条件 `n += 1`）
@@ -968,6 +1015,41 @@ final class FeatureEngine {
         if t.contains("秒") && t.contains("金币") { return true }
         // ③ 兜底：胶囊 ✕ 模板（纯像素；`ad/pill_x.png`）
         if nav.detect("pill_x", img: img) != nil { return true }
+        return false
+    }
+
+    /// ⭐⭐⭐⭐⭐ §2832 **等待期间的"只补全"闸** —— 照 PC `click_toast_x` **第一段**（L4333）
+    ///
+    /// ## ⛔⛔ 血案（0.16 真机日志，用户报「广告没有等待 然后提前点击率关闭」）
+    /// 我在**停留等待**的循环里调了 `finishAdPanel()` —— 而它**不只点面板，还会点胶囊 ✕**
+    /// （腿序第③条）⇒ 日志逐字：
+    /// ```
+    /// 10:46:32  §adbox ⏳ 本条广告停留（还需 46s / 目标 46s）
+    /// 10:46:34  §adbox_dwell1 ⛔ 顶栏**还有倒计时** ⇒ 不点胶囊 ✕     ← 前 3 次挡住了
+    /// 10:46:41  §adbox_dwell1 顶栏胶囊 ✕（面板已不在、且已无倒计时）⇒ 点它  ← ⛔ 点掉了
+    /// 10:46:42  §click pill_x @(220,89)                              ← 停留才 10 秒！
+    /// ```
+    /// ⇒ **是我自己在等待期间把广告关掉的**（⛔ 不是判据失灵）。
+    ///
+    /// ## ✅ PC 的做法（`_1377_ad_loop.py:4333`，逐字）
+    /// ```python
+    /// for _w, _x, _y in words(img, BOX_MID):
+    ///     if ("继续观看" in _w) or ("再看" in _w and "秒" in _w):
+    ///         print("   .. ★面板出现 %r ⇒ **点它补全**" % _w)
+    ///         click_at(plog(_x, _y))
+    ///         return True            # ⛔ **点了就 return** —— 绝不在同一次调用里继续点胶囊 ✕
+    /// ```
+    /// ⇒ 📏 **语义**：等待期间**只许**"把广告补全"（点「继续观看」让倒计时继续走），
+    ///    ⛔ **绝不许**"把广告关掉"（点胶囊 ✕ / 面板 ✕）。
+    ///
+    /// - Returns: true = 点了"继续观看"补全（调用方应重抓帧）
+    private func completeAdPanelOnly(_ img: UIImage, tag: String) -> Bool {
+        if nav.detect("stay_panel_title", img: img) != nil,
+           nav.detect("stay_panel_btn", img: img) != nil {
+            log("   §\(tag) 挽留面板 ⇒ 点「继续观看」**补全**（照 PC `click_stay_panel`；⛔ 不关广告）")
+            _ = nav.tap("stay_panel_btn", img: img, atomic: true)
+            return true
+        }
         return false
     }
 
@@ -2586,7 +2668,41 @@ final class FeatureEngine {
             nav.tapPoint(Double(r.midX), Double(r.midY))
             return "文案兜底"
         }
-        log("   §\(tag) ⛔ 没找到可点的 CTA（过闸后）⇒ 停手，⛔ 不盲点")
+        // ④ ⭐⭐⭐⭐⭐ §2832 **兜底之兜底** —— 照 PC `_1377_ad_loop.py:1108-1120`（⛔ 我原来漏了这一层）
+        //
+        // ## 用户令（逐字，PC 原文引用）
+        // > 「**广告完全不转化，全部是看完就X。全是低价值**」（§1526）
+        //
+        // ## PC 的逻辑（逐字）
+        // ```python
+        // # ③ 兜底之兜底：居中粉条没有、CTA 文案也没读到 ⇒ **仍用那条偏心的粉色带**。
+        // #   ⛔ 它多半是广告创意里的红条（不是 CTA 按钮），但**点广告画面本身也算一次广告点击**；
+        // #     而"什么都不点" = **零转化 = 低权重**（用户口径里最差的选项）。
+        // #   ⛔ 仍然过 forbidden() 闸 —— 绝不点支付/购买。
+        // if c: ...
+        // ```
+        // ## 📏 0.16 真机日志正是走岔了这里
+        // ```
+        // §adbox_cta1 ⛔ 没找到可点的 CTA（过闸后）⇒ 停手，⛔ 不盲点
+        // §adbox ⚠️ 没找到可点的 CTA（过闸后）⇒ 本条不做转化，直接收奖励   ← 零转化
+        // ```
+        // ⇒ **零转化** = 用户最不想要的结果。现在补上第三层：**偏心粉带也点**。
+        if let band = Self.widestPinkBand(img, box: Self.boxCta, color: s?.cta_color) {
+            let cx = band.0, cy = band.1
+            // ⛔ 仍过支付红线闸（照 PC：绝不点支付/购买）
+            let t = rec.ocrRegion(img, rect: CGRect(x: 0, y: max(0, cy - 26),
+                                                    width: 442, height: 52),
+                                  minConfidence: 0.3).map(\.0).joined()
+            if let bad = Self.forbidden(t, extraKeys: forbidKeysCfg) {
+                log("   §\(tag) ⛔ 偏心粉带文案含违规词「\(bad)」⇒ **拒绝点击**（支付红线）")
+                return nil
+            }
+            log("   §\(tag) ⭐ 兜底之兜底：偏心粉带 @(\(Int(cx)),\(Int(cy))) 也点"
+                + "（照 PC §1108：点广告画面也算一次转化点击，⛔ 零转化最差）")
+            nav.tapPoint(cx, cy)
+            return "兜底粉带"
+        }
+        log("   §\(tag) ⛔ 连粉带都没有 ⇒ 停手，⛔ 不盲点")
         return nil
     }
 
