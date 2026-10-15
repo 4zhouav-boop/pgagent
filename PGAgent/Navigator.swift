@@ -249,219 +249,65 @@ final class Navigator {
         func hid(_ cmds: [String], gapUS: UInt32 = 130_000) {
             for c in cmds { _ = ble.send(c); usleep(gapUS) }
         }
-        // ① ⭐⭐⭐ 回主屏 —— **逐字照抄 PC `go_home`（`_1377_ad_loop.py:7982`）**
-        //
-        // PC 原文：
-        // ```
-        //   cmd(dlog(HOME_FLING))        # 底部快速上滑 225,971 -> 225,300 / 120ms
-        //   wait(1.4)
-        //   img = grab()
-        //   if is_homescreen(img): return True, img      # ⭐ 到了就返回，**不再补任何东西**
-        //   cmd("H:HOME"); wait(1.8)                     # ⭐ 只有"不像桌面"才补 ⌘H
-        // ```
-        //
-        // ## ⛔⛔ §2340 血案：我把 `H:HOME` 写成了**无条件**，这就是"进不去快手"的元凶
-        // 我原来写的是：
-        //     上滑 → sleep(2.0) → **无条件** hid(["H:HOME"]) → sleep(1.5) → 才抓帧
-        // 后果（真机帧证，一帧一帧都对过）：
-        //   · 上滑本身**已经**落到主桌面 —— `_var/_pg_L0.png` 上 OCR 亲测读到
-        //       「快手极速版」base=(242,726) 点图标=(242,672)
-        //       「快手」    base=(366,724) 点图标=(366,671)
-        //     ⇒ **目标页就是这一页**，根本不需要翻页。
-        //   · 紧跟的 ⌘H 又把它推走 ⇒ 变成**副桌面**
-        //       `_var/_ks2_p3.png`：Soul / 头条 / 新氧 / 番茄小说 … **一个快手都没有**
-        //   · 然后在**错的页面**上翻 4 页找 ⇒ 必然走到
-        //       「⛔ 翻页也没找到 ⇒ 不放枪（铁律②）」
-        // ⇒ 修法不是"少等一会儿"，而是**照 PC 把 ⌘H 变成条件分支**。
-        // ⭐⭐⭐⭐⭐ §2344 **必须等一帧"真的变了"的帧**，⛔ 不能睡一觉就抓
-        //
-        // ## ⛔⛔ 真机铁证（v0.10.57 实测日志）
-        // ```
-        //   ① 回主屏（底部快速上滑 y=971 / 120ms）
-        //   ①b 上滑后**不像桌面** ⇒ 补一发 `H:HOME`      ← ⛔ 这里判错了
-        //   ② 在桌面上找「kslite」图标
-        //      ⚠️ 当页没找到 ⇒ 才开始翻页                  ← 被 ⌘H 推到别的页了
-        // ```
-        // 而同一时刻我离线实测（§2342，只发这一条上滑命令）：
-        // ```
-        //   [上滑前]       桌面=True OCR=32 快手=❌
-        //   [第 1 次上滑后] 桌面=True OCR=34 快手=['快手极速版','快手']   ✅ 一次就中
-        // ```
-        // ⇒ **上滑本身是对的**。错在我判"像不像桌面"用的那一帧是**上滑前的旧帧**
-        //   （帧由录屏扩展写文件 + 轮询读入，有延迟）⇒ 旧帧还是快手页面
-        //   ⇒ `looksLikeDesktop` 判 false ⇒ 误补 ⌘H ⇒ 推到副桌面 ⇒ 后面全废。
-        //
-        // ✅ 正解：上滑前**先存一帧参考**，上滑后**循环抓帧直到画面真的变了**
-        //    （用现成的 `screenChanged`，与 `FeatureEngine.grabFresh` 同一套判据），
-        //    拿到新帧再判桌面 / 再找图标。
-        //    ⚠️ §2284 的老坑：**桌面静止**，"等两帧不同"在**已经到桌面后**会等到超时 ——
-        //       所以这里**只等一次、只在上滑之后用**，且超时就退回当前帧继续走（⛔ 不死等）。
-        let refBefore = frame()
-        log("   ① 回主屏（底部快速上滑 y=971 / 120ms，照 PC `go_home`）")
-        // ⛔⛔ 时长必须是 **120ms**（= PC `HOME_FLING` 第 5 位），
-        //    ⛔ 不能用 `SwipeSpeed.fast`（那是 100ms，刷视频翻页用的另一档）。
-        //    §1645 实测：958→300 / 120ms ⇒ 31.96% 生效；960→300 / 250ms ⇒ 0.08% 无效。
-        hid([BLEController.swipe(x1: 225, y1: 971, x2: 225, y2: 300,
-                                 speed: .homeFling, baseW: baseW, baseH: baseH, yFix: yFix)])
-        Thread.sleep(forTimeInterval: 1.4)                     // PC `wait(1.4)`
-        // ⚠️ `switchToApp` 是 **static**，⛔ 不能调实例方法 `screenChanged`
-        //    ⇒ 这里自带一个 24×24 灰度指纹（与 `thumb` 同一套思路，但静态自包含）
-        func digest(_ img: UIImage) -> [UInt8]? {
-            guard let cg = img.cgImage else { return nil }
-            let W = 24, H = 24
-            var buf = [UInt8](repeating: 0, count: W * H)
-            guard let ctx = CGContext(data: &buf, width: W, height: H,
-                                      bitsPerComponent: 8, bytesPerRow: W,
-                                      space: CGColorSpaceCreateDeviceGray(),
-                                      bitmapInfo: CGImageAlphaInfo.none.rawValue)
-            else { return nil }
-            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: W, height: H))
-            return buf
-        }
-        func differs(_ a: UIImage?, _ b: UIImage?) -> Bool {
-            guard let x = a.flatMap(digest), let y = b.flatMap(digest),
-                  x.count == y.count else { return true }
-            var d = 0
-            for i in 0..<x.count where abs(Int(x[i]) - Int(y[i])) > 18 { d += 1 }
-            return Double(d) / Double(x.count) > 0.02
-        }
-        /// ⭐ 抓一帧"与参考帧不同"的新帧（超时则返回当前帧，⛔ 不死等）
-        func waitNewFrame(since ref: UIImage?, maxSec: Double = 4.0) -> UIImage? {
-            let t0 = Date()
-            Thread.sleep(forTimeInterval: 0.6)                 // 先给扩展落盘的时间
-            while Date().timeIntervalSince(t0) < maxSec {
-                if let p = frame(), differs(ref, p) { return p }
-                Thread.sleep(forTimeInterval: 0.35)
-            }
-            return frame()
-        }
-        var deskImg = waitNewFrame(since: refBefore)
-        if let im = deskImg, looksLikeDesktop(im, rec: rec, baseW: baseW, baseH: baseH) {
-            log("   ★回主屏：**底部快速上滑**生效（已落到桌面）⇒ 就在这一帧上找图标")
-        } else {
-            // ⚠️ 只有**确认不是桌面**才补 ⌘H（照 PC `go_home` 的条件分支）
-            log("   ①b 上滑后**不像桌面**（且已等到新帧）⇒ 补一发 `H:HOME`（⌘H 兜底）")
-            hid(["H:HOME\n"])
-            Thread.sleep(forTimeInterval: 1.8)                 // PC `wait(1.8)`
-            deskImg = waitNewFrame(since: deskImg)
-        }
+        /// 底部快速上滑（照 PC `HOME_FLING`：起点 y=971 贴进 Home Indicator 区；必须快，120ms）
+        let homeFling = BLEController.swipe(x1: 225, y1: 971, x2: 225, y2: 300,
+                                            speed: .homeFling, baseW: baseW, baseH: baseH, yFix: yFix)
 
-        // ⛔ §2284 **"等新帧"要按"时间"等，⛔ 不能按"画面变化"等**
-        //
-        // ## 真机血案（v0.10.42 实测）
-        // ```
-        //   15:46:18 ② 在桌面上找「kslite」图标
-        //   15:46:19 ⚠️ 第一页没找到（或拿不到帧）⇒ 左滑翻页再找
-        //   15:47:24 ⛔ 翻页也没找到        ← ⛔ **卡了 65 秒**（4 轮 × 8s 等待 + 翻页）
-        // ```
-        // ## 根因（我自己造的）
-        // 我写的 `waitFresh` 等的是「**画面与参考帧不同**」——
-        // ⛔ 可**桌面本来就是静止的**（没有视频、没有动效）⇒ 两帧当然一样
-        // ⇒ `waitFresh` **每轮都等到 8 秒超时** ⇒ 4 轮 = 32 秒 + 翻页 ⇒ 全废。
-        // 📏 这正是 PC 记过的坑（`_1377_ad_loop.py:9474`）：
-        // > 本来想用「连续两帧一模一样」判"页面渲染完了"，但**实测不成立** ——
-        // > 投屏流是**有损压缩** + 页面自带**动效** ⇒ 两者**量级重叠**。
-        // > ⇒ 老实承认它等价于"**固定多等 3.2s 让页面渲染**"。
-        //
-        // ✅ 正解：**按时间等**（固定睡一会儿让新帧写进来），⛔ 不按"变化"等。
-        func waitFrame(maxSec: Double = 3) -> UIImage? {
-            let t0 = Date()
-            var im: UIImage?
-            while Date().timeIntervalSince(t0) < maxSec {
-                if let f = frame() { im = f; break }
-                Thread.sleep(forTimeInterval: 0.4)
+        /// 在**当前帧**上找图标；找到就点。返回是否已发出点击。
+        func findAndTap(_ tag: String) -> Bool {
+            guard let img = frame(),
+                  let (pt, label) = findDesktopIcon(img, which: which, rec: rec,
+                                                    baseW: baseW, baseH: baseH) else {
+                return false
             }
-            // 再睡半拍，让"动作产生的新帧"写进来（录屏 1fps）
-            Thread.sleep(forTimeInterval: 1.2)
-            return frame() ?? im
-        }
-
-        // ② ⭐ OCR 找图标标签 ⇒ 点标签上方
-        //    照 PC `find_desktop_icon`（L7856）的三条**排除闸**（⛔ 不照抄会把弹窗句子当图标）
-        //    真机血案 `_var/_1755_stab_{1..4}.log`：iOS 弹「"快手"想访问相机。」（整句含"快手"）
-        //      ⇒ 旧判据把它当图标 ⇒ **点了 8 次弹窗、4/4 全废**。
-        func findIcon(_ img: UIImage) -> (CGPoint, String)? {
-            let ws = rec.ocrRegion(img, rect: CGRect(x: 0, y: 60, width: baseW, height: baseH - 60),
-                                   minConfidence: 0.3)
-            var cands: [(CGPoint, String)] = []
-            for (t, r, _c) in ws {
-                let s = t.trimmingCharacters(in: .whitespaces)
-                if s.isEmpty || !s.contains("快手") { continue }
-                if s.count > 6 { continue }                                  // ① 图标名短
-                if s.contains(where: { "“”。？！，,".contains($0) }) { continue }  // ② 带标点=句子
-                if ["想访问", "允许", "用于", "录制", "拍照", "直播"]
-                    .contains(where: { s.contains($0) }) { continue }         // ③ 弹窗语义词
-                if which == "kslite" {
-                    if s.contains("极速") { cands.append((CGPoint(x: r.midX, y: r.midY), s)) }
-                } else {
-                    if !s.contains("极速") { cands.append((CGPoint(x: r.midX, y: r.midY), s)) }
-                }
-            }
-            guard !cands.isEmpty else { return nil }
-            // 取**最上、再最左**（照 PC `sorted(key=(round(y/40), x))`）
-            let pick = cands.sorted {
-                let ra = (Double($0.0.y) / 40.0).rounded(), rb = (Double($1.0.y) / 40.0).rounded()
-                return ra != rb ? ra < rb : $0.0.x < $1.0.x
-            }[0]
-            // ⭐ 图标在**标签上方 0.055 屏高**（PC `FH(0.055)`）
-            return (CGPoint(x: pick.0.x, y: pick.0.y - baseH * 0.055), pick.1)
-        }
-
-        log("   ② 在桌面上找「\(which)」图标（OCR 标签 → 点标签上方 0.055 屏高）")
-        // ⭐⭐⭐ 照 PC `find_desktop_icon_paged`（L8001）的**顺序**：
-        // ```
-        //   img = grab("..._desk0")            # ⭐ 拿"回主屏之后"那一帧
-        //   p = find_desktop_icon(img, which)  # ⭐ 先在**这一帧**上找（快手就在第 1 页）
-        //   if p: return img, p                #    找到就用它自己算的坐标
-        //   ... 找不到才翻页（先右滑 6 次，再左滑 8 次）
-        // ```
-        // ⛔ §2340 血案：我原来「当页找不到 ⇒ 直接左滑翻页」，而翻的是 **⌘H 推走后的错页**。
-        // ✅ 现在**在回主屏那一帧上直接找**：真机帧 `_var/_pg_L0.png` 上 OCR 亲测就有
-        //    「快手极速版」(242,726) / 「快手」(366,724) ⇒ 命中即点，**根本不翻页**。
-        let page0 = deskImg ?? waitFrame()
-        if let img = page0, let (pt, label) = findIcon(img) {
-            log("      ✅ 回主屏当页命中「\(label)」⇒ 点 (\(Int(pt.x)),\(Int(pt.y)))")
+            log("   ✅ \(tag)命中「\(label)」⇒ 点 (\(Int(pt.x)),\(Int(pt.y)))")
             hid(BLEController.moveAndClick(x: Double(pt.x), y: Double(pt.y),
                                            baseW: baseW, baseH: baseH, yFix: yFix))
             Thread.sleep(forTimeInterval: 6.0)      // 照 PC `wait(6.5)`
             return true
         }
-        // ⛔ 安全闸（照 PC）：不像桌面就**不翻页**（否则会在 App 里乱滑）
-        if let img = page0 ?? frame(), !looksLikeDesktop(img, rec: rec, baseW: baseW, baseH: baseH) {
-            log("      ⛔ 这一页**不像 iOS 桌面** ⇒ **不翻页**（照 PC，免得在 App 里乱滑）")
-            return false
+
+        // ⭐⭐⭐⭐⭐ §2366 **回主桌面 = 2 条命令**（用户口径，⛔ 不再循环 OCR）
+        //
+        // ## 用户令（逐字）
+        // > 「**你为什么还是在用滑动命令 虽然实现了 但是效率极度低下**」
+        // > 「**我都是最多 2 个命令回到主桌面**」
+        //
+        // ## 这 2 条命令是什么（照我已实测出来的行为表）
+        // ```
+        //   ① H:HOME     —— 在 App 内有效（§2362 B 步实测：快手内 → 主桌面 ✅）
+        //                    真身是 ⌘H（固件 src/main.cpp:113）；副桌面上无效，
+        //                    但那不重要 —— 第 ② 条会把页补到第 1 页。
+        //   ② 底部快速上滑 —— 把"桌面第 N 页"推到第 1 页
+        //                    （§2363 帧证：副桌面 + 上滑 ×2 ⇒ 主桌面）
+        // ```
+        // ⇒ 一条"退出 App" + 一条"补页"，**2 条命令后必定在主桌面**。
+        //
+        // ## ⛔ 我上一版错在哪（v0.10.59，用户当场指出「效率极度低下」）
+        // ```
+        //   for round in 1...4 { 全屏 OCR → 上滑 → sleep 2.5s }
+        // ```
+        // 最坏 = 4 次全屏 OCR + 4 次上滑 + 10 秒空等 ⇒ 切个 App 白耗 15~20 秒。
+        // **上滑之间根本不需要 OCR** —— 因为 2 条命令后位置是确定的（主桌面）。
+        log("   ① H:HOME 退出当前 App")
+        hid(["H:HOME\n"])
+        Thread.sleep(forTimeInterval: 1.5)
+        log("   ② 底部快速上滑，把桌面补到第 1 页")
+        hid([homeFling])
+        // ⭐ 录屏 ~1fps ⇒ 睡够让**新帧**落盘，⛔ 不是立刻抓（§2284 血案）
+        Thread.sleep(forTimeInterval: 2.0)
+
+        // 现在必定在主桌面 ⇒ **一次 OCR + 一次点击**，完了。
+        if findAndTap("2 条命令后") { return true }
+
+        // ⭐ 兜底：只在"2 条命令后仍没看到图标"时才补 1 条上滑 + 1 次 OCR（最多 2 轮）
+        for extra in 1...2 {
+            log("   ⚠️ 第 ② 条后没看到图标 ⇒ 补 1 条上滑（兜底 \(extra)/2）")
+            hid([homeFling])
+            Thread.sleep(forTimeInterval: 2.0)
+            if findAndTap("兜底 \(extra)") { return true }
         }
-        log("      ⚠️ 当页没找到 ⇒ 才开始翻页（照 PC：**先右滑 6 次回退，再左滑 8 次前进**）")
-        // ③ **先右滑回退**（第 1 页在最左端；照 PC `for k in range(back)`，back=6）
-        var tried = 0
-        for k in 1...6 {
-            hid([BLEController.swipe(x1: 60, y1: 500, x2: 380, y2: 500,
-                                     speed: .mid, baseW: baseW, baseH: baseH, yFix: yFix)])
-            Thread.sleep(forTimeInterval: 1.2)                 // 照 PC `wait(1.2)`
-            tried += 1
-            if let img = waitFrame(), let (pt, label) = findIcon(img) {
-                log("      ✅ 右滑第 \(k) 次命中「\(label)」⇒ 点 (\(Int(pt.x)),\(Int(pt.y)))")
-                hid(BLEController.moveAndClick(x: Double(pt.x), y: Double(pt.y),
-                                               baseW: baseW, baseH: baseH, yFix: yFix))
-                Thread.sleep(forTimeInterval: 6.0)
-                return true
-            }
-        }
-        // ④ **再左滑前进**（照 PC `for k in range(fwd)`，fwd=8）
-        for k in 1...8 {
-            hid([BLEController.swipe(x1: 380, y1: 500, x2: 60, y2: 500,
-                                     speed: .mid, baseW: baseW, baseH: baseH, yFix: yFix)])
-            Thread.sleep(forTimeInterval: 1.2)
-            tried += 1
-            if let img = waitFrame(), let (pt, label) = findIcon(img) {
-                log("      ✅ 左滑第 \(k) 次命中「\(label)」⇒ 点 (\(Int(pt.x)),\(Int(pt.y)))")
-                hid(BLEController.moveAndClick(x: Double(pt.x), y: Double(pt.y),
-                                               baseW: baseW, baseH: baseH, yFix: yFix))
-                Thread.sleep(forTimeInterval: 6.0)
-                return true
-            }
-        }
-        log("      ⛔ 翻了 \(tried) 页都没找到「\(which)」⇒ **不放枪**（铁律②）")
+        log("   ⛔ 仍没看到「\(which)」图标 ⇒ **不放枪**（铁律②）")
         return false
     }
 

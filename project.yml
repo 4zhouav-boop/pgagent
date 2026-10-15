@@ -17,7 +17,7 @@ targets:
         CFBundleDisplayName: PGAgent
         # ⭐ 版本号**唯一来源**（界面标题从 Info.plist 读，见 AppVersion）
         #    发版时只改这里 ⇒ 界面/接口/包 三处自动一致（§2239 的教训）
-        CFBundleShortVersionString: "0.13"
+        CFBundleShortVersionString: "0.14"
         CFBundleVersion: "1"
         UILaunchScreen: {}
         # ⭐ 关键 1：让 App 的 Documents 暴露给「文件」App
@@ -115,7 +115,7 @@ targets:
       path: PGShot/Info.plist
       properties:
         CFBundleDisplayName: PGShot
-        CFBundleShortVersionString: "0.13"
+        CFBundleShortVersionString: "0.14"
         CFBundleVersion: "1"
         # ⭐ 扩展必须声明 NSExtension，否则 iOS 不认（xcodegen 会重写 Info.plist）
         NSExtension:
