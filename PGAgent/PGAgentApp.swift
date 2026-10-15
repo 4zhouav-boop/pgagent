@@ -161,12 +161,16 @@ final class HTTPServerHolder: ObservableObject {
 ///    而它由 `project.yml` 里 `CFBundleShortVersionString` 控制；
 ///    发版时**只改 project.yml 一处**，界面自动跟着变。
 enum AppVersion {
-    /// 形如 `0.10.5 (1)`；读不到就返回 `?`
+    /// ⛔ **只显示版本号**（如 `0.13`），⛔ 不带 `(build)` 括号后缀。
+    ///
+    /// ## 为什么去掉括号里的 build（用户令 2026-10-15）
+    /// > 「**不要在版本号后面加括号数字了**」
+    /// 旧格式 `0.11.6 (73)` 里 `73` 不参与任何判断，只会让人分不清哪个是哪个。
+    /// 现在版本号本身就是唯一标识（见 `_docs/版本号与打包规则.md`：每次发版 +0.01）。
+    /// ℹ️ `CFBundleVersion` 仍然存在（iOS 内部用，固定为 1），只是**不显示**。
     static var display: String {
         let b = Bundle.main
-        let short = (b.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "?"
-        let build = (b.infoDictionary?["CFBundleVersion"] as? String) ?? "?"
-        return "\(short) (\(build))"
+        return (b.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "?"
     }
 }
 

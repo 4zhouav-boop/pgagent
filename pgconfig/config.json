@@ -7,7 +7,8 @@
     "  · _dev/anchors/registry.json  —— 页型表（16 个页型，声明式判据）",
     "  · _1765_nav.py                —— 导航引擎（页面图 + 恢复漏斗 + 卡死检测）",
     "  · _1765_match.py              —— 掩码模板匹配（masked_match / pool_match）",
-    "  · _note_1793 方案 B+          —— 判据配置化 + Swift 只写执行器"
+    "  · _note_1793 方案 B+          —— 判据配置化 + Swift 只写执行器",
+    "⭐ 配置版本号 `cfg_version`（用户令 2026-10-15）—— 改配置就 +0.01，与 App 版本号同一套规则。⛔ 与 `version`（格式版本）不是一回事：`version` 只在 JSON 结构变化时动。见 `_docs/版本号与打包规则.md`。"
   ],
   "_funnel_doc": [
     "⛔⛔ §2262 **漏斗里只准放「弹窗/盖屏」，⛔ 绝不放返回键** —— 这是 PC 的口径，",
@@ -2376,5 +2377,6 @@
     "same_n": 12,
     "same_window": 15
   },
+  "cfg_version": "0.01",
   "version": 1
 }
