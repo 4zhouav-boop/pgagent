@@ -220,7 +220,9 @@ private struct SettingsPane: View {
     @State private var feats: Set<String> = []
     @State private var mins: [String: Double] = [:]
     @State private var adCount: Double = 6
-    @State private var adDwell: Double = 30
+    /// ⭐ §2824 广告停留**区间**（用户令：「希望30-45随机」）—— ⛔ 不再用单个 `adDwell`
+    @State private var adStayMin: Double = 30
+    @State private var adStayMax: Double = 45
     @State private var apps: Set<String> = []
     @State private var entry: String = "auto"
     @State private var tail: String = "continue"
@@ -285,15 +287,32 @@ private struct SettingsPane: View {
                 GroupBox("② 广告") {
                     VStack(alignment: .leading, spacing: 6) {
                         Stepper("条数：\(Int(adCount))", value: $adCount, in: 1...99)
+                        // ⭐⭐⭐⭐⭐ §2824 **广告停留改成"区间随机"**（用户令）
+                        //
+                        // ## 用户令（逐字）
+                        // > 「**看广告没有等待时间我设置的希望30-45随机**」
+                        //
+                        // ## ⛔ 旧版为什么"没有等待时间"
+                        // 界面只有一个「广告停留」单值输入框，写进 `ad_dwell`；
+                        // 而 `ad_dwell`（单值）会把 `ad_stay_min/max`（区间）**永久压死**
+                        // ⇒ 用户设的"随机"从来没生效（手机日志：`广告停留=30s` 恒定）。
+                        // ✅ 现在只编辑**区间**（下界~上界），⛔ 不再写 `ad_dwell`。
                         HStack {
-                            Text("广告停留")
-                            TextField("秒", value: $adDwell, format: .number)
+                            Text("停留区间")
+                            TextField("下", value: $adStayMin, format: .number)
                                 .keyboardType(.numberPad)
                                 .multilineTextAlignment(.trailing)
-                                .frame(width: 60).textFieldStyle(.roundedBorder)
+                                .frame(width: 52).textFieldStyle(.roundedBorder)
+                            Text("~").foregroundColor(.secondary)
+                            TextField("上", value: $adStayMax, format: .number)
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 52).textFieldStyle(.roundedBorder)
                             Text("秒").foregroundColor(.secondary)
                         }
                         .font(.system(size: 13))
+                        Text("⭐ 每条广告**重新随机**一个值（⛔ 不是固定秒数）")
+                            .font(.system(size: 10)).foregroundColor(.secondary)
                         Text("⛔ 广告页只等时间，绝不点 ✕（用户令）")
                             .font(.system(size: 10)).foregroundColor(.secondary)
                     }
@@ -354,7 +373,9 @@ private struct SettingsPane: View {
         mins = s.feat_min ?? [:]
         for (_, key, dflt) in Self.featureOpts where mins[key] == nil { mins[key] = dflt }
         adCount = Double(s.ad_count ?? 6)
-        adDwell = s.ad_dwell ?? 30
+        // ⭐ §2824 读**区间**（用户令：30-45 随机）；⛔ 不再读 `ad_dwell`
+        adStayMin = s.ad_stay_min ?? 30
+        adStayMax = s.ad_stay_max ?? 45
         entry = s.entry ?? "auto"
         tail = s.tail ?? "continue"
     }
@@ -368,14 +389,18 @@ private struct SettingsPane: View {
             "apps": appList,
             "feat_min": mins,
             "ad_count": Int(adCount),
-            "ad_dwell": adDwell,
+            // ⭐ §2824 写**区间**（用户令：30-45 随机）；⛔ 不写 `ad_dwell`
+            //   （单值会压死区间 ⇒ 那正是"看广告没有等待时间"的根因）
+            "ad_stay_min": min(adStayMin, adStayMax),
+            "ad_stay_max": max(adStayMin, adStayMax),
             "entry": entry,
             "tail": tail,
         ]
         let r = cfgStore.saveSettings(patch)
         store.log("💾 保存设置: \(r.ok ? "✅" : "⛔") \(r.msg)"
                   + " ｜ 功能=\(ordered.joined(separator: ","))"
-                  + " ｜ 条数=\(Int(adCount)) 停留=\(Int(adDwell))s")
+                  + " ｜ 条数=\(Int(adCount))"
+                  + " 停留=\(Int(min(adStayMin, adStayMax)))~\(Int(max(adStayMin, adStayMax)))s")
     }
 }
 
