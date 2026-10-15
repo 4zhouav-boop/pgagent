@@ -465,14 +465,43 @@ final class Navigator {
     ///    给**时序敏感**的场景用（系统弹窗）—— 照电脑端 `_ext_q`。
     @discardableResult
     func tap(_ name: String, img: UIImage, atomic: Bool = false) -> Bool {
-        guard let h = detect(name, img: img) else { return false }
+        // ⭐⭐⭐⭐⭐ §2841 **每次点击尝试都必须有日志**（用户令：逐字）
+        //
+        // > 「**这本来就是需要做的 每次操作都要有日志**」
+        //
+        // ## ⛔ 血案：这条日志的**缺失**直接导致一次定位失败
+        // 用户报「误点了顶部的话费充值」，而我在日志里**找不到任何"点它"的记录** ——
+        // 因为旧版这里是：
+        // ```swift
+        // guard let h = detect(name, img: img) else { return false }   // ⛔ 静默返回
+        // ```
+        // ⇒ **"点了但找不到元素"这个事实被吞掉了** ⇒ 我最后只能靠"配置+代码路径"推断，
+        //   ⛔ 拿不到"到底点了什么"的直接证据（见 `_note_2838` §4）。
+        //
+        // ## ✅ 现在的规矩（照 PC `cmd()` 的做法 —— 它把**每一条**串口命令都打出来）
+        // ```
+        //   找不到元素 ⇒ 打 `⛔ 没找到「<名字>」⇒ 不点`        （含 ROI/match，便于排查）
+        //   找到了     ⇒ 打 `★点「<名字>」@(x,y) score=… ev=…`（点击**之前**就打）
+        //   发不出去   ⇒ 打 `⛔ BLE 未连接`（照 `ble.send` 的返回值）
+        // ```
+        // ⇒ 📏 **先打日志再点**（⛔ 不是点完才打）：万一点击卡住，日志也已经落盘。
+        guard let h = detect(name, img: img) else {
+            let e = cfg.elements[name]
+            let roi = e?.roi.map { $0.map { String(format: "%.0f", $0) }.joined(separator: ",") } ?? "nil"
+            log("   §tap ⛔ 没找到「\(name)」⇒ **不点**"
+                + "（match=\(e?.match ?? "?") roi=[\(roi)]"
+                + " words=\((e?.words ?? []).prefix(3)) tpl=\((e?.templates ?? []).prefix(2))）")
+            return false
+        }
         let c = h.center
         if atomic {
             let cmd = BLEController.atomicClickCmd(x: Double(c.x), y: Double(c.y),
                                                    baseW: baseW, baseH: baseH, yFix: yFix)
-            ble.send(cmd)
+            log("   §tap ★点「\(name)」@(\(Int(c.x)),\(Int(c.y))) score=\(String(format: "%.3f", h.score))"
+                + " ev=\(h.evidence.prefix(28)) ⇒ \(cmd)")
+            let ok = ble.send(cmd)
+            if !ok { log("   §tap ⛔ BLE 发送失败：\(ble.lastError)") }
             Thread.sleep(forTimeInterval: Self.tapAfterSettle)
-            log("   §click \(name) ATOMIC Q @(\(Int(c.x)),\(Int(c.y))) score=\(String(format: "%.3f", h.score)) ev=\(h.evidence)")
             return true
         }
         // ⭐⭐⭐ §2600 **两步式**：`P:` + `D:`（原地长按 600ms）
@@ -488,11 +517,13 @@ final class Navigator {
         //    这里给 0.15s）；第 2 条是 600ms 按压 ⇒ 等 0.9s 再往下走。
         let cmds = BLEController.moveAndClick(x: Double(c.x), y: Double(c.y),
                                               baseW: baseW, baseH: baseH, yFix: yFix)
+        log("   §tap ★点「\(name)」@(\(Int(c.x)),\(Int(c.y))) score=\(String(format: "%.3f", h.score))"
+            + " ev=\(h.evidence.prefix(28)) ⇒ \(cmds.joined(separator: " + "))")
         for (i, cmd) in cmds.enumerated() {
-            ble.send(cmd)
+            let ok = ble.send(cmd)
+            if !ok { log("   §tap ⛔ BLE 发送失败（\(cmd)）：\(ble.lastError)") }
             Thread.sleep(forTimeInterval: i == 0 ? Self.tapMoveSettle : 0.9)
         }
-        log("   §click \(name) @(\(Int(c.x)),\(Int(c.y))) score=\(String(format: "%.3f", h.score)) ev=\(h.evidence)")
         return true
     }
 
@@ -509,17 +540,26 @@ final class Navigator {
     /// 📏 修法见 `BLEController.moveAndClick` 的 §2600 注释（已从 `C:L` 改成 `D:` 长按）。
     /// ⚠️ 时序：第 1 条 `P:` 后等 0.15s（库内 8 帧插值 ≈48ms），第 2 条 `D:` 是 600ms 按压 ⇒ 等 0.9s。
     @discardableResult
-    func tapPoint(_ x: Double, _ y: Double, atomic: Bool = false) -> Bool {
+    func tapPoint(_ x: Double, _ y: Double, atomic: Bool = false, why: String = "") -> Bool {
+        // ⭐⭐⭐⭐⭐ §2841 **按坐标点也必须打日志**（用户令：「每次操作都要有日志」）
+        //   坐标来自识别结果（OCR 词中心 / 色彩块），⛔ 没有"元素名"可打 ⇒
+        //   所以带一个 `why` 标签，把"为什么点这里"写进去（⛔ 否则事后无法追溯）。
+        let tag = why.isEmpty ? "" : "（\(why)）"
         if atomic {
-            ble.send(BLEController.atomicClickCmd(x: x, y: y,
-                                                  baseW: baseW, baseH: baseH, yFix: yFix))
+            let cmd = BLEController.atomicClickCmd(x: x, y: y,
+                                                   baseW: baseW, baseH: baseH, yFix: yFix)
+            log("   §tapPoint ★点坐标\(tag) @(\(Int(x)),\(Int(y))) ⇒ \(cmd)")
+            let ok = ble.send(cmd)
+            if !ok { log("   §tapPoint ⛔ BLE 发送失败：\(ble.lastError)") }
             Thread.sleep(forTimeInterval: Self.tapAfterSettle)
             return true
         }
         let cmds = BLEController.moveAndClick(x: x, y: y,
                                               baseW: baseW, baseH: baseH, yFix: yFix)
+        log("   §tapPoint ★点坐标\(tag) @(\(Int(x)),\(Int(y))) ⇒ \(cmds.joined(separator: " + "))")
         for (i, cmd) in cmds.enumerated() {
-            ble.send(cmd)
+            let ok = ble.send(cmd)
+            if !ok { log("   §tapPoint ⛔ BLE 发送失败（\(cmd)）：\(ble.lastError)") }
             Thread.sleep(forTimeInterval: i == 0 ? Self.tapMoveSettle : 0.9)
         }
         return true
@@ -540,9 +580,12 @@ final class Navigator {
     ///   · `back_edge`  = **滑**（系统手势，不依赖任何可见按钮）
     @discardableResult
     func backEdge() -> Bool {
-        ble.send(BLEController.backGestureCmd())
+        let cmd = BLEController.backGestureCmd()
+        // ⭐ §2841 先打日志再发（照 `cmd()`：每条命令都要留痕）
+        log("   §gesture ★左边缘右滑返回 ⇒ \(cmd)")
+        let ok = ble.send(cmd)
+        if !ok { log("   §gesture ⛔ BLE 发送失败：\(ble.lastError)") }
         Thread.sleep(forTimeInterval: 1.0)
-        log("   §gesture 左边缘右滑返回（B:）")
         return true
     }
 
@@ -566,7 +609,7 @@ final class Navigator {
             return false
         }
         log("   §coin 找到红包球 @(\(Int(c.x)),\(Int(c.y))) ⇒ 点击")
-        tapPoint(Double(c.x), Double(c.y))
+        tapPoint(Double(c.x), Double(c.y), why: "红包悬浮球（色彩判据）")
         return true
     }
 
@@ -599,7 +642,7 @@ final class Navigator {
                 if let c = ColorBlob.findCoinBall(img) {
                     funnelLast[it.element] = now
                     log("   §funnel coin_ball（\(it.desc ?? "")）@(\(Int(c.x)),\(Int(c.y)))")
-                    tapPoint(Double(c.x), Double(c.y))
+                    tapPoint(Double(c.x), Double(c.y), why: "漏斗 coin_ball")
                     return true
                 }
                 continue
@@ -623,7 +666,7 @@ final class Navigator {
                 if let c = ModalX.find(img) {
                     funnelLast[it.element] = now
                     log("   §funnel modal_x（通用暖灰圆钮 ✕）@(\(Int(c.x)),\(Int(c.y)))")
-                    tapPoint(Double(c.x), Double(c.y))
+                    tapPoint(Double(c.x), Double(c.y), why: "漏斗 modal_x 暖灰圆钮")
                     return true
                 }
                 continue
@@ -646,7 +689,7 @@ final class Navigator {
                 if let hit = Self.findBottomPopup(img, rec: rec, bw: baseW) {
                     funnelLast[it.element] = now
                     log("   §funnel bottom_popup（底部弹窗 “\(hit.tag)”）@(\(Int(hit.x)),\(Int(hit.y)))")
-                    tapPoint(Double(hit.x), Double(hit.y))
+                    tapPoint(Double(hit.x), Double(hit.y), why: "漏斗 bottom_popup 消极项「\(hit.tag)」")
                     return true
                 }
                 continue
@@ -701,7 +744,7 @@ final class Navigator {
                 if let p = Self.findDarkCross(img) {
                     funnelLast[it.element] = now
                     log("   §funnel appstore_x（App Store 页左上暗色 ✕）@(\(Int(p.x)),\(Int(p.y)))")
-                    tapPoint(Double(p.x), Double(p.y))
+                    tapPoint(Double(p.x), Double(p.y), why: "漏斗 appstore_x 暗色 ✕")
                     return true
                 }
                 continue
@@ -711,7 +754,7 @@ final class Navigator {
                 if let c = ModalX.findCoupon(img) {
                     funnelLast[it.element] = now
                     log("   §funnel coupon_x（券弹窗 ✕）@(\(Int(c.x)),\(Int(c.y)))")
-                    tapPoint(Double(c.x), Double(c.y))
+                    tapPoint(Double(c.x), Double(c.y), why: "漏斗 coupon_x 券弹窗 ✕")
                     return true
                 }
                 continue

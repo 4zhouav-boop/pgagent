@@ -177,6 +177,20 @@ final class Runner: ObservableObject {
         //    ⇒ 「帧 1353x2925 ⇒ 归一化到 451x977」这行会直接出现在手机上，
         //      以后一眼就能看出「尺度对不对」，⛔ 不用再猜为什么全 unknown
         rec.onLog = { [weak self] s in self?.append(s) }
+        // ⭐⭐⭐⭐⭐ §2841 **把「每一条发出的 HID 命令」接进本循环的日志**（用户令）
+        //
+        // > 「**这本来就是需要做的 每次操作都要有日志**」
+        //
+        // ## 为什么挂在这里（⛔ 不是在各调用点）
+        // `ble.send()` 是全项目**唯一**的"发命令"收口（21 处调用都走它）
+        // ⇒ 在它上面挂一个回调，就**结构上保证**：
+        //   任何一条 `P:`/`C:L`/`D:`/`Q:`/`H:`/`T:`/`B:` 命令 —— 无论谁发的 ——
+        //   都会出现在日志里，**含成功/失败**。
+        // 📏 这直接修掉本轮"查不到误点了什么"的病根
+        //   （旧版失败路径静默 ⇒ 事后无法追溯，见 `_note_2838` §4）。
+        ble.onCommand = { [weak self] cmd, ok in
+            self?.append(ok ? "   §ble → \(cmd)" : "   §ble ⛔ 发送失败 → \(cmd)")
+        }
         let nav = Navigator(cfg: cfg, rec: rec, ble: ble) { [weak self] s in
             self?.append(s)
         }

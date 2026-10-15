@@ -725,12 +725,12 @@ final class FeatureEngine {
             }()
             if wantChest, let c = nav.detect("chest_float", img: img)?.center {
                 log("§adbox 【入口=auto 轮换】本条走**宝箱**入口 ⇒ 浮件 @(\(Int(c.x)),\(Int(c.y)))")
-                nav.tapPoint(Double(c.x), Double(c.y))
+                nav.tapPoint(Double(c.x), Double(c.y), why: "宝箱浮件（chest_float）")
                 // 等一张新帧（面板出来了才能找 CTA）
                 if let ip = grabFresh(since: img, maxWait: maxFrameAgeCfg + 3.0),
                    let cta = nav.detect("chest_cta", img: ip)?.center {
                     log("§adbox 宝箱面板 CTA @(\(Int(cta.x)),\(Int(cta.y))) ⇒ 进广告链")
-                    nav.tapPoint(Double(cta.x), Double(cta.y))
+                    nav.tapPoint(Double(cta.x), Double(cta.y), why: "宝箱面板 CTA（chest_cta）")
                     // 进了广告链 ⇒ 交给下一轮循环的“广告页”分支处理
                     if let i3 = grabFresh(since: ip, maxWait: maxFrameAgeCfg + 3.0),
                        Self.looksLikeAdPage(i3, rec: rec, nav: nav, bw: baseW, bh: baseH,
@@ -753,7 +753,7 @@ final class FeatureEngine {
 
             if let btn = findAdRowButton(img) {
                 log("§adbox 按行定位到「看广告得金币」行 ⇒ 按钮 \(btn.evidence) @(\(Int(btn.point.x)),\(Int(btn.point.y)))")
-                nav.tapPoint(Double(btn.point.x), Double(btn.point.y))
+                nav.tapPoint(Double(btn.point.x), Double(btn.point.y), why: "按行定位的「看广告得金币」按钮")
                 // ⭐⭐ §2265 **等一张"新的"帧再判**（⛔ 不是固定睡 2s 就抓）
                 //
                 // ## 为什么（与写盘节拍**成对**的一条）
@@ -917,7 +917,7 @@ final class FeatureEngine {
                 if let img2 = grabFresh(since: img, maxWait: maxFrameAgeCfg + 3.0) {
                     if let btn2 = findAdRowButton(img2) {
                         log("§adbox ⬇ 翻到了目标行 ⇒ 按钮 \(btn2.evidence) @(\(Int(btn2.point.x)),\(Int(btn2.point.y)))")
-                        nav.tapPoint(Double(btn2.point.x), Double(btn2.point.y))
+                        nav.tapPoint(Double(btn2.point.x), Double(btn2.point.y), why: "翻页后按行定位的按钮")
                         // ⭐⭐⭐⭐⭐ §2824 **不再在这里自己收尾 + 计数**（用户令：无限转化/卡死）
                         //
                         // ## ⛔ 血案
@@ -1492,7 +1492,7 @@ final class FeatureEngine {
             //      通用位置，且**有前置条件**（只在 `comment_panel` 命中时才发）。
             if nav.detect("comment_panel", img: img) != nil {
                 log("§feed 检测到评论区面板 ⇒ 点上半屏关掉（PC `close_comment_panel`）")
-                nav.tapPoint(225, 150)
+                nav.tapPoint(225, 150, why: "固定点（见该处注释）")
                 sleep(1.8)
             }
             guard let img2 = grab() else { break }
@@ -1899,7 +1899,7 @@ final class FeatureEngine {
                     }
                     if let pick = cands.max(by: { $0.1.x < $1.1.x }) {
                         log("   §\(tag) 金币中心 ⇒ 点「\(pick.0)」@(\(Int(pick.1.x)),\(Int(pick.1.y)))（照 PC goto_feed）")
-                        nav.tapPoint(Double(pick.1.x), Double(pick.1.y))
+                        nav.tapPoint(Double(pick.1.x), Double(pick.1.y), why: "搜索联想词候选")
                         sleep(5.0)
                         continue
                     }
@@ -2068,7 +2068,7 @@ final class FeatureEngine {
         // ① ⭐⭐ 点搜索框 —— 照 PC `ks_find_search_box`（L5682）的**两层**逻辑
         let boxPt = searchBoxPoint(img)
         log("   §\(tag) 点搜索框 @(\(Int(boxPt.x)),\(Int(boxPt.y)))")
-        nav.tapPoint(Double(boxPt.x), Double(boxPt.y))
+        nav.tapPoint(Double(boxPt.x), Double(boxPt.y), why: "搜索框")
         sleep(1.2)
 
         // ② 清框（PC：清框只能点**框内清除 ✕** —— 退格/⌘A 实测不吃）
@@ -2099,7 +2099,7 @@ final class FeatureEngine {
         guard let i3 = grab() else { return false }
         if let sk = searchKeyPoint(i3) {
             log("   §\(tag) 点「搜索」@(\(Int(sk.x)),\(Int(sk.y)))（OCR 腿，照 PC）")
-            nav.tapPoint(Double(sk.x), Double(sk.y))
+            nav.tapPoint(Double(sk.x), Double(sk.y), why: "搜索键盘/候选")
         } else if nav.detect("search_btn", img: i3) != nil {
             log("   §\(tag) OCR 没读到「搜索」⇒ **模板腿**兜底")
             _ = nav.tap("search_btn", img: i3)
@@ -2287,7 +2287,7 @@ final class FeatureEngine {
         // ⭐ ① 联想词**完全一致**（§1737k 真机正解）
         if let hit = findSuggWord(im, word: word, fuzzy: false) {
             log("   §\(tag) ① 联想词完全一致「\(hit.0)」⇒ 点它 @(\(Int(hit.1.x)),\(Int(hit.1.y)))")
-            nav.tapPoint(Double(hit.1.x), Double(hit.1.y))
+            nav.tapPoint(Double(hit.1.x), Double(hit.1.y), why: "识别命中项（见上下文）")
             sleep(2.0)
             if let i2 = grab() {
                 im = i2
@@ -2305,7 +2305,7 @@ final class FeatureEngine {
         // ⭐ ①b 联想词**挑匹配的**（§1749：拓展标签随机性，更像真人）
         if let hit = findSuggWord(im, word: word, fuzzy: true) {
             log("   §\(tag) ①b 联想词挑匹配的「\(hit.0)」⇒ 点它 @(\(Int(hit.1.x)),\(Int(hit.1.y)))（§1749）")
-            nav.tapPoint(Double(hit.1.x), Double(hit.1.y))
+            nav.tapPoint(Double(hit.1.x), Double(hit.1.y), why: "识别命中项（见上下文）")
             sleep(2.0)
             if let i2 = grab() {
                 im = i2
@@ -2486,7 +2486,7 @@ final class FeatureEngine {
                 return
             }
             n += 1
-            nav.tapPoint(Double(hit.center.x), Double(hit.center.y))
+            nav.tapPoint(Double(hit.center.x), Double(hit.center.y), why: "元素命中中心")
             sleep(2.0)
             // 详情页**拟人停留**（完播/短停）
             sleepWithCancel(min(12.0, max(3.0, end.timeIntervalSinceNow * 0.2)))
@@ -2651,7 +2651,7 @@ final class FeatureEngine {
                     return nil
                 }
                 log("   §\(tag) 形状优先：居中粉药丸 @(\(Int(cx)),\(Int(cy))) 文案「\(t.prefix(14))」过闸")
-                nav.tapPoint(cx, cy)
+                nav.tapPoint(cx, cy, why: "CTA 形状优先（居中粉药丸）")
                 return "形状优先"
             }
             log("   §\(tag) 粉药丸不居中（cx=\(Int(cx))，偏离 \(Int(off))）⇒ 不用形状腿")
@@ -2665,7 +2665,7 @@ final class FeatureEngine {
                 continue
             }
             log("   §\(tag) 文案兜底：CTA「\(t)」@(\(Int(r.midX)),\(Int(r.midY)))")
-            nav.tapPoint(Double(r.midX), Double(r.midY))
+            nav.tapPoint(Double(r.midX), Double(r.midY), why: "CTA 文案兜底")
             return "文案兜底"
         }
         // ④ ⭐⭐⭐⭐⭐ §2832 **兜底之兜底** —— 照 PC `_1377_ad_loop.py:1108-1120`（⛔ 我原来漏了这一层）
@@ -2699,7 +2699,7 @@ final class FeatureEngine {
             }
             log("   §\(tag) ⭐ 兜底之兜底：偏心粉带 @(\(Int(cx)),\(Int(cy))) 也点"
                 + "（照 PC §1108：点广告画面也算一次转化点击，⛔ 零转化最差）")
-            nav.tapPoint(cx, cy)
+            nav.tapPoint(cx, cy, why: "CTA 兜底之兜底（偏心粉带）")
             return "兜底粉带"
         }
         log("   §\(tag) ⛔ 连粉带都没有 ⇒ 停手，⛔ 不盲点")
@@ -2832,7 +2832,7 @@ final class FeatureEngine {
         // ① 系统弹窗（盖屏 ⇒ 底下什么都点不到）
         if let hit = nav.detect("sys_prompt", img: img) {
             log("   §\(tag) 返回闸①：系统弹窗 ⇒ 点消极项（照 PC `dismiss_sys_prompt`）")
-            nav.tapPoint(Double(hit.center.x), Double(hit.center.y))
+            nav.tapPoint(Double(hit.center.x), Double(hit.center.y), why: "安装/完成按钮")
             return
         }
         // ② 券弹窗 ✕（**位置闸**，PC §1724 已删语义闸）
@@ -2979,7 +2979,7 @@ final class FeatureEngine {
         // ② 形状判据（云朵：横宽 + 箭头在下方）
         if let p = Self.findDownloadCloud(img) {
             log("   §\(tag) 云朵下载钮 @(\(Int(p.x)),\(Int(p.y)))（横宽+箭头在下方 双判据）⇒ 点它")
-            nav.tapPoint(Double(p.x), Double(p.y))
+            nav.tapPoint(Double(p.x), Double(p.y), why: "云朵下载钮（App Store）")
             return
         }
         // ③ 文案兜底（⛔ 过后只有文字版式才有用）
@@ -2991,7 +2991,7 @@ final class FeatureEngine {
                     continue
                 }
                 log("   §\(tag) 安装文案兜底：「\(t)」⇒ 点它")
-                nav.tapPoint(Double(r.midX), Double(r.midY))
+                nav.tapPoint(Double(r.midX), Double(r.midY), why: "安装文案兜底")
                 return
             }
         }

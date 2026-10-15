@@ -19,6 +19,25 @@ final class BLEController: NSObject, ObservableObject {
     private var writeChar: CBCharacteristic?
     private var scanStore: ((String) -> Void)?
 
+    /// ⭐⭐⭐⭐⭐ §2841 **发出去的每一条 HID 命令都要留痕**（用户令：逐字）
+    ///
+    /// > 「**这本来就是需要做的 每次操作都要有日志**」
+    ///
+    /// ## ⛔ 为什么必须做在**这一层**（⛔ 不是在各调用点各打一份）
+    /// 全项目有 **21 处** `ble.send(...)`（`FeatureEngine` / `Navigator` / `Runner` /
+    /// `ScriptRuntime` / `APIRouter`）。逐个补日志 ⇒ **必然漏**（本仓库反复吃过这亏：
+    /// 「§2265 改了一处忘了另一处」）。
+    /// ⇒ 收口到 `send()` 这一个函数 ⇒ **结构上不可能漏**。
+    ///
+    /// ## 为什么这是"定位不到误点了什么"的**根本**修法
+    /// 用户报「误点顶部话费充值」，而日志里**查不到任何"点它"的记录** ——
+    /// 因为失败路径静默、且 `ble.send` 本身不打日志。
+    /// 现在：**每一条命令 + 成功/失败 + 失败原因** 都会出现在日志里。
+    var onCommand: ((String, Bool) -> Void)?
+
+    /// 当前是否已连上可写通道（供调用方在不发命令时也能判断）
+    var isReady: Bool { writeChar != nil && target != nil }
+
     // ⭐⭐ §2705 自动重连（蓝牙开启 / 意外断开）
     /// 退避档位（秒）—— ⛔ 不连发，连发会把刚建起的链路打崩
     private static let reconnectBackoff: [Double] = [2, 5, 15, 60]
@@ -138,21 +157,31 @@ final class BLEController: NSObject, ObservableObject {
     }
 
     /// 写一条 HID 命令（自动补 \n，PG 固件按行解析）
+    ///
+    /// ⭐ §2841 **这里是全项目唯一的"发命令"收口** ⇒ 日志也打在这里（见 `onCommand`）。
     @discardableResult
     func send(_ cmd: String) -> Bool {
+        func report(_ ok: Bool) {
+            // ⛔ 先回调再返回 —— 保证"命令已发出/失败"这件事**一定留下痕迹**
+            onCommand?(cmd, ok)
+        }
         guard let ch = writeChar, let p = target else {
             lastError = "未连接（writeChar=\(writeChar == nil ? "nil" : "ok")）"
+            report(false)
             return false
         }
         var s = cmd
         if !s.hasSuffix("\n") { s += "\n" }
         guard let d = s.data(using: .ascii) else {
             lastError = "命令不是 ASCII: \(cmd)"
+            report(false)
             return false
         }
         let type: CBCharacteristicWriteType =
             ch.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
         p.writeValue(d, for: ch, type: type)
+        lastError = ""
+        report(true)
         return true
     }
 
