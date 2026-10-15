@@ -253,18 +253,86 @@ final class Navigator {
         let homeFling = BLEController.swipe(x1: 225, y1: 971, x2: 225, y2: 300,
                                             speed: .homeFling, baseW: baseW, baseH: baseH, yFix: yFix)
 
-        /// 在**当前帧**上找图标；找到就点。返回是否已发出点击。
+        /// ⭐⭐⭐⭐⭐ §2822 **等"画面稳住"再点** —— 修「乱点别的 APP」的真根因
+        ///
+        /// ## 血案（真机日志 2026-10-15 17:47:22，用户报「**乱点别的APP**」）
+        /// ```
+        ///   ① H:HOME 退出当前 App
+        ///   ② 底部快速上滑，把桌面补到第 1 页
+        ///   ✅ 2 条命令后命中「快手极速版」⇒ 点 (161,670)      ← ⛔ 点错了 App
+        /// ```
+        /// **裁图**（`_var/_A_apptapped161.jpg`）证明 **(161,670) 落在「keke 语音」** 上；
+        /// 而「快手极速版」在 **(277,680)** —— 差 **116px ≈ 一整列**（列距 ≈113）。
+        ///
+        /// ## 根因：点到的是**翻页动画中途**那一帧的坐标
+        /// ① 逐页枚举（`_dev/_2820_pages.py`）：桌面**只有第 1 页**有「快手极速版」，
+        ///    稳定位置 **cx=278**；**任何一页都不在 161**
+        ///    ⇒ 那一帧只能是**动画中的画面**，⛔ 不是任何一页的真实布局。
+        ///
+        /// ② 逐帧抓取（`_dev/_2821_burst.py`，抓 App 会收到的**每一帧**）实测：
+        /// ```
+        ///   t=0.56s  frames=322  帧龄=0.04s  cx=272.3   ← 动画中途，但**帧非常新鲜**
+        ///   t=2.64s  frames=323  帧龄=0.07s  cx=278.0   ← 已定住
+        /// ```
+        /// ⇒ ⛔ **「等新鲜帧」挡不住这个错 —— 动画帧本身就很新鲜。**
+        ///    而 `grabSync()` 的收帧闸是「帧龄 ≤ 6.0s」，
+        ///    旧代码 `sleep(2.0)` 后**只抓一帧就点**，恰好可能落在动画窗口里。
+        ///
+        /// ## 修法：同一位姿必须**持续 ≥ `holdS` 秒**才认
+        /// ```
+        ///   读到图标位姿 ⇒ |x − 记录值| ≤ 6px 就一直等
+        ///                  一旦超差（画面在动）⇒ 重新计时
+        ///   持续满 2.5s（> 录屏一个节拍 2s）⇒ 稳了 ⇒ 才点
+        ///   超时仍不稳 ⇒ **不放枪**（铁律①：宁可不动，⛔ 不点隔壁 App）
+        /// ```
+        /// 📏 为什么用「时间」而不是「帧指纹」：静止画面时录屏会产出**逐字节相同**的帧，
+        ///    用指纹判"新帧"会永远判不出 ⇒ 正常情况反而点不下去。
+        ///    而动画只持续 <1s ⇒ **没有任何位移能撑满 2.5s**，这个判据既够强又不误杀。
+        /// 📏 容差 6px：定住后实测 277.97 / 278.00（抖动 <1px）；动画偏差是 116px 量级。
         func findAndTap(_ tag: String) -> Bool {
-            guard let img = frame(),
-                  let (pt, label) = findDesktopIcon(img, which: which, rec: rec,
-                                                    baseW: baseW, baseH: baseH) else {
-                return false
+            let holdS = 2.5          // 同一位置要持续这么久（> 录屏节拍 2s）
+            let tolPx = 6.0          // 位置容差
+            let deadline = Date().addingTimeInterval(14.0)
+
+            var heldX: Double?
+            var heldSince: Date?
+            var heldLabel = ""
+
+            while Date() < deadline {
+                guard let img = frame() else {
+                    Thread.sleep(forTimeInterval: 0.4)
+                    continue
+                }
+                guard let (pt, label) = findDesktopIcon(img, which: which, rec: rec,
+                                                        baseW: baseW, baseH: baseH) else {
+                    heldX = nil; heldSince = nil; heldLabel = ""    // 没看到 ⇒ 重新计时
+                    Thread.sleep(forTimeInterval: 0.4)
+                    continue
+                }
+                let x = Double(pt.x)
+                if let hx0 = heldX, abs(x - hx0) <= tolPx {
+                    if let t0 = heldSince, Date().timeIntervalSince(t0) >= holdS {
+                        log("   ✅ \(tag)画面已稳住（同一位置持续 \(String(format: "%.1f", holdS))s，"
+                            + "x≈\(Int(x))）命中「\(label)」⇒ 点 (\(Int(pt.x)),\(Int(pt.y)))")
+                        hid(BLEController.moveAndClick(x: Double(pt.x), y: Double(pt.y),
+                                                       baseW: baseW, baseH: baseH, yFix: yFix))
+                        Thread.sleep(forTimeInterval: 6.0)      // 照 PC `wait(6.5)`
+                        return true
+                    }
+                } else {
+                    // 位置变了（或第一次）⇒ 重新开始计时
+                    if let hx0 = heldX, abs(x - hx0) > tolPx {
+                        log("   ⏳ \(tag)画面还在动（x \(Int(hx0)) → \(Int(x))）⇒ 继续等稳住")
+                    }
+                    heldX = x; heldSince = Date(); heldLabel = label
+                }
+                Thread.sleep(forTimeInterval: 0.4)
             }
-            log("   ✅ \(tag)命中「\(label)」⇒ 点 (\(Int(pt.x)),\(Int(pt.y)))")
-            hid(BLEController.moveAndClick(x: Double(pt.x), y: Double(pt.y),
-                                           baseW: baseW, baseH: baseH, yFix: yFix))
-            Thread.sleep(forTimeInterval: 6.0)      // 照 PC `wait(6.5)`
-            return true
+            if let hx0 = heldX {
+                log("   ⚠️ \(tag)等不到稳定画面（最后 x≈\(Int(hx0))「\(heldLabel)」）"
+                    + "⇒ **不放枪**（铁律①：⛔ 不点可能已经移位的位置）")
+            }
+            return false
         }
 
         // ⭐⭐⭐⭐⭐ §2366 **回主桌面 = 2 条命令**（用户口径，⛔ 不再循环 OCR）
@@ -295,9 +363,12 @@ final class Navigator {
         log("   ② 底部快速上滑，把桌面补到第 1 页")
         hid([homeFling])
         // ⭐ 录屏 ~1fps ⇒ 睡够让**新帧**落盘，⛔ 不是立刻抓（§2284 血案）
+        // ⚠️ §2822：这里**不再**指望"睡够就行" —— 上滑有翻页动画，
+        //    动画帧本身也很"新鲜"（实测 age=0.04s），睡 2.0s 抓一帧仍可能落在动画里
+        //    ⇒ 真正把关的是 `findAndTap` 内部的「同一位置持续 2.5s」闸。
         Thread.sleep(forTimeInterval: 2.0)
 
-        // 现在必定在主桌面 ⇒ **一次 OCR + 一次点击**，完了。
+        // 现在必定在主桌面 ⇒ 找图标 + **等稳住** + 点
         if findAndTap("2 条命令后") { return true }
 
         // ⭐ 兜底：只在"2 条命令后仍没看到图标"时才补 1 条上滑 + 1 次 OCR（最多 2 轮）
