@@ -1001,9 +1001,12 @@
         100
       ],
       "templates": [
-        "ad/pill_x.png"
+        "x_ref_pill2.png"
       ],
-      "threshold": 0.8
+      "threshold": 0.78,
+      "_doc": [
+        "§2880 模板与阈值改回 PC 原值：PC `find_toast_x` 的胶囊模板腿用 `x_ref_pill2.png`（`_1377_ad_loop.py:3963`）、阈值 **0.78**（L4034/L4056）。原配置指向 `ad/pill_x.png`（⛔ 另一个文件）且阈值 0.8 ⇒ 与 PC 不一致。⚠️ 但实测该模板腿在这帧上只有 0.5x 分 ⇒ **PC 的主力腿是几何判据 `_find_cross_x`**，那条还没搬（见 _note_2879）。"
+      ]
     },
     "rec_stopped_ok": {
       "_doc": [
@@ -2406,6 +2409,6 @@
     "same_n": 12,
     "same_window": 15
   },
-  "cfg_version": "0.04",
+  "cfg_version": "0.05",
   "version": 1
 }
