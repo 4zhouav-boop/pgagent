@@ -463,7 +463,6 @@ final class Navigator {
     ///
     /// ⭐ 参数 `atomic`：`true` ⇒ 走固件**原子通道** `Q:x,y`（移+按+放一条 HID 序列）。
     ///    给**时序敏感**的场景用（系统弹窗）—— 照电脑端 `_ext_q`。
-    @discardableResult
     /// ⛔ §2921 **需要过「登录红线闸」的元素** —— 只列**肯定项/动作按钮**。
     ///
     /// ## ⛔ 为什么必须是"白名单"而不是"所有元素"
@@ -490,6 +489,11 @@ final class Navigator {
         "rec_stopped_ok",     // 录屏弹窗「好」
     ]
 
+    /// ⚠️ §2925 **`@discardableResult` 必须紧贴函数声明** ——
+    /// 我上次把 `loginGuardedElements` 插在它和 `func tap` **之间**，
+    /// 编译器报 `'@discardableResult' attribute cannot be applied to this declaration`
+    /// （属性挂到了注释/属性上）⇒ ⛔ 注释块与属性**都**要写在 `@discardableResult` **之前**。
+    @discardableResult
     func tap(_ name: String, img: UIImage, atomic: Bool = false) -> Bool {
         // ⭐⭐⭐⭐⭐ §2841 **每次点击尝试都必须有日志**（用户令：逐字）
         //

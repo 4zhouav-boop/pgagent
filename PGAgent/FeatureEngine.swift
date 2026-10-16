@@ -3263,9 +3263,11 @@ final class FeatureEngine {
             if nav.detect("ext_breadcrumb", img: img) != nil {
                 log("   §\(tag) 返回腿 k=6：★**第三方 App 逃生腿**（面包屑命中 ⇒ 不在快手）"
                     + " ⇒ H:HOME → 启动链重进快手（照 PC §1699 第三级）")
-                _ = Self.switchToApp(named: s?.apps?.first ?? "kslite", rec: rec, ble: ble,
-                                     frame: grab, baseW: baseW, baseH: baseH, yFix: yFix,
-                                     log: log)
+                // ⚠️ `switchToApp` 是 **Navigator** 的静态方法（⛔ 不是 FeatureEngine 的）
+                //    ⇒ 必须写 `Navigator.switchToApp`（§2925 编译错误修）
+                _ = Navigator.switchToApp(named: s?.apps?.first ?? "kslite", rec: rec, ble: ble,
+                                          frame: grab, baseW: baseW, baseH: baseH, yFix: yFix,
+                                          log: log)
                 sleep(2.0)
             } else {
                 log("   §\(tag) 返回腿 k=6：没看到「跨 App 面包屑」⇒ **不放枪**"
