@@ -522,7 +522,32 @@ final class FeatureEngine {
                     log("   §adbox ↩ 还在落地页（第 \(k + 1)/\(returnToAdRounds) 次）⇒ 执行返回")
                     lastSig = imr
                     lastLegFired = returnToAd(imr, tag: "adbox_ret\(n + 1)_\(k)", k: k)
-                    sleep(returnToAdWait)
+                    // ⭐⭐⭐ §2973 **改成"轮询等一张新帧"，⛔ 不是盲等固定 `returnToAdWait`**
+                    //
+                    // ## 📏 为什么（照本项目**已有**的 `Navigator.step` §2265，⛔ 不新造）
+                    // 录屏写盘节拍是 **1 帧/4s**（为活过 iOS 写入预算而故意放慢）。
+                    // 固定睡 3.2s 就去比 ⇒ `grab()` 很可能**还是同一张帧** ⇒
+                    // `screenChanged` 等于拿一张图跟自己比 ⇒ 恒 false ⇒ **腿被冤杀**。
+                    // 📏 与 `Navigator.swift:1114-1137` 是**同一个坑**，那边已修好 ⇒ 这里照抄。
+                    //
+                    // ## ✅ 修法（照抄那段）
+                    //   · 画面**真变了** ⇒ 新帧一到就早退（⛔ 不白等）
+                    //   · 画面**真没变** ⇒ 等满预算再判（结论仍正确）
+                    // 📏 也顺手治了"9 腿 × 3.2s 白等 29s"的浪费。
+                    //
+                    // ⚠️ 上游对照：SikuliX `WaitScanRate`／Selenium `poll_frequency`
+                    //    都是"轮询到条件成立就早退"，⛔ 不是固定 sleep。
+                    let changeWait = max(Double(returnToAdWait),
+                                         (s?.loop_frame_max_age ?? 7.0) + 1.5)
+                    let deadline = Date().addingTimeInterval(changeWait)
+                    while Date() < deadline {
+                        sleep(0.5)
+                        guard let p = grab() else { break }
+                        if nav.screenChanged(imr, p) {
+                            log("   §adbox ⚡ 返回腿 k=\(k) 后**画面已变**（新帧到了就早退，⛔ 不白等）")
+                            break
+                        }
+                    }
                 }
                 if backHome {
                     // ⭐⭐⭐⭐⭐ §2824 **回中心也算"真的离开这条广告"** ⇒ 可以计数
