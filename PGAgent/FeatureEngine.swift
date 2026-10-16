@@ -2741,7 +2741,29 @@ final class FeatureEngine {
     static let installWords: [String] = [
         "获取", "安装", "下载", "免费", "获取APP",
         "打开",     // ⭐ §2896 用户令「已经下载的要去打开」（PC 词表里没有）
-        "更新",     // ⭐ 已安装且可更新时 iOS 显示的就是它（同一枚按钮）
+        "更新",     // ⭐ §2912 用户令「还要加入更新」（PC 词表里没有）
+    ] + installButtonFullNames
+
+    /// §2914 **已知按钮全称**（⛔ 精确匹配用；照 PC `CTA_KEYS` L279 的下载类词）
+    ///
+    /// ## 为什么必须有它（⛔ 因为 §2914 已把"子串匹配"删掉）
+    /// H5 落地页上的按钮常常是**多字全称**（`下载应用`/`立即下载`/`去下载`），
+    /// 而它们**不是**裸的「下载」⇒ 只用裸词精确匹配会漏。
+    /// 📏 PC `CTA_KEYS`（L279 逐字）里就明列着这些：
+    /// ```
+    /// "下载", "安装", "下载应用", "立即安装", "免费下载", "免费安装",
+    /// "下载安装", "去下载", "立即体验", "安装应用", "下载体验"
+    /// ```
+    /// ⇒ 这里逐条抄进来（⛔ 用**精确等值**匹配，⛔ 不做包含 —— 见 `findInstallWord`）。
+    static let installButtonFullNames: [String] = [
+        // —— 下载类（PC CTA_KEYS 逐字）——
+        "下载应用", "立即下载", "免费下载", "去下载", "下载安装", "下载体验",
+        // —— 安装类（PC CTA_KEYS 逐字）——
+        "立即安装", "免费安装", "安装应用", "安装APP", "安装App",
+        // —— 体验/获取类（PC CTA_KEYS 逐字）——
+        "立即体验", "获取App",
+        // —— 已安装态（§2912 用户令「还要加入更新」）——
+        "更新APP", "更新App", "立即更新",
     ]
 
     /// ⭐ 点广告页底部的 CTA —— 逐条移植 PC `click_cta`（`_1377_ad_loop.py:1044`）。
@@ -3204,8 +3226,38 @@ final class FeatureEngine {
     private func clickInstall(_ img: UIImage, tag: String) {
         // ⭐ 判「这是不是 App Store sheet」——只用来**选文字腿扫哪一带**
         //   （⛔ 不用它当"允许/禁止点安装"的闸 —— 那正是错①）
-        //   两条并列：新判据（右上蓝胶囊）或 `appstore_x`（左上黑 ✕，实测有命中）
-        let onSheet = Self.looksLikeAppStorePage(img) || nav.detect("appstore_x", img: img) != nil
+        //
+        // ⛔⛔⛔ §2912 **绝不能用 `appstore_x` 判"这是 sheet"（我 §2896 犯的回归）**
+        //
+        // ## 真机血案（0.20，2026-10-16，三轮广告全部没点安装）
+        // ```
+        // §adbox_inst3 安装文字腿：⭐ 判为 **App Store sheet** ⇒ 只扫**页首带**（⛔ 不扫宽 ROI…）
+        // §adbox_inst3 安装形状腿：不在 App Store 模态页 ⇒ **不找云朵**
+        // §adbox_inst3 ⚠️ 没找到安装/打开钮（文字腿/云朵都没中）⇒ 不点
+        // ```
+        // 第 1 行与第 2 行**自相矛盾** ⇒ 说明 `onSheet` 两个来源不一致：
+        // ```swift
+        // let onSheet = looksLikeAppStorePage(img) || nav.detect("appstore_x", img) != nil
+        // //            ↑ 第2行说这个 false        ↑ 第1行说这个 true
+        // ```
+        // ## ⛔ 根因：`appstore_x` 是一个**裸 ✕**（词表 = X/✕/×），**H5 落地页也有**
+        // 它证明的是"这页有个关闭钮"，⛔ 不是"这是 App Store sheet"。
+        // ⇒ 在 H5 落地页上 `onSheet` 被误判 true ⇒ **跳过宽 ROI** ⇒
+        //   真正的「下载应用」/「立即下载」**一个都不点**（用户令要的"没下载的要做下载"就这么丢了）。
+        //
+        // ## ✅ 改用它判（`_dev/_2912` 在两类真机帧上量过，分离干净）
+        // ```
+        //   ① 右上蓝胶囊 ≥1200     —— sheet 3409 ／ H5 落地页 0        ✅
+        //   ② 推荐列表标记词       —— 只在 sheet 出现（更多来自/你可能还喜欢/App 内购买）✅
+        //   ⛔ 裸 ✕（appstore_x）—— 两类都可能有 ⇒ **不许**参与本判据
+        // ```
+        let looksSheet = Self.looksLikeAppStorePage(img)
+        let hasRecoList = Self.hasAppStoreRecoList(img, rec: rec, bw: baseW)
+        let onSheet = looksSheet || hasRecoList
+        if onSheet && !looksSheet {
+            log("   §\(tag) 安装腿：⭐ 靠**推荐列表词**判为 App Store sheet"
+                + "（「更多来自…的 App」/「你可能还喜欢」—— 这类列表只在 sheet 上出现）")
+        }
 
         // ── ① 文字腿（**先跑，无页面闸** —— 照 PC `click_install` 的腿序）──
         let textROI = onSheet ? Self.boxInstallTop : Self.boxInstallWide
@@ -3242,8 +3294,39 @@ final class FeatureEngine {
         log("   §\(tag) ⚠️ 没找到安装/打开钮（文字腿/云朵都没中）⇒ 不点")
     }
 
-    /// §2896 **安装/打开腿的两条 ROI**（基准 451×977 像素）
+    /// ⭐⭐⭐ §2912 **App Store sheet 的第二判据：推荐列表词**
     ///
+    /// ## 为什么需要它（⛔ 不能只靠右上蓝胶囊）
+    /// 蓝胶囊要求"这一帧蓝像素 ≥1200" ⇒ 若某一版式把「打开」按钮改成**灰色/其他色**
+    /// （iOS 在"已安装"态下确实可能不画蓝），蓝胶囊就会漏 ⇒ 又误判成"不是 sheet"
+    /// ⇒ 回到 §2896 的老毛病（宽 ROI → 点到推荐列表里**别的 App**）。
+    ///
+    /// ## 判据（`_dev/_2912` 在真机两类帧上量过）
+    /// App Store sheet 特有的**两段列表标题**：
+    /// ```
+    ///   「更多来自 "北京百度网讯…" 的 App」     ← 开发者聚合列表
+    ///   「你可能还喜欢」                        ← 推荐列表
+    ///   「App 内购买」（每个列表项右下角的小字） ← 最密集、最稳
+    /// ```
+    /// ⇒ H5 落地页**一个都没有**（真机 `_verify2890` / `_stuck2855` / `_r2_land` 三帧实测）。
+    /// ⛔ 三者**任一**命中即算（同一语义的三种版式写法）。
+    static func hasAppStoreRecoList(_ img: UIImage, rec: Recognizer, bw: Double) -> Bool {
+        // 列表标题在屏幕中部（sheet 的下半屏）；⛔ 不含页首带（那带是"本 App 自己的按钮"）
+        let band = CGRect(x: 0, y: 200, width: bw, height: 777)
+        let items = rec.ocrRegion(img, rect: band, minConfidence: 0.3)
+        let joined = items.map(\.0).joined()
+        return appStoreRecoKeys.contains { joined.contains($0) }
+    }
+
+    /// §2912 App Store sheet 的推荐列表标记词（⛔ 逐条来自真机 OCR 实测）
+    private static let appStoreRecoKeys = [
+        "更多来自",        // 「更多来自 "北京百度网讯…" 的 App 〉」
+        "你可能还喜欢",     // 推荐列表标题
+        "App 内购买",      // 列表项右下小字（最密集、最稳）
+        "App内购买",
+    ]
+
+    /// §2896 **安装/打开腿的两条 ROI**（基准 451×977 像素）
     /// · `boxInstallTop`  —— **页首带**：App Store sheet **本 App 自己**的按钮
     ///   （新版式右上「打开/获取」@y≈106；旧版式左上「完成」@y≈85..150）。
     ///   ⛔ 上沿取 55（避开状态栏时间/电量），下沿取 205（⛔ 不到推荐列表 y≈418）。
@@ -3253,12 +3336,28 @@ final class FeatureEngine {
     static let boxInstallTop = CGRect(x: 0, y: 55, width: 451, height: 150)
     static let boxInstallWide = CGRect(x: 0, y: 280, width: 451, height: 697)
 
-    /// §2896 在 `roi` 内找**安装/打开词**（先精确匹配，再子串匹配）。
+    /// §2896 在 `roi` 内找**安装/打开词**（⛔ **精确匹配**，照 PC 的纪律）。
     ///
-    /// ## ⛔ 为什么分两遍（精确优先）
-    /// 「打开」这类词很容易**出现在一句话里**（如「打开APP」「点击打开」）——
-    /// 而按钮上的字是**独立**的（`text == "打开"`）。
-    /// ⇒ 先收**独立成词**的（可信度高），再退到**子串**（覆盖「获取APP」这类变体）。
+    /// # ⛔⛔⛔ §2914 **删掉「子串兜底」** —— 它会点中句子里的词（我 §2896 自己加的）
+    ///
+    /// ## 真机血案（0.20 现场帧 `_r2_land.jpg` 复算）
+    /// H5 落地页上有一句广告文案 **「就有机会免费获取酱知现叛月长」**@y=457，
+    /// 而真正的按钮是 **「下载应用」**@y=724。子串匹配 `t.contains("获取")` 先撞上那句
+    /// ⇒ **点到了广告文案中间**（既不是按钮，也拿不到转化）。
+    /// ```
+    /// 命中(子串)：「就有机会免费获取酱知现叛月长」@(225,457)   ⛔ 期望「下载应用」
+    /// ```
+    ///
+    /// ## 📏 PC 从来没有子串匹配（`_1377_ad_loop.py:8758` 逐字）
+    /// ```python
+    /// if _w.strip() in ("获取", "安装", "下载", "免费", "获取APP", "获取App"):
+    /// ```
+    /// ⇒ **整体等于**才算 —— 我那层"子串兜底"是**自己加的**，正是这次误命中的来源。
+    /// ⚠️ 但「下载应用」「立即下载」这些**确实是按钮**（PC `CTA_KEYS` L279 里就列着
+    ///   `"下载应用"`/`"立即下载"`/`"去下载"`/`"免费下载"`…）⇒ 它们必须能命中。
+    /// ⇒ ✅ 正解 = **精确匹配 + 一份"已知按钮全称"白名单**（照 PC 的词表纪律，
+    ///   ⛔ 不是"包含关系"）—— 见 `installWords`。
+    ///
     /// 两遍都过 `forbidden()` 支付红线闸（照 PC：⛔ 绝不点支付/购买）。
     ///
     /// - Returns: (命中的文字, 它的框)；⛔ 没有 ⇒ nil（调用方**不放枪**）
@@ -3266,17 +3365,11 @@ final class FeatureEngine {
                                 words: [String], extraKeys: [String]?)
         -> (String, CGRect)? {
         let items = rec.ocrRegion(img, rect: roi, minConfidence: 0.3)
-        // ① 精确匹配（去掉空白后**整体等于**某个词）
         for (t, r, _c) in items {
+            // ⛔ 精确匹配：去掉空白后**整体等于**白名单里的某个词
+            //   （白名单已含「获取APP/获取App/下载应用/立即下载」等各种按钮全称）
             let s = t.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard words.contains(where: { s == $0 || s == $0 + "APP" || s == $0 + "App" })
-            else { continue }
-            if forbidden(t, extraKeys: extraKeys) != nil { continue }
-            return (t, r)
-        }
-        // ② 子串匹配（兜底）
-        for (t, r, _c) in items {
-            guard words.contains(where: { t.contains($0) }) else { continue }
+            guard words.contains(s) else { continue }
             if forbidden(t, extraKeys: extraKeys) != nil { continue }
             return (t, r)
         }
