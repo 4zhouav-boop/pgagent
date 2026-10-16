@@ -210,9 +210,14 @@ final class APIRouter {
             //   自检不过时 `reload()` **故意不覆盖 `cfg`**（保留上一份有效配置继续跑）
             //   ⇒ 拿 `cfg` 反查**看不到错误** ⇒ 必须由这里把**刚推上来的那个文件**的问题带回来。
             // ✅ **加字段是零破坏性的**：老调用方只读 `ok` / `error` 时行为不变。
-            // ⚠️ 语义：`configErrors` 空 = **这次加载通过**；非空 = **这次被拒绝**（`ok=false`）。
+            // ⚠️ 语义：`configErrors` 非空且 `ok=false` = **这次被拒绝**；
+            //          `configErrors` 非空且 `ok=true`  = **已加载但有缺陷**（照 §2945 的 warnings）。
+            //   ⇒ 为了⛔不让调用方误读，另给 `configWarnings`（与 errors **同一个数组**，
+            //     语义上：`ok==true` 时它就都是 warnings）。老调用方行为不变。
+            let errs = cfgStore.lastConfigErrors
             return .json(["ok": ok, "error": cfgStore.lastError,
-                          "configErrors": cfgStore.lastConfigErrors,
+                          "configErrors": ok ? [] : errs,
+                          "configWarnings": ok ? errs : [],
                           "elements": cfgStore.cfg?.elements.count ?? 0,
                           "pages": cfgStore.cfg?.pages.count ?? 0],
                          status: ok ? 200 : 500)

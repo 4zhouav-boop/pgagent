@@ -69,8 +69,9 @@ final class ConfigStore: ObservableObject {
         do {
             let data = try Data(contentsOf: p)
             let c = try JSONDecoder().decode(PGConfig.self, from: data)
-            // ⭐ §2645 自检（空 = 通过；⛔ 非空 ⇒ 拒绝加载，cfg 保持上一份）
-            let errs = Self.validate(c)
+            // ⭐ §2645 自检（红线非空 ⇒ 拒绝加载，cfg 保持上一份）
+            // ⭐ §2945 **缺陷（warnings）不拒绝** —— 只暴露（见 validateSplit 的说明）
+            let (errs, warnings) = Self.validateSplit(c)
             guard errs.isEmpty else {
                 lastConfigErrors = errs
                 lastError = "配置自检不过（已**拒绝加载**，仍用上一份有效配置）: "
@@ -80,8 +81,13 @@ final class ConfigStore: ObservableObject {
             }
             cfg = c
             loadedAt = Date()
-            lastError = ""
-            lastConfigErrors = []
+            lastConfigErrors = warnings        // ⚠️ 缺陷**照常加载**，但带出来给人看
+            if warnings.isEmpty {
+                lastError = ""
+            } else {
+                lastError = "⚠️ 配置已加载，但有 \(warnings.count) 处缺陷（照 §2945）: "
+                    + warnings.joined(separator: " ｜ ")
+            }
             return true
         } catch {
             lastError = "解析失败: \(error)"
@@ -119,8 +125,24 @@ final class ConfigStore: ObservableObject {
     /// > ⇒ 打开了快手小店收银台「待支付 ¥9.9」，屏幕上出现「确认支付 / 继续支付」，
     /// >   用户看见以为在买东西。
     /// > 用户口径：**可以浏览，绝不做支付/购买**。
+    ///
+    /// # ⚠️⚠️ §2945 **本函数的返回值分两类**（⛔ 别把"缺陷"当"红线"）
+    /// ```
+    ///   errs       —— **红线**（支付/登录）⇒ 调用方**拒绝加载**（cfg 保持上一份）
+    ///   warnings   —— **缺陷**（引用不存在等）⇒ **加载照旧**，只把问题暴露出来
+    /// ```
+    /// 📏 为什么必须分开（我差点自己挖坑）：
+    ///   引用完整性（`funnel` 引用了不存在的元素名）是**可容忍的缺陷** ——
+    ///   那条腿不动，别的腿还能跑；而 **"拒绝加载"是致命的**（App 直接一步都不动）。
+    ///   ⇒ ⛔ 若把缺陷塞进 `errs`，就会"因为一条死腿而让整个 App 起不来"。
     static func validate(_ c: PGConfig) -> [String] {
+        validateSplit(c).errs
+    }
+
+    /// §2945 **自检的完整结果**：红线（拒绝加载）+ 缺陷（只警告）
+    static func validateSplit(_ c: PGConfig) -> (errs: [String], warnings: [String]) {
         var errs: [String] = []
+        var warnings: [String] = []
         // ⚠️ 未配置 `forbid_keys` ⇒ 用硬编码基线 ⇒ **天然安全**，⛔ 不报错（向后兼容）
         if let configured = c.settings?.forbid_keys {
             let base = forbidKeysBaseline
@@ -165,7 +187,89 @@ final class ConfigStore: ObservableObject {
                     + "**任何点击都会被拒** ⇒ ⛔ 拒绝加载")
             }
         }
-        return errs
+        // ⛔⛔⛔ §2945 **引用完整性自检** —— 治「元素名不存在 ⇒ 静默返回 null」
+        //
+        // ## 为什么必须有它（真机血案 + 项目自己的规格早就写了）
+        // `_note_2874_照PC抄_权威规格与验收门槛.md` **§3 第 3 条**（逐字）：
+        // > **8 个元素名在 config 里不存在** ⇒ `pg.detect` **静默返回 null**
+        // >   `exit_live`…、**`coupon_x`/`modal_x`/`bottom_popup`**（只能走 `pg.funnel()`）…
+        // > 📏 **`pg.detect` 对不存在的元素名返回 null 而不报错** ⇒
+        // >   ⛔ **JS 里看不出"是漏了"还是"真没命中"** —— 这正是我这几轮反复踩的坑。
+        //
+        // ## 真机现场（§2944，2026-10-16）
+        // 直播间「奥兴建材工厂店」+ 券弹窗「领取店铺首单券」盖屏 ⇒ **死循环**。
+        // `/elements` 逐条复核发现：
+        // ```
+        //   funnel[11] modal_x      ⛔ 元素不存在 ⇒ 静默什么都不做
+        //   funnel[12] coupon_x     ⛔ 元素不存在 ⇒ **就是那个券弹窗**
+        //   funnel[14] bottom_popup ⛔ 元素不存在
+        //   funnel[13] mid_modal_x  ✅ 命中 @(208,711) ← 该点它，但排在三条死腿之后
+        // ```
+        //
+        // ## ✅ 判据（⛔ 不是"报错就拒绝加载" —— 那会让现有配置直接不可用）
+        // 这里**只把问题暴露出来**（进 `configErrors` / 控制台 / `/reload` 回包），
+        // ⛔ **不拒绝加载** —— 因为"某条腿暂时没元素"是**可容忍**的（其它腿还能跑），
+        // 而"加载不了配置"是**致命**的（App 直接不动）。
+        // ⇒ 📏 与 `forbid_keys` 的区别：那条是**红线**（必须拒绝），这条是**缺陷**（必须可见）。
+        //
+        // ## 检查三处引用
+        // ```
+        //   ① funnel[].element  ② funnel[].require  ③ pages[].check / alts / go / also_ok / not
+        // ```
+        // ⚠️ 只查"**名字是否存在**"（⛔ 不查语义对不对）—— 语义靠人/后续 AI 判。
+        var refErr: [String] = []
+        let known = Set(c.elements.keys)
+
+        /// 特殊元素名：**不走 elements 表**（由代码里的专用判据处理）⇒ 白名单
+        ///
+        /// 📏 照 `Navigator` 里那几个 `if it.element == "..."` / `if g == "..."` 分支
+        ///   （⛔ 逐个 grep 出来的，**不是猜的**）：
+        /// ```
+        ///   runFunnel:  coin_ball   → ColorBlob.findCoinBall
+        ///               modal_x     → ModalX.find
+        ///               bottom_popup→ findBottomPopup
+        ///               appstore_x  → findDarkCross
+        ///               coupon_x    → ModalX.findCoupon      ← ⚠️ 别漏！它有分支
+        ///               consent_allow → findConsentAllow
+        ///   step/go:    back_edge   → backGestureCmd()（页面图里当出路用）  ← ⚠️ 别漏
+        /// ```
+        /// ⛔ 漏一个就会**误报**（把有实现的腿说成死腿）——
+        ///   我第一版就漏了 `coupon_x` 和 `back_edge`，自检报了 4 条假警报。
+        let codeOnly: Set<String> = ["coin_ball", "modal_x", "bottom_popup",
+                                     "appstore_x", "coupon_x", "consent_allow",
+                                     "back_edge"]
+
+        for (i, it) in (c.funnel ?? []).enumerated() {
+            let e = it.element
+            if !known.contains(e) && !codeOnly.contains(e) {
+                refErr.append("funnel[\(i)].element = 「\(e)」**在 elements 里不存在**"
+                    + " ⇒ `detect()` 会**静默返回 nil**（⛔ 这条腿永远不会出手）")
+            }
+            if let rq = it.require, !known.contains(rq) && !codeOnly.contains(rq) {
+                refErr.append("funnel[\(i)].require = 「\(rq)」**在 elements 里不存在**"
+                    + " ⇒ 前置闸恒不命中 ⇒ 这条腿被**静默挡住**")
+            }
+        }
+        for (pname, p) in c.pages {
+            func chk(_ list: [String]?, _ what: String) {
+                for n in list ?? [] where !known.contains(n) && !codeOnly.contains(n) {
+                    refErr.append("pages.\(pname).\(what) 引用「\(n)」**不存在** ⇒ 该判据失效")
+                }
+            }
+            chk(p.check, "check"); chk(p.alts, "alts"); chk(p.also_ok, "also_ok")
+            chk(p.not, "not")
+            if let g = p.go, !known.contains(g), !codeOnly.contains(g) {
+                refErr.append("pages.\(pname).go 引用「\(g)」**不存在** ⇒ 该页出路失效")
+            }
+        }
+        if !refErr.isEmpty {
+            // ⚠️ §2945 **进 warnings，⛔ 不进 errs**（缺陷 ≠ 红线；见 validate 的说明）
+            warnings.append("⚠️ **引用完整性**：\(refErr.count) 处引用不存在的元素名"
+                + "（照 §2945；⛔ 这类错**不会报错**，只会静默不动）：\n      "
+                + refErr.prefix(12).joined(separator: "\n      ")
+                + (refErr.count > 12 ? "\n      …还有 \(refErr.count - 12) 处" : ""))
+        }
+        return (errs, warnings)
     }
 
     // MARK: - ⭐⭐⭐⭐⭐ §2269 保存（控制台改设置用）
