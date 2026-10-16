@@ -564,7 +564,11 @@ final class Navigator {
             let ok = ble.send(cmd)
             if !ok { log("   §tap ⛔ BLE 发送失败：\(ble.lastError)") }
             Thread.sleep(forTimeInterval: Self.tapAfterSettle)
-            return true
+            // ⭐⭐⭐ §2972 **如实返回 BLE 的结果**（⛔ 不再无条件 true）
+            //   照 MaaFW `Actuator::click()`：`success = controller()->click()` —— **原样透传**，⛔ 不吞。
+            //   ⛔ 原来 `return true` ⇒ BLE 丢包时腿**实际没出手**却报"出手了"
+            //      ⇒ 调用方（返回梯 §2971）判"出手了但画面没变" ⇒ **冤杀这条腿**。
+            return ok
         }
         // ⭐⭐⭐ §2600 **两步式**：`P:` + `D:`（原地长按 600ms）
         //
@@ -581,12 +585,15 @@ final class Navigator {
                                               baseW: baseW, baseH: baseH, yFix: yFix)
         log("   §tap ★点「\(name)」@(\(Int(c.x)),\(Int(c.y))) score=\(String(format: "%.3f", h.score))"
             + " ev=\(h.evidence.prefix(28)) ⇒ \(cmds.joined(separator: " + "))")
+        var allOk = true     // ⭐ §2972 见下（两步式：两条都发出去了才算"出手"）
         for (i, cmd) in cmds.enumerated() {
             let ok = ble.send(cmd)
             if !ok { log("   §tap ⛔ BLE 发送失败（\(cmd)）：\(ble.lastError)") }
+            allOk = allOk && ok
             Thread.sleep(forTimeInterval: i == 0 ? Self.tapMoveSettle : 0.9)
         }
-        return true
+        // ⭐⭐⭐ §2972 如实返回（两步式要**两条都发出去**才算出手）—— 见上面 atomic 分支的说明
+        return allOk
     }
 
     /// ⭐ **按坐标直接点**（坐标来自别处，如 OCR 词中心）
@@ -614,17 +621,20 @@ final class Navigator {
             let ok = ble.send(cmd)
             if !ok { log("   §tapPoint ⛔ BLE 发送失败：\(ble.lastError)") }
             Thread.sleep(forTimeInterval: Self.tapAfterSettle)
-            return true
+            // ⭐⭐⭐ §2972 如实返回 BLE 结果（与 `tap` 同一口径）—— 见 `tap` 里的说明
+            return ok
         }
         let cmds = BLEController.moveAndClick(x: x, y: y,
                                               baseW: baseW, baseH: baseH, yFix: yFix)
         log("   §tapPoint ★点坐标\(tag) @(\(Int(x)),\(Int(y))) ⇒ \(cmds.joined(separator: " + "))")
+        var allOk = true
         for (i, cmd) in cmds.enumerated() {
             let ok = ble.send(cmd)
             if !ok { log("   §tapPoint ⛔ BLE 发送失败（\(cmd)）：\(ble.lastError)") }
+            allOk = allOk && ok
             Thread.sleep(forTimeInterval: i == 0 ? Self.tapMoveSettle : 0.9)
         }
-        return true
+        return allOk
     }
 
     /// ⭐⭐ **iOS 左边缘右滑返回**（`B:` 固件专用命令）—— 沉浸式页面唯一出路
@@ -648,7 +658,10 @@ final class Navigator {
         let ok = ble.send(cmd)
         if !ok { log("   §gesture ⛔ BLE 发送失败：\(ble.lastError)") }
         Thread.sleep(forTimeInterval: 1.0)
-        return true
+        // ⭐⭐⭐ §2972 如实返回 BLE 结果（与 `tap` 同一口径）
+        //   ⛔ 原来 `return true` ⇒ k=5 那条腿 BLE 断了也报"出手了"
+        //      ⇒ 调用方判"出手了但画面没变" ⇒ 冤杀（§2971 血案的同族）
+        return ok
     }
 
     /// ⭐⭐⭐ **点「红包/金币」悬浮球**（回金币中心的**唯一入口**）
