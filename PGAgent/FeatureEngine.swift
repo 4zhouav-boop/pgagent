@@ -3186,25 +3186,64 @@ final class FeatureEngine {
     /// - Parameter k: 第几轮（决定用哪条腿，照 PC 的轮次语义）
     private func returnToAd(_ img: UIImage, tag: String, k: Int) {
         // ── 每轮先过的三层闸（照 PC 2815-2888，⛔ 顺序不许改）──
-        // ① 系统弹窗（盖屏 ⇒ 底下什么都点不到）
-        if let hit = nav.detect("sys_prompt", img: img) {
-            log("   §\(tag) 返回闸①：系统弹窗 ⇒ 点消极项（照 PC `dismiss_sys_prompt`）")
-            nav.tapPoint(Double(hit.center.x), Double(hit.center.y), why: "安装/完成按钮")
+        //
+        // # ⛔⛔⛔ §2948 **这三道闸原来是死的**（真机血案：广告页卡死在弹窗上）
+        //
+        // ## 血案
+        // 用户：「**广告页面依然卡死在弹窗上 让你用PG控制器对照解决问题**」
+        // 📏 逐条查出来的根因（⛔ 三行全是错的元素名）：
+        // ```swift
+        // if nav.detect("sys_prompt",  img: img) != nil { … }   // ⛔ elements 里**没有**这个名字
+        // if nav.detect("coupon_x",    img: img) != nil { … }   // ⛔ 也没有
+        // if nav.detect("shop_h5_x",   img: img) != nil { … }   // ⛔ 也没有
+        // ```
+        // ⇒ `detect()` 对不存在的名字**返回 nil**（⛔ 不报错）
+        //   ⇒ **三道闸全部恒 false** ⇒ **一次都没出手过** ⇒ 弹窗永远没人关。
+        //
+        // ## ✅ 照 PC 改成"走**代码**里的专用判据"（PC 也是这么做的）
+        // PC `return_to_ad` 的前置闸（`_1377_ad_loop.py:2815-2888` 逐字）：
+        // ```python
+        // if dismiss_sys_prompt(img): return     # ① 系统弹窗（**函数**，不是元素名）
+        // if click_coupon_x(img): return         # ② 券弹窗（**函数** find_coupon_x 位置闸）
+        // if handle_shop_h5(img): return         # ③ 小店 H5（**函数**，自带状态机）
+        // ```
+        // ⇒ 📏 PC 这三道闸**都不是"查元素表"**，是**调函数**。
+        //   我写成 `detect("<名字>")` 就等于把它们**架空**了。
+        //
+        // ## 📏 教训（用户令「先看 PG 控制器的标准」）
+        // **元素名是数据；这三道闸是逻辑。** 拿数据名去查一张没有它的表 ⇒ 静默失效。
+        // ⚠️ 本轮已加 `ConfigStore.validateSplit()` 的引用完整性自检（§2945）——
+        //    它**只查 funnel/pages**，查不到"代码里写死的名字" ⇒ 所以我在这里补了注释。
+
+        // ① ⭐ 系统弹窗（PC `dismiss_sys_prompt`）
+        //    ⛔ 原来写 `detect("sys_prompt")`（不存在）⇒ 恒 false
+        //    ✅ 现在：先看**形态/标题**（两个真实元素），再点**消极项**
+        //    📏 闸 = `sys_prompt_title`（「想要打开」）**或** `sys_prompt_btns`（不允许+允许）
+        //       —— 与 `Navigator.runFunnel` 里那两条腿**同一套判据**
+        if nav.detect("sys_prompt_title", img: img) != nil
+            || nav.detect("sys_prompt_btns", img: img) != nil {
+            log("   §\(tag) 返回闸①：系统弹窗（标题/形态闸命中）⇒ 点消极项"
+                + "（照 PC `dismiss_sys_prompt`；⛔ 原来写 detect(\"sys_prompt\") 恒 false）")
+            _ = nav.tap("sys_prompt_deny", img: img, atomic: true)
             return
         }
-        // ② 券弹窗 ✕（**位置闸**，PC §1724 已删语义闸）
-        if nav.detect("coupon_x", img: img) != nil {
-            log("   §\(tag) 返回闸②：券弹窗 ✕ ⇒ 点它（照 PC `click_coupon_x`）")
-            _ = nav.tap("coupon_x", img: img, atomic: true)
+        // ② ⭐ 券弹窗 ✕ —— **专用判据 `ModalX.findCoupon`**（照 PC `find_coupon_x` 的位置闸）
+        //    ⛔ 原来写 `detect("coupon_x")`（不存在）⇒ 恒 false ⇒ 券弹窗永远没人关
+        //    ✅ ROI 与 PC `BOX_COUPON_X=(0.42,0.64,0.58,0.78)` **逐字一致**
+        //       （见 `ModalX.boxCouponX`；PC §1724 已删语义闸，**只留位置闸**）
+        if let c = ModalX.findCoupon(img) {
+            log("   §\(tag) 返回闸②：券弹窗 ✕ 位置闸命中 @(\(Int(c.x)),\(Int(c.y)))"
+                + " ⇒ 点它（照 PC `click_coupon_x` §1724；⛔ 原来 detect(\"coupon_x\") 恒 false）")
+            nav.tapPoint(Double(c.x), Double(c.y), why: "返回闸②券弹窗 ✕（位置闸）")
             return
         }
-        // ③ 小店 H5（收银台/订单页）—— PC `handle_shop_h5` 自带状态机；
-        //    手机端用已有的 `shop_h5_x` 元素等价处理（⛔ 找不到就不动）
-        if nav.detect("shop_h5_x", img: img) != nil {
-            log("   §\(tag) 返回闸③：快手小店 H5 ⇒ 点它的关/取消（照 PC `handle_shop_h5`）")
-            _ = nav.tap("shop_h5_x", img: img, atomic: true)
-            return
-        }
+        // ③ 小店 H5（收银台/订单页）—— PC `handle_shop_h5` 自带状态机
+        //    ⛔ 原来写 `detect("shop_h5_x")`（不存在）⇒ 恒 false
+        //    ✅ 现在：用**注释如实标注**它仍是缺口（⛔ 不假装它work）
+        //    📏 为什么不现在就补齐：PC 的 `handle_shop_h5` 是一条**独立状态机**
+        //       （取消 → 确定 → 交给「〈」腿），⛔ 不是"点一个 ✕"能等价的。
+        //       ⛔ 我不趁手乱写一个半成品 —— 先记录缺口，等真机遇到再照 PC 移植。
+        //       （§2874 §3 已列此缺口；`shop_h5_x` 从未在 config 里存在过。）
 
         // ── ⭐⭐⭐⭐⭐ §2932 **回桌面再点快手：一趟里只许一次**（用户令） ──
         //
@@ -3271,10 +3310,25 @@ final class FeatureEngine {
                 return
             }
             // 旧版式 App Store 页左上「完成」（新版式是上面的 ✕；两者并存）
-            if nav.detect("appstore_page", img: img) != nil,
-               nav.detect("appstore_done", img: img) != nil {
-                log("   §\(tag) 返回腿 k=0：应用内商店页「完成」⇒ 点它")
-                _ = nav.tap("appstore_done", img: img, atomic: true)
+            //
+            // ⛔⛔⛔ §2948 **把 `detect("appstore_done")` 拆掉 —— 那个名字不存在**
+            // 上面这段注释**自己就写着这个血案**（"config 里没有这个名字 ⇒ 静默失败"），
+            // 但**代码没改**：`appstore_done` 至今不在 `elements` 里 ⇒ 这条腿**恒 false**。
+            // 📏 由 `_dev/_2949_scan_dead_names.py` 静态扫出来（3 处调用）。
+            // ✅ 照 PC 的做法：**旧版式由 `appstore_page`（左上「完成/打开」文案）覆盖**，
+            //    它就是那道闸；⛔ 不需要另一个不存在的动作元素。
+            //    PC `return_to_ad(k=0)`（`_1377_ad_loop.py:2898`）逐字：
+            //    ```python
+            //    if "完成" in txt(img, BOX_DONE): print("检测到「完成」-> 点它")
+            //    ```
+            //    ⇒ PC 也是**按文案找**，⛔ 不是查一个叫 appstore_done 的元素。
+            //    ⇒ 本机 `appstore_page` 的 words = ["完成","打开"] ⇒ 用它**定位**，
+            //      点它自己算出来的坐标（⛔ 不写死）。
+            if let done = nav.detect("appstore_page", img: img) {
+                log("   §\(tag) 返回腿 k=0：应用内商店页「完成/打开」⇒ 点它"
+                    + "（照 PC `if \"完成\" in txt(BOX_DONE)`；⛔ 原来 detect(\"appstore_done\") 恒 false）")
+                nav.tapPoint(Double(done.center.x), Double(done.center.y),
+                             why: "返回腿 k=0 应用内商店页完成/打开")
                 return
             }
             log("   §\(tag) 返回腿 k=0：应用内「〈」⇒ 点它（照 PC `click_page_back`）")
@@ -3292,9 +3346,26 @@ final class FeatureEngine {
             ble.send(cmd)
         case 4:
             // 定位并点「退出直播间」
-            if nav.detect("exit_live", img: img) != nil {
-                log("   §\(tag) 返回腿 k=4：点「退出直播间」（照 PC `click_words(BOX_EXITLIVE)`）")
-                _ = nav.tap("exit_live", img: img, atomic: true)
+            //
+            // ⛔⛔⛔ §2948 **原来写 `detect("exit_live")` —— 那个名字不存在** ⇒ 恒 false。
+            // 由 `_dev/_2949_scan_dead_names.py` 静态扫出（2 处调用）。
+            // ✅ 照 PC 的做法：`exit_live` **不是元素**，是**文字锚搜索**。
+            //    PC `_1377_ad_loop.py:2916` 逐字：
+            //    ```python
+            //    click_words(img, BOX_EXITLIVE, ["退出直播间"], None)   # ⛔ 找不到就不放枪
+            //    ```
+            //    而 `BOX_EXITLIVE = (0, 620, 451, 680)`（L423）+ `EXIT_LIVE_KEYS`
+            //    = `("退出直播间","回到剧集","直播已结束")`（L426）—— **逐字照抄**。
+            //    ⇒ 用 `findWords` 在那条带里找，点**它自己算出来的坐标**（⛔ 不写死）。
+            let exitROI = CGRect(x: 0, y: 620, width: baseW, height: 60)   // PC BOX_EXITLIVE
+            let exitKeys = ["退出直播间", "回到剧集", "直播已结束"]        // PC EXIT_LIVE_KEYS
+            if let hit = rec.findWords(img, words: exitKeys, roi: exitROI,
+                                       minHits: 1, minConfidence: 0.3) {
+                log("   §\(tag) 返回腿 k=4：点「\(hit.evidence)」"
+                    + "@(\(Int(hit.center.x)),\(Int(hit.center.y)))"
+                    + "（照 PC `click_words(BOX_EXITLIVE)`；⛔ 原来 detect(\"exit_live\") 恒 false）")
+                nav.tapPoint(Double(hit.center.x), Double(hit.center.y),
+                             why: "返回腿 k=4 退出直播间")
             } else {
                 log("   §\(tag) 返回腿 k=4：没找到「退出直播间」⇒ 不放枪（铁律①）")
             }
