@@ -441,6 +441,24 @@ final class FeatureEngine {
                 //   ⛔ 不是"我以为已经回来了"。这正是我漏掉的那一步。
                 log("§adbox ↩ 转化完 ⇒ **回广告页**（照 PC `for k in range(9)` 返回腿，轮数可配）")
                 var backHome = false
+                // ⭐⭐⭐⭐⭐ §2933 **A4：腿无效判据 + 换腿上限**（治"同一条腿连发"）
+                //
+                // ## ⛔ 为什么补它（本项目已有的 GitHub 调研结论，我一开始没照做）
+                // `_docs/notes/_note_1473_直播间回中心腿序_GitHub调研与方案.md` §2.3 逐字：
+                // > Alas 把「**点了太多次还是没反应**」设成**独立的一等异常**
+                // > `GameTooManyClickError`；GKD 用 `actionMaximum`（限次）/`actionCd`（冷却）
+                // > ⇒ 成熟框架**不"继续点"**，而是把它当异常拦下。
+                // 📏 那次真机血案：**同一条腿连发 34 次**（`min(s,5)` 饱和 ⇒ 无限空转）。
+                //
+                // ## ✅ 抄 PC 的现成机制（`Navigator.markDead` / `screenChanged`，已在码里）
+                // 本项目**已经有**这两个函数（照 MaaFW `wait_freezes` 语义）：
+                // ```
+                //   点前抓一帧 → 发腿 → 点后再抓 → 比「判据区指纹」
+                //   没变 ⇒ 这条腿在**这一页上**无效 ⇒ 记死，换下一条
+                // ```
+                // ⇒ 我这次只是**把它接进返回循环**（⛔ 没有新造任何机制）。
+                var deadLegs = Set<Int>()
+                var lastSig: UIImage? = nil
                 for k in 0..<returnToAdRounds {
                     if isCancelled() { break }
                     guard let imr = grab() else { break }
@@ -461,16 +479,31 @@ final class FeatureEngine {
                     // ```
                     // ⇒ 若拿它当"到中心了吗"的判据：**人还在广告页**时它会返回 true
                     //   ⇒ 打印"已落回金币中心 ⇒ 本条算完成" ⇒ `n += 1` 切下一条
-                    //   ⇒ **不进 G3/G4、不点 ✕、不收奖励** = 用户令「**这个未点X就切下一个了**」。
-                    // ✅ 改用**纯元素判据**（config 的 `center_marker`）—— 与 PC `on_center` 同语义：
-                    //    它只看"中心页的特征词在不在"，⛔ 不会因为"是广告页"就放行。
+                    //   ⇒ **不进 G3/G4、不点 ✕、不收奖励** = 用户令「**这个未点X就切下来**」。
+                    // ✅ 改用**纯元素判据**（config 的 `center_marker`）—— 与 PC `on_center` 同语义。
                     if nav.detect("center_marker", img: imr) != nil {
                         log("   §adbox ✅ 已落回金币中心（第 \(k + 1) 次检查）")
                         backHome = true
                         break
                     }
+                    // ②b ⭐ A4：**上一轮那条腿有没有用**（画面变了吗）
+                    //    ⇒ 没变 ⇒ 它在**这一页上**无效 ⇒ 记死，本轮跳过它直接换下一条
+                    if let ref = lastSig {
+                        if !nav.screenChanged(ref, imr) {
+                            deadLegs.insert(k - 1)
+                            log("   §adbox ⏭ 返回腿 k=\(k - 1) **点了画面没变** ⇒ 记死换下一条"
+                                + "（A4／MaaFW `wait_freezes`；⛔ 不重复点）")
+                        }
+                    }
                     // ③ 还在落地页 ⇒ **主动返回**（照 PC `return_to_ad`）
+                    //    ⛔ 若这条腿已记死 ⇒ 直接跳到下一条（⛔ 不空转）
+                    if deadLegs.contains(k) {
+                        log("   §adbox ⏭ 返回腿 k=\(k)：已记死 ⇒ 跳过（⛔ 不重复点）")
+                        lastSig = nil
+                        continue
+                    }
                     log("   §adbox ↩ 还在落地页（第 \(k + 1)/\(returnToAdRounds) 次）⇒ 执行返回")
+                    lastSig = imr
                     returnToAd(imr, tag: "adbox_ret\(n + 1)_\(k)", k: k)
                     sleep(returnToAdWait)
                 }
