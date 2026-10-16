@@ -1765,8 +1765,9 @@ final class FeatureEngine {
         nav.resetDead()
         // ⭐ §2287 未知页补救计数（照 PC `UNK[0]`，最多 2 次）
         var unknownRetry = 0
-        // ⭐ §2930 逃生腿**每轮只走一次**（⛔ 免得反复退桌面 —— §2722 血案同族）
-        var didExtEscape = false
+        // ⭐ §2931 **回桌面重进**的次数（用户令：认不出就直接回桌面再点快手）
+        //   ⚠️ 有界 = 3（⛔ 免得"真进不去"时无限退桌面）
+        var escapes = 0
         for k in 0..<8 {
             if isCancelled() { return false }
             guard let img = grab() else { return false }
@@ -1853,55 +1854,33 @@ final class FeatureEngine {
             if here == "unknown" {
                 if unknownRetry < 2 {
                     unknownRetry += 1
-                    if unknownRetry >= 2 {
-                        // ⭐ 第 2 次补救才试返回腿（照 PC：第 1 次仍"只等"，页面可能没画完）
-                        if nav.detect("back_arrow", img: img) != nil {
-                            log("   §\(tag) 未知页补救第 2 次 ⇒ 试「〈」返回腿")
-                            _ = nav.tap("back_arrow", img: img, atomic: true)
-                        } else if nav.detect("white_chevron", img: img) != nil {
-                            log("   §\(tag) 未知页补救第 2 次 ⇒ 试「白色〈」返回腿")
-                            _ = nav.tap("white_chevron", img: img, atomic: true)
-                        } else {
-                            log("   §\(tag) 未知页补救第 2 次 ⇒ 既无〈也无白勾，**不点任何东西**（铁律①）")
-                        }
-                    } else {
-                        log("   §\(tag) 未知页补救第 \(unknownRetry)/2 次 ⇒ 只等 2.5s 重判（页面可能没画完）")
-                    }
-                    sleep(2.5)
+                    log("   §\(tag) 未知页第 \(unknownRetry)/2 次 ⇒ 等 1.5s 重判"
+                        + "（页面可能还没画完）")
+                    sleep(1.5)
                     continue
                 }
-                log("   §\(tag) ⛔ 未知页补救 \(unknownRetry) 次仍认不出"
-                    + " ⇒ **走第三方 App 逃生腿**（用户令：「然后走返回程序」）")
-                // ⭐⭐⭐⭐⭐ §2930 **不再直接停手** —— 用户令「然后走返回程序」
+                // ⭐⭐⭐⭐⭐ §2931 **认不出 ⇒ 直接回桌面再点快手**（用户令）
                 //
-                // ## ⛔ 血案（真机：只跑成 1 条）
-                // 安装腿点「打开」⇒ iOS 真启动第三方 App（元宝）⇒ 它的协议墙/登录页盖屏
-                // ⇒ 这里判 unknown ⇒ **旧代码直接 `return false` 停手**
-                // ⇒ `§adbox 跑完 1 条`。
+                // > 「**直接就命令回桌面 再点快手返回啊。为什么卡死在外部搞这么久
+                // >   一个广告 你转了一万圈了？**」
                 //
-                // ## ✅ 现在：先走「第三方 App 逃生腿」（照 PC §1699 第三级）
-                // PC 三级返回（`_1377_ad_loop.py:3302-3312`）：
-                // ```
-                //   ① 左上角返回键  ② 右缘侧滑 SWIPE_EDGE  ③ H:HOME + 重进
-                // ```
-                // ⇒ 手机端 ①② 已在返回腿 k=0..5 里试过（都找不到锚）
-                //   ⇒ 这里走 **③**：H:HOME → 启动链重进快手。
-                //   ⚠️ 闸：**只在"确实不在快手"时才退桌面**
-                //     （`pageHere == nil` 本来就是"认不出"，所以这里天然满足；
-                //      而 §2722 血案是"**认得出**快手页面却退桌面" ⇒ 判据不同，不会重演）
-                if !didExtEscape {
-                    didExtEscape = true
-                    log("   §\(tag) 走逃生腿：H:HOME → 启动链重进快手"
-                        + "（照 PC §1699 第三级；⛔ 只在认不出页面时才走）")
+                // ⛔ 我之前在这里写「未知页补救 2 次 ⇒ 停手」，用户骂的就是它：
+                //   停手 = 这条广告白丢；而"回桌面重进"**永远是对的**（快手是唯一目标）。
+                // ✅ 现在：认不出就回桌面重进（⛔ 不试那些"找不到锚"的返回腿，省掉几十秒）。
+                // ⚠️ 有界：`escapes` 计数（最多 3 次）⇒ ⛔ 真的进不去时如实停手，不无限退桌面。
+                if escapes < 3 {
+                    escapes += 1
+                    log("   §\(tag) ⭐ **直接回桌面再点快手**（第 \(escapes)/3 次）"
+                        + "（用户令；⛔ 不再一条条试返回腿）")
                     _ = Navigator.switchToApp(named: s?.apps?.first ?? "kslite",
                                               rec: rec, ble: ble, frame: grab,
                                               baseW: baseW, baseH: baseH, yFix: yFix,
                                               log: log)
-                    sleep(2.0)
-                    unknownRetry = 0        // ⭐ 换了一个 App ⇒ 重判预算归零
+                    sleep(1.5)
+                    unknownRetry = 0
                     continue
                 }
-                log("   §\(tag) ⛔ 逃生腿也走过了仍认不出 ⇒ **停手**（照 PC C0）")
+                log("   §\(tag) ⛔ 回桌面重进 \(escapes) 次仍认不出 ⇒ **停手**（如实说，不假报）")
                 return false
             }
             let r = nav.step(from: here, img: img) { [weak self] in self?.grab() }
@@ -3195,6 +3174,40 @@ final class FeatureEngine {
         if nav.detect("shop_h5_x", img: img) != nil {
             log("   §\(tag) 返回闸③：快手小店 H5 ⇒ 点它的关/取消（照 PC `handle_shop_h5`）")
             _ = nav.tap("shop_h5_x", img: img, atomic: true)
+            return
+        }
+
+        // ── ⭐⭐⭐⭐⭐ §2931 **用户令：不在快手 ⇒ 直接 H:HOME 再点快手** ──
+        //
+        // > 「**直接就命令回桌面 再点快手返回啊。为什么卡死在外部搞这么久
+        // >   一个广告 你转了一万圈了？**」
+        //
+        // ## ⛔ 我之前的错（用户在骂的就是这个）
+        // 我把"从外部 App 出来"做成了 **9 条返回腿 + 面包屑判据 + 逃生旗标 + 一轮只许一次**，
+        // ⇒ 每条腿各花 3 秒、还各自"找不到锚 ⇒ 不放枪" ⇒
+        //   **一条广告能在外部 App 里转几十圈**（用户看到的「转了一万圈」）。
+        //
+        // ## ✅ 用户口径：**第一步就是回桌面再点快手**
+        // 不需要任何判据 —— 只要"我们还在原地打转"，回桌面重进**永远是对的**
+        // （快手就是唯一目标 App，重进一次成本 = 2 条命令 + 1 次点击）。
+        //
+        // 📏 与 §2722 的关系（⛔ 不冲突）：
+        // §2722 删的是「**在快手自己的广告页/落地页上**也退桌面」——
+        // 那会毁掉正在看的广告（奖励没拿够）。
+        // ⇒ ✅ 本腿加两个**便宜**的前置条件，正好把 §2722 的场景排除掉：
+        //   ```
+        //   ① 这一帧**不是广告页**（顶栏没有「可领取/已成功领取」）
+        //   ② 而且**已经试过至少一轮返回腿**（k>=1，说明"页面自己的出路"不通）
+        //   ```
+        //   ⛔ 不用面包屑、⛔ 不用"有没有快手锚点"—— 那些是我自己加的复杂度。
+        if k >= 1, !Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH,
+                                         roi: s?.ad_top_roi) {
+            log("   §\(tag) 返回腿 k=\(k)：⭐⭐ **直接回桌面再点快手**"
+                + "（用户令；⛔ 不再一条条试返回腿）")
+            _ = Navigator.switchToApp(named: s?.apps?.first ?? "kslite", rec: rec, ble: ble,
+                                      frame: grab, baseW: baseW, baseH: baseH, yFix: yFix,
+                                      log: log)
+            sleep(1.5)
             return
         }
 
