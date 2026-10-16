@@ -2663,7 +2663,108 @@ final class FeatureEngine {
         "开通", "续费", "充值", "免密", "刷脸", "人脸", "花呗", "白条",
     ]
 
-    /// PC `REJECT_CLICK_KEYS`（`_1377_ad_loop.py:471`）—— 照抄雷神的"拒绝点击"词表
+    /// ⛔⛔⛔ §2921 **登录红线**（用户令，逐字）
+    ///
+    /// > 「**外部授权都可以统一 但是不点击登录**」
+    /// > 「**同意授权但是登录 不登陆**」
+    ///
+    /// ## 口径拆成两半（⛔ 别混）
+    /// ```
+    /// ✅ 外部**授权**弹窗（「想要打开 X」）  ⇒ 统一**同意**（点「打开/允许」）
+    /// ⛔ **登录**（任何形态）              ⇒ **绝不点**（本表 = 执行点）
+    /// ```
+    ///
+    /// ## 为什么要单列一张表（而不是混在 `forbidKeys` 里靠人记）
+    /// `forbidKeys` 的语义是「**别付钱**」；登录是**另一条独立红线**（别替你登录账号）。
+    /// ⇒ 两条红线各自可读、各自可配（`settings.login_keys`），⛔ 不互相污染。
+    ///
+    /// ## 📏 PC 里的证据
+    /// PC `_1377_ad_loop.py` **全篇没有「登录」二字**（grep 0 命中）——
+    /// 说明它没遇到过；而本机**真遇到了**（元宝的「欢迎使用 / 同意服务协议」）。
+    /// ⇒ 这是用户**新加的口径**，照抄 PC 抄不到，必须以用户令为准。
+    ///
+    /// ⚠️ **唯一读取点** = `FeatureEngine.loginKeysCfg`（配置优先）+ `Navigator.tap()` 的点击闸。
+    static let loginKeys: [String] = [
+        "登录", "登陆", "登入",
+        "立即登录", "一键登录", "手机号登录", "账号登录", "授权登录", "微信登录",
+        "QQ登录", "本机号码一键登录", "同意并登录", "登录/注册", "注册/登录",
+    ]
+
+    /// ⭐⭐⭐⭐⭐ §2921 **外部授权腿的肯定项词表**（用户令：「外部授权都可以统一**同意**」）
+    ///
+    /// ## 用户令（逐字）
+    /// > 「**外部授权都可以统一 但是不点击登录**」
+    /// > 「**同意授权但是登录 不登陆**」
+    ///
+    /// ## 与 PC 的关系（PC `_1377_ad_loop.py:3075` 逐字）
+    /// ```python
+    /// SYS_ALLOW = ("打开", "允许", "继续", "好")   # §1699；「打开」优先 —— 用户令「要打开」
+    /// ```
+    /// ⇒ 逐条照抄。⚠️ 但把 PC 的「继续」**去掉**了：PC 自己在别处写着
+    ///   「⛔ **绝不点「继续」**」（L6003，那是"继续支付"类风险的正按钮）
+    ///   ⇒ 用户令只授权"外部跳转"，⛔ 不给"继续"开口子。
+    static let sysAllowKeys: [String] = ["打开", "允许", "好"]
+
+    /// ⭐⭐⭐ §2921 **协议弹窗的肯定项「同意」**（⛔ 必须排除「不同意」）
+    ///
+    /// # ⛔⛔⛔ 为什么不能直接用 `elements.consent_allow`（真机验证逮到的 bug）
+    /// 真机帧 `_r4_now.jpg`（元宝「欢迎使用」）的 OCR 实测：
+    /// ```
+    ///   y=604 x=296..330  '同意'      ← ✅ 要点的
+    ///   y=604 x=110..165  '不同意'    ← ⛔ 绝不能点（= 拒绝服务条款）
+    /// ```
+    /// ⚠️ 而 `Recognizer.findWords` 的匹配是「**按词表顺序，命中第一个就 break**」：
+    /// ```swift
+    /// for w in words where Self.fuzzyContains(txt, w) { ...; break }
+    /// ```
+    /// ⇒ 词表若写 `["同意", …]`，那么 OCR 文本 **「不同意」也会命中「同意」**
+    ///   （`"不同意".contains("同意")` = true）⇒ **两个按钮分不开**：
+    ///   · `min_hits=2`（`consent_dialog` 那条）**永远不成立** ⇒ 腿根本不触发
+    ///   · 只写一个词时，还可能**点中「不同意」**（比不点更糟）
+    ///   📏 实测证据：`consent_dialog hit=False` 而 `consent_allow hit=True ev=不同意/同意`
+    ///      —— 两个按钮被并进同一个框，中心落在**两钮中间**。
+    ///
+    /// ## ✅ 因此本腿**不走元素表**，改用专用判据（照 `findBottomPopup` 的同一套做法）
+    /// ```
+    ///   ① 找按钮带里所有 OCR 块
+    ///   ② 「不同意」块 ⇒ 记为 deny（⛔ 绝不返回）
+    ///   ③ 去掉「不同意」后，**整体等于**「同意/我同意/接受」的块 ⇒ ✅ 返回它
+    /// ```
+    /// ⇒ 📏 用户令落地：「**同意授权，⛔ 不点登录**」——
+    ///   本函数只找"同意"这一枚，⛔ 不碰"不同意"，也⛔ 不碰任何含「登录」的按钮。
+    ///
+    /// - Returns: 肯定项「同意」的**基准像素**中心与文案；⛔ 找不到 ⇒ nil（不放枪）
+    static func findConsentAllow(_ img: UIImage, rec: Recognizer, bw: Double,
+                                 loginKeys: [String]?) -> (x: Double, y: Double, tag: String)? {
+        // 按钮带：真机实测 y=604（弹窗下半），ROI 取宽一点覆盖版式浮动
+        let band = CGRect(x: 0, y: 430, width: bw, height: 330)
+        let ws = rec.ocrRegion(img, rect: band, minConfidence: 0.3)
+        // ⛔ 先收集「不同意」的框（用于排除）
+        var denyRects: [CGRect] = []
+        for (t, r, _c) in ws where t.contains("不同意") { denyRects.append(r) }
+        for (t, r, _c) in ws {
+            let s = t.trimmingCharacters(in: .whitespacesAndNewlines)
+            // ① ⛔ 含「不同意」⇒ 跳过（拒绝项）
+            if s.contains("不同意") { continue }
+            // ② ⛔ §2921 登录红线：含「登录/登陆/登入」⇒ 跳过
+            //    这正是「同意并登录」/「本机号码一键登录」被拦住的地方
+            if let bad = forbidden(t, loginKeys: loginKeys) {
+                _ = bad
+                continue
+            }
+            // ③ ✅ 整体等于肯定项才算（照 PC 的整词等值纪律，⛔ 不用 contains）
+            guard consentAllowWords.contains(s) else { continue }
+            // ④ ⛔ 与「不同意」框重叠 ⇒ 是同一个块被切开 ⇒ 跳过（防误点）
+            if denyRects.contains(where: { $0.intersects(r) }) { continue }
+            return (Double(r.midX), Double(r.midY), t)
+        }
+        return nil
+    }
+
+    /// §2921 协议弹窗肯定项词表（⛔ 整词等值；「不同意」由调用方先排除）
+    static let consentAllowWords: [String] = ["同意", "我同意", "接受", "同意并继续"]
+
+    /// ⛔ PC `REJECT_CLICK_KEYS`（`_1377_ad_loop.py:471`）—— 照抄雷神的"拒绝点击"词表
     ///
     /// PC 原文：「雷神踩过的坑：**屏底那几条广告条/版本号**长得像按钮，点了会乱跑 ⇒ 一律拉黑。」
     /// ⛔ 唯一**故意没抄**的两条：裸 `功能` 与裸 `|`（会误伤正常文案）。
@@ -2684,13 +2785,34 @@ final class FeatureEngine {
     /// 放进文件后，一个手滑就能把「确认支付」删掉 ⇒ 真去帮用户买东西。
     /// ⇒ `ConfigStore.validate()` 做**加法校验**：只许加、⛔ 不许减；
     ///   删了任何一条基线 ⇒ `/reload` **拒绝加载**并把错误塞进 `configErrors`。
-    static func forbidden(_ text: String?, extraKeys: [String]? = nil) -> String? {
+    /// - Parameter loginKeys: ⛔ §2921 **登录红线词表**（配置优先）。
+    ///   ⚠️ 必须是**参数**而不是直接读实例属性：`forbidden` 是 `static`，
+    ///   ⛔ 访问不到实例属性 `loginKeysCfg`（那样根本编译不过）。
+    ///   默认 `nil` ⇒ 用静态基线 `Self.loginKeys`（⇒ 静态调用方**天然**也有保护）。
+    static func forbidden(_ text: String?, extraKeys: [String]? = nil,
+                          loginKeys: [String]? = nil) -> String? {
         let t = text ?? ""
         // ⭐ 读调用方传进来的**配置表**；⛔ 不传（nil）⇒ 逐字走原来的硬编码 25 条
         for k in (extraKeys ?? forbidKeys) where t.contains(k) { return k }
         for k in rejectClickKeys where t.contains(k) { return k }
+        // ⛔⛔⛔ §2921 **登录红线**（用户令：「同意授权但是登录 不登陆」）
+        //   放在最后但**一定要查**：⛔ 任何含「登录/登陆/登入」的文案都不许点。
+        for k in (loginKeys ?? Self.loginKeys) where t.contains(k) { return k }
         return nil
     }
+
+    /// ⛔ §2921 **登录红线的点击前闸**（实例版：自动带上配置）
+    ///
+    /// ⚠️ 与 `forbidden` 的区别：本方法**读实例配置**（`s?.login_keys`），
+    /// 所以每个实例调用点只需写 `self.loginBlocked(text)`，⛔ 不用手写两层表。
+    func loginBlocked(_ text: String?) -> String? {
+        Self.forbidden(text, loginKeys: loginKeysCfg)
+    }
+
+    /// ⛔ §2921 **登录红线**的词表 —— 配置优先（`settings.login_keys`），缺省 = `loginKeys`
+    ///
+    /// ⚠️ 唯一读取点（⛔ 不许各写一份）—— 照 `forbidKeysCfg` 的同一套纪律。
+    private var loginKeysCfg: [String] { s?.login_keys ?? Self.loginKeys }
 
     /// PC `BOX_SHOPBAR` / `SHOP_AD_KEYS`（`_1377_ad_loop.py:455`）—— 购物/电商型广告判据带
     ///
@@ -2840,7 +2962,7 @@ final class FeatureEngine {
                 let t = rec.ocrRegion(img, rect: CGRect(x: 0, y: max(0, cy - 26),
                                                         width: 442, height: 52),
                                       minConfidence: 0.3).map(\.0).joined()
-                if let bad = Self.forbidden(t, extraKeys: forbidKeysCfg) {
+                if let bad = Self.forbidden(t, extraKeys: forbidKeysCfg, loginKeys: loginKeysCfg) {
                     log("   §\(tag) ⛔ 形状命中的药丸文案含违规词「\(bad)」⇒ **拒绝点击**")
                     return nil
                 }
@@ -2854,7 +2976,7 @@ final class FeatureEngine {
         let ws = rec.ocrRegion(img, rect: Self.boxCta, minConfidence: 0.3)
         for (t, r, _c) in ws {
             guard ctaKeysCfg.contains(where: { t.contains($0) }) else { continue }
-            if let bad = Self.forbidden(t, extraKeys: forbidKeysCfg) {
+            if let bad = Self.forbidden(t, extraKeys: forbidKeysCfg, loginKeys: loginKeysCfg) {
                 log("   §\(tag) ⛔ CTA 文案「\(t)」含违规词「\(bad)」⇒ 跳过")
                 continue
             }
@@ -2887,7 +3009,7 @@ final class FeatureEngine {
             let t = rec.ocrRegion(img, rect: CGRect(x: 0, y: max(0, cy - 26),
                                                     width: 442, height: 52),
                                   minConfidence: 0.3).map(\.0).joined()
-            if let bad = Self.forbidden(t, extraKeys: forbidKeysCfg) {
+            if let bad = Self.forbidden(t, extraKeys: forbidKeysCfg, loginKeys: loginKeysCfg) {
                 log("   §\(tag) ⛔ 偏心粉带文案含违规词「\(bad)」⇒ **拒绝点击**（支付红线）")
                 return nil
             }
@@ -3116,6 +3238,39 @@ final class FeatureEngine {
                 _ = nav.backEdge()
                 sleep(1.2)
             }
+        case 6:
+            // ⭐⭐⭐⭐⭐ §2921 **第三方 App 逃生腿** —— 用户令 / PC §1699 第三级返回
+            //
+            // ## 为什么必须补它（真机血案：只跑成 1 条）
+            // 安装腿点「打开」⇒ iOS **真的启动了第三方 App**（元宝）⇒ 它弹「欢迎使用/同意协议」
+            // ⇒ 盖住整屏，而**所有返回锚都在快手里** ⇒ 每一条腿都找不到
+            // ⇒ `§adbox_after ⛔ 未知页补救 2 次仍认不出 ⇒ 停手` ⇒ `§adbox 跑完 1 条`。
+            //
+            // ## PC 的同级做法（`_1377_ad_loop.py:3302-3312` 逐字）
+            // ```python
+            // for _i, _name in enumerate(("①左上角返回键", "②右缘侧滑 SWIPE_EDGE",
+            //                              "③H:HOME+ensure_app 重进")):
+            //     ...
+            //     go_home("%s_ext" % tag); ensure_app("%s_exth" % tag)
+            // ```
+            // ⇒ **第三级 = 回桌面 + 重新启动快手**。手机端 k≥6 曾被整段删掉（§2722），
+            //   而 §2722 删的是「**在快手自己的页面上**也退桌面」——**判据不同**：
+            //   ✅ 本腿**只在确认"当前不在快手"时才允许**（`ext_breadcrumb` 命中），
+            //      ⇒ ⛔ 不会重演 §2722 那个「每条广告都退桌面 3 次」的血案。
+            //
+            // ## ⛔ 闸 = `ext_breadcrumb`（状态栏面包屑「‹ 上一个App」）
+            // 照 PC §1699d 的结构判据（⛔ 不认 App 名）；找不到 ⇒ **不放枪**，如实停手。
+            if nav.detect("ext_breadcrumb", img: img) != nil {
+                log("   §\(tag) 返回腿 k=6：★**第三方 App 逃生腿**（面包屑命中 ⇒ 不在快手）"
+                    + " ⇒ H:HOME → 启动链重进快手（照 PC §1699 第三级）")
+                _ = Self.switchToApp(named: s?.apps?.first ?? "kslite", rec: rec, ble: ble,
+                                     frame: grab, baseW: baseW, baseH: baseH, yFix: yFix,
+                                     log: log)
+                sleep(2.0)
+            } else {
+                log("   §\(tag) 返回腿 k=6：没看到「跨 App 面包屑」⇒ **不放枪**"
+                    + "（⛔ 不盲目退桌面 —— §2722 血案就是「在快手页面上也退桌面」）")
+            }
         default:
             // ⛔⛔⛔ §2722 **删掉「终端腿 = 回主屏」** —— 用户令：「他会返回是因为他认为是外部页面」
             //
@@ -3267,7 +3422,8 @@ final class FeatureEngine {
                 + "（⛔ 不扫宽 ROI：那 5 个「获取」是推荐列表里**别的 App**，点了会下错 App）")
         }
         if let hit = Self.findInstallWord(img, rec: rec, roi: textROI,
-                                         words: installWordsCfg, extraKeys: forbidKeysCfg) {
+                                         words: installWordsCfg, extraKeys: forbidKeysCfg,
+                                         loginKeys: loginKeysCfg) {
             log("   §\(tag) 安装文字腿[\(where_)]：「\(hit.0)」"
                 + "@(\(Int(hit.1.midX)),\(Int(hit.1.midY)))⇒ 点它")
             nav.tapPoint(Double(hit.1.midX), Double(hit.1.midY), why: "安装文字腿（\(where_)）")
@@ -3397,7 +3553,8 @@ final class FeatureEngine {
     ///
     /// - Returns: (命中的文字, 它的框)；⛔ 没有 ⇒ nil（调用方**不放枪**）
     static func findInstallWord(_ img: UIImage, rec: Recognizer, roi: CGRect,
-                                words: [String], extraKeys: [String]?)
+                                words: [String], extraKeys: [String]?,
+                                loginKeys: [String]? = nil)
         -> (String, CGRect)? {
         let items = rec.ocrRegion(img, rect: roi, minConfidence: 0.3)
         for (t, r, _c) in items {
@@ -3405,7 +3562,8 @@ final class FeatureEngine {
             //   （白名单已含「获取APP/获取App/下载应用/立即下载」等各种按钮全称）
             let s = t.trimmingCharacters(in: .whitespacesAndNewlines)
             guard words.contains(s) else { continue }
-            if forbidden(t, extraKeys: extraKeys) != nil { continue }
+            // ⛔ §2921 登录红线：⛔ 不点「登录」类（登录词表由调用方传，缺省走静态基线）
+            if forbidden(t, extraKeys: extraKeys, loginKeys: loginKeys) != nil { continue }
             return (t, r)
         }
         return nil

@@ -99,6 +99,9 @@ final class ConfigStore: ObservableObject {
     ///   来源：PC `FORBID_KEYS`（`_1377_ad_loop.py:448`）逐字移植 + §1449 血案。
     static let forbidKeysBaseline: [String] = FeatureEngine.forbidKeys
 
+    /// ⛔ §2921 **登录红线的自检基线** —— 与 `forbidKeysBaseline` 同一套纪律
+    static let loginKeysBaseline: [String] = FeatureEngine.loginKeys
+
     /// ⭐⭐⭐⭐⭐ §2645 **配置自检** —— 返回错误清单（空 = 通过）。
     ///
     /// ## 只查"配错会出人命"的那一项（⛔ 不扩大成通用 schema 校验）
@@ -137,6 +140,28 @@ final class ConfigStore: ObservableObject {
             // ④ 空串会 `t.contains("")` **恒真** ⇒ 所有点击全被拒 ⇒ App 一步都走不动（也是配错）
             if configured.contains(where: { $0.isEmpty }) {
                 errs.append("`forbid_keys` 里有空串 ⇒ `contains(\"\")` 恒真 ⇒ "
+                    + "**任何点击都会被拒** ⇒ ⛔ 拒绝加载")
+            }
+        }
+        // ⛔⛔⛔ §2921 **登录红线**（用户令：「同意授权但是登录 不登陆」）
+        //
+        // 与 `forbid_keys` **同一套加法校验**（⛔ 只加不减）：
+        //   登录是红线，手滑删掉一条就等于"可能替用户登录账号"。
+        if let configured = c.settings?.login_keys {
+            let base = loginKeysBaseline
+            let missing = base.filter { !configured.contains($0) }
+            if !missing.isEmpty {
+                errs.append("`login_keys` **删掉了登录红线里的词** "
+                    + missing.map { "「\($0)」" }.joined()
+                    + " ⇒ ⛔ 拒绝加载（登录词只许加、⛔ 不许减）")
+            }
+            if configured.count < base.count {
+                errs.append("`login_keys` 只有 \(configured.count) 条，"
+                    + "少于硬编码基线 \(base.count) 条 ⇒ ⛔ 拒绝加载"
+                    + "（只允许在基线之上**追加**，⛔ 不允许缩减）")
+            }
+            if configured.contains(where: { $0.isEmpty }) {
+                errs.append("`login_keys` 里有空串 ⇒ `contains(\"\")` 恒真 ⇒ "
                     + "**任何点击都会被拒** ⇒ ⛔ 拒绝加载")
             }
         }
@@ -406,6 +431,25 @@ struct PGConfig: Codable {
         ///    （见 `ConfigStore.validate()`；配错 ⇒ `/reload` **拒绝加载**并报 `configErrors`）。
         /// ⚠️ 唯一读取点 = `FeatureEngine.forbidKeysCfg`（⛔ 不许各写一份）。
         var forbid_keys: [String]?
+
+        /// ⛔⛔⛔ §2921 **登录红线词表** —— 默认 = `FeatureEngine.loginKeys` 那 14 条。
+        ///
+        /// ## 用户令（逐字）
+        /// > 「**外部授权都可以统一 但是不点击登录**」
+        /// > 「**同意授权但是登录 不登陆**」
+        ///
+        /// ## 与 `forbid_keys` 的关系（⛔ 两条独立红线，别混）
+        /// ```
+        /// ✅ 外部**授权**弹窗（「想要打开 X」）  ⇒ 统一**同意**（点「打开/允许」）
+        /// ⛔ **登录**（任何形态）              ⇒ **绝不点**（本字段 = 执行点）
+        /// ```
+        /// 📏 PC `_1377_ad_loop.py` **全篇没有「登录」二字**（grep 0 命中）⇒
+        ///   这是用户**新加**的口径，⛔ 照抄 PC 抄不到，必须以用户令为准。
+        ///
+        /// ⚠️ 本字段**同样受自检保护**（只许加、⛔ 不许减）——
+        ///   登录是红线，配错就等于"替用户登录账号"。
+        /// ⚠️ 唯一读取点 = `FeatureEngine.loginKeysCfg`（⛔ 不许各写一份）。
+        var login_keys: [String]?
 
         /// ⭐⭐ **CTA 药丸的颜色判据**（默认 `r_min=200, g_max=120, b_max=150` = 粉色）。
         ///

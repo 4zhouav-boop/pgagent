@@ -464,6 +464,32 @@ final class Navigator {
     /// ⭐ 参数 `atomic`：`true` ⇒ 走固件**原子通道** `Q:x,y`（移+按+放一条 HID 序列）。
     ///    给**时序敏感**的场景用（系统弹窗）—— 照电脑端 `_ext_q`。
     @discardableResult
+    /// ⛔ §2921 **需要过「登录红线闸」的元素** —— 只列**肯定项/动作按钮**。
+    ///
+    /// ## ⛔ 为什么必须是"白名单"而不是"所有元素"
+    /// `tap()` 也用于**页面锚点**，而锚点的 `evidence` 是**整个 ROI 的 OCR 拼接**，例如：
+    /// ```
+    ///   center_marker ev = "＜任务中心/瓜分百亿/话费充值/金币商城 规则"
+    /// ```
+    /// ⇒ 若对所有元素无条件查「登录」，那么**未登录态**下快手顶栏出现「登录」时，
+    ///   所有锚点点击会被一起拒掉 ⇒ **App 一步都走不动**。
+    /// ⇒ ✅ 只对"这些元素本来就是**去点一个按钮**"的收口查登录。
+    ///
+    /// ## 📏 其它动作路径**已经**被覆盖（⛔ 别以为只有这里在管）
+    /// ```
+    ///   CTA        clickCTA  → forbidden(t, extraKeys:)   ← 内已含 login_keys ✅
+    ///   安装/打开   findInstallWord → forbidden(...)       ← 内已含 login_keys ✅
+    ///   坐标点击    tapPoint 只有坐标、没有文案 ⇒ 由上面两条腿在**选点前**就拦住
+    /// ```
+    static let loginGuardedElements: Set<String> = [
+        "sys_prompt_allow",   // 外部授权「打开/允许」
+        "consent_allow",      // 协议弹窗「同意」（⛔ 可能是「同意并登录」）
+        "stay_panel_btn",     // 挽留面板「继续观看/领取奖励」
+        "chest_cta",          // 宝箱面板 CTA
+        "ad_task_btn",        // 任务行按钮
+        "rec_stopped_ok",     // 录屏弹窗「好」
+    ]
+
     func tap(_ name: String, img: UIImage, atomic: Bool = false) -> Bool {
         // ⭐⭐⭐⭐⭐ §2841 **每次点击尝试都必须有日志**（用户令：逐字）
         //
@@ -494,6 +520,38 @@ final class Navigator {
             return false
         }
         let c = h.center
+        // ⛔⛔⛔ §2921 **登录红线闸** —— 用户令，逐字：
+        //
+        // > 「**外部授权都可以统一 但是不点击登录**」
+        // > 「**同意授权但是登录 不登陆**」
+        //
+        // ## 为什么装在这里（`tap()` 是所有"按元素名点击"的收口）
+        // 漏斗/导航/页面图**全走 `tap()`** ⇒ 装在这里，新加的腿**自动**受保护
+        // （⛔ 不靠"记得在每个新腿里加一遍"）。
+        //
+        // ## ⛔⛔ 但**只对"动作按钮"生效** —— 为什么必须限定范围（血案预防）
+        // `tap()` 也用于**页面锚点**（`center_marker`/`ad_task_btn`/`pill_x`…），
+        // 而锚点的 `evidence` 是**整个 ROI 的 OCR 拼接**，例如实测：
+        // ```
+        //   center_marker ev = "＜任务中心/瓜分百亿/话费充值/金币商城 规则"
+        // ```
+        // ⇒ 若对该字符串**无条件**查「登录」，那么当快手顶栏恰好出现「登录」
+        //   （**未登录态就是这么显示**）⇒ **所有锚点点击全被拒** ⇒ App 一步都走不动。
+        // ⇒ ✅ 正解：**登录闸只作用于"肯定项/动作按钮"**（登录按钮只可能出现在这里）。
+        //   页面锚点走别的防线（页面识别本身就不会把「登录」当锚点）。
+        //
+        // ## 📏 与授权腿**不冲突**（这正是用户口径的落地）
+        // ```
+        //   「想要打开 X」 / 「同意」/「打开」/「允许」 ⇒ 不含「登录」 ⇒ 照点 ✅
+        //   「同意并登录」/「一键登录」/「本机号码一键登录」 ⇒ 含「登录」 ⇒ 拦 ⛔
+        // ```
+        if Self.loginGuardedElements.contains(name),
+           let bad = FeatureEngine.forbidden(h.evidence,
+                                             loginKeys: cfg.settings?.login_keys) {
+            log("   §tap ⛔ **拒绝点击「\(name)」**：文案「\(h.evidence.prefix(24))」"
+                + "命中红线词「\(bad)」（§2921 用户令：同意授权，⛔ 不点登录）")
+            return false
+        }
         if atomic {
             let cmd = BLEController.atomicClickCmd(x: Double(c.x), y: Double(c.y),
                                                    baseW: baseW, baseH: baseH, yFix: yFix)
@@ -755,6 +813,32 @@ final class Navigator {
                     funnelLast[it.element] = now
                     log("   §funnel coupon_x（券弹窗 ✕）@(\(Int(c.x)),\(Int(c.y)))")
                     tapPoint(Double(c.x), Double(c.y), why: "漏斗 coupon_x 券弹窗 ✕")
+                    return true
+                }
+                continue
+            }
+
+            // ⭐⭐⭐⭐⭐ §2921 **协议同意腿**（用户令：「同意授权但是登录 不登陆」）
+            //
+            // ## ⛔ 为什么不能走元素表（真机验证逮到的 bug）
+            // 元宝那帧的 OCR 是两个块：`'同意'@(296..330)` 与 `'不同意'@(110..165)`。
+            // 而 `findWords` 的匹配是「按词表顺序，命中第一个就 break」⇒
+            //   `"不同意".contains("同意")` = **true** ⇒ 两块被**并成一个框**，
+            //   中心落在**两钮中间**；且 `min_hits=2` 永远不成立 ⇒ 腿不触发。
+            // 📏 实测：`consent_dialog hit=False` 而 `consent_allow hit=True ev=不同意/同意`。
+            // ⇒ ✅ 改用专用判据 `findConsentAllow`（照 `findBottomPopup` 的同一套做法）：
+            //    先排除「不同意」，再找**整词等于**「同意/我同意/接受」的那一枚。
+            //
+            // ## ⛔ 闸 = `consent_dialog`（「同意」+「不同意」同现）
+            // ⇒ 只在**协议弹窗**上出手；⛔ 不碰权限弹窗（那走 `sys_prompt_deny` 点消极项）。
+            if it.element == "consent_allow" {
+                if detect("consent_dialog", img: img) != nil,
+                   let hit = FeatureEngine.findConsentAllow(img, rec: rec, bw: baseW,
+                                                            loginKeys: cfg.settings?.login_keys) {
+                    funnelLast[it.element] = now
+                    log("   §funnel consent_allow（协议弹窗 ⇒ **同意**）「\(hit.tag)」"
+                        + "@(\(Int(hit.x)),\(Int(hit.y)))（用户令：同意授权，⛔ 登录不点）")
+                    tapPoint(hit.x, hit.y, why: "协议弹窗肯定项「\(hit.tag)」")
                     return true
                 }
                 continue
