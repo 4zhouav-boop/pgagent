@@ -716,28 +716,64 @@ final class FeatureEngine {
                 // 旧版这里的 `n += 1` 是**无条件**的 ⇒ 「点不掉 ✕ ⇒ 还在广告页」也被算成
                 // 收了一条奖励 ⇒ 计数虚高、任务假成功、且主循环立刻又回同一分支。
                 //
-                // ✅ 判据（两条任一成立才算真收完）：
-                //   ① 顶栏已经「**已成功领取**」（奖励到账）—— 用 `adRewardClaimed`
+                // ✅ 判据（**必须建立 PC 的"两个归宿"语义**）：
+                //   ① **弹出了奖励面板**（「再看一个/领取奖励」）⇒ 奖励被领走
                 //   ② 已经**不在广告页**了（✕ 生效 / 自己跳回中心）
-                // ⛔ 若不成立 ⇒ **不 +1**，清掉"每条一次"标志让它下一轮再试，
-                //    并由循环头的**无进展闸**兜底（连续空转 ⇒ 停手并说清原因）。
+                //
+                // ⛔⛔⛔ §2974 **删掉原来的判据①「顶栏『已成功领取』就算完成」—— 那是无限转化的根因**
+                //
+                // ## 真机血案（`run_after_fix.log` 逐字，用户：「**无限转化你看不到？**」）
+                // ```
+                // 20:04:15.988  §adbox G3 胶囊倒计时 N ⇒ 最多等 45s
+                // 20:04:16.082  §adbox ✅ G3 正面看到「已成功领取」（等了 0s）⇒ 倒计时确实走完
+                // 20:04:16.125  §adbox G3 倒计时已结束 ⇒ **现在才点 ✕ 收奖励**
+                // 20:04:16.281  §adbox ✅ 顶栏「已成功领取」⇒ **奖励已到账**，本条完成   ← 🔴 误判
+                // 20:04:17.031  §adbox_back3 ⛔ 这是视频广告页 ⇒ 放行                   ← 人还在广告页
+                // 20:04:17.083  §adbox 本条广告停留目标=40s（**重新计时**）
+                // 20:04:17.184  §adbox_cta4 文案兜底：CTA「牙齿问题…」                    ← 又转一次
+                // ```
+                // ⇒ **cta3 → cta10 连续 8 次转同一条广告**（`牙齿问题不要置之不理 @(222,774)` 一字不差）。
+                //
+                // ## 根因：判据①与 G3 的等待条件**是同一个条件**（自证循环）
+                // ```
+                // G3（L659）: while !adRewardClaimed(cur), waited < needS { … }   ← 就在等"已成功领取"
+                // G4（L728）: if adRewardClaimed(im5) { 「奖励已到账」}             ← 拿同一条件当"收完了"
+                // ```
+                // ⇒ G3 一旦等到「已成功领取」就退出循环 ⇒ G4 的**第一帧必然满足判据①** ⇒
+                //   **✕ 一次都没点**（L701-706 的 `finishAdPanel` 被这个 break 跳过）⇒
+                //   既没点 ✕ 、也没出面板，却 `leftAd = true` ⇒ `n += 1`，
+                //   而人**还在同一条广告上** ⇒ `ensureInCenter` 撞"广告页放行短路"直接返回
+                //   ⇒ 主循环重进同一条 ⇒ 计时重开（L754）、转化闸清掉（L753）⇒ **再转一次**。
+                //
+                // ## 📏 PC 控制器怎么判（`_1377_ad_loop.py:9863-9979` 逐字）
+                // ```
+                // # ★★ 但胶囊 ✕ 有**两种归宿**（§1377 r4J 实测，必须都认）：
+                // #    ① 弹出「再看一个视频+3000 / 领取奖励」面板 ⇒ 点主按钮进下一条；
+                // #    ② **不弹面板，直接把整条广告链关掉、落回金币中心** ⇒ 本条同样**已经成功**
+                // for k in range(16):
+                //     ...
+                //     if at_center: done_ads += 1; click_reenter(imgp); continue     # 归宿②
+                //     if not any(kk in mid for kk in PANEL_KEYS):
+                //         reason = "奖励面板没出现 ⇒ 已停手"                          # ⛔ 两条都不成立 ⇒ 不算完成
+                // ```
+                // ⇒ ⭐ **"已成功领取"从来不是完成判据** —— PC 认的是「**面板**」或「**回中心**」。
                 var leftAd = false
                 for _ in 0..<6 {
                     if isCancelled() { break }
                     guard let im5 = grab() else { break }
-                    if adRewardClaimed(im5) {
-                        log("   §adbox ✅ 顶栏「已成功领取」⇒ **奖励已到账**，本条完成")
+                    // ① PC 归宿①：奖励面板出现 ⇒ 点它的主按钮（进下一条）
+                    if finishAdPanel(im5, tag: "adbox_claim\(n + 1)") {
+                        log("   §adbox ✅ 奖励面板已出现并点了主按钮 ⇒ 本条完成")
                         leftAd = true
                         break
                     }
+                    // ② PC 归宿②：已经不在广告页 ⇒ 本条完成
                     if !Self.looksLikeAdPage(im5, rec: rec, nav: nav, bw: baseW, bh: baseH,
                                              roi: s?.ad_top_roi) {
                         log("   §adbox ✅ 已离开广告页 ⇒ 本条完成")
                         leftAd = true
                         break
                     }
-                    // 还赖在广告页 ⇒ 再点一次 ✕（面板优先）
-                    _ = finishAdPanel(im5, tag: "adbox_claim\(n + 1)")
                     sleep(1.5)
                 }
                 if !leftAd {
@@ -937,14 +973,18 @@ final class FeatureEngine {
                         log("   §adbox 等待中面板需要补全 ⇒ 已点「继续观看」（⛔ 未关广告）")
                     }
                 }
-                // ⭐⭐⭐⭐⭐ §2824 **确认到账才计数**（⛔ 不再无条件 `n += 1`）
-                // 判据与另一条分支一致：顶栏「已成功领取」或**已经不在广告页**。
+                // ⭐⭐⭐⭐⭐ §2824/§2974 **确认到账才计数**（⛔ 不再无条件 `n += 1`）
+                // 判据与「广告页」分支**同一套**（照 PC 的两个归宿）：
+                //   ① 奖励面板出现并点了主按钮  ② 已经不在广告页
+                // ⛔⛔ §2974：**删掉原来的「顶栏『已成功领取』就算完成」** —— 那是无限转化的根因
+                //   （与 G3 的等待条件自证循环 ⇒ ✕ 一次没点就宣布完成 ⇒ 卡在同一条反复转化）。
+                //   完整血案与 PC 对照见「广告页」分支里的 §2974 注释块。
                 var leftAd2 = false
                 for _ in 0..<6 {
                     if isCancelled() { break }
                     guard let im6 = grab() else { break }
-                    if adRewardClaimed(im6) {
-                        log("   §adbox ✅ 顶栏「已成功领取」⇒ 奖励已到账，本条完成")
+                    if finishAdPanel(im6, tag: "adbox_claimw\(n + 1)") {
+                        log("   §adbox ✅ 奖励面板已出现并点了主按钮 ⇒ 本条完成")
                         leftAd2 = true
                         break
                     }
@@ -954,7 +994,6 @@ final class FeatureEngine {
                         leftAd2 = true
                         break
                     }
-                    _ = finishAdPanel(im6, tag: "adbox_claimw\(n + 1)")
                     sleep(1.5)
                 }
                 if !leftAd2 {
