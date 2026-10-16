@@ -1765,6 +1765,8 @@ final class FeatureEngine {
         nav.resetDead()
         // ⭐ §2287 未知页补救计数（照 PC `UNK[0]`，最多 2 次）
         var unknownRetry = 0
+        // ⭐ §2930 逃生腿**每轮只走一次**（⛔ 免得反复退桌面 —— §2722 血案同族）
+        var didExtEscape = false
         for k in 0..<8 {
             if isCancelled() { return false }
             guard let img = grab() else { return false }
@@ -1868,7 +1870,38 @@ final class FeatureEngine {
                     sleep(2.5)
                     continue
                 }
-                log("   §\(tag) ⛔ 未知页补救 \(unknownRetry) 次仍认不出 ⇒ **停手**（照 PC C0）")
+                log("   §\(tag) ⛔ 未知页补救 \(unknownRetry) 次仍认不出"
+                    + " ⇒ **走第三方 App 逃生腿**（用户令：「然后走返回程序」）")
+                // ⭐⭐⭐⭐⭐ §2930 **不再直接停手** —— 用户令「然后走返回程序」
+                //
+                // ## ⛔ 血案（真机：只跑成 1 条）
+                // 安装腿点「打开」⇒ iOS 真启动第三方 App（元宝）⇒ 它的协议墙/登录页盖屏
+                // ⇒ 这里判 unknown ⇒ **旧代码直接 `return false` 停手**
+                // ⇒ `§adbox 跑完 1 条`。
+                //
+                // ## ✅ 现在：先走「第三方 App 逃生腿」（照 PC §1699 第三级）
+                // PC 三级返回（`_1377_ad_loop.py:3302-3312`）：
+                // ```
+                //   ① 左上角返回键  ② 右缘侧滑 SWIPE_EDGE  ③ H:HOME + 重进
+                // ```
+                // ⇒ 手机端 ①② 已在返回腿 k=0..5 里试过（都找不到锚）
+                //   ⇒ 这里走 **③**：H:HOME → 启动链重进快手。
+                //   ⚠️ 闸：**只在"确实不在快手"时才退桌面**
+                //     （`pageHere == nil` 本来就是"认不出"，所以这里天然满足；
+                //      而 §2722 血案是"**认得出**快手页面却退桌面" ⇒ 判据不同，不会重演）
+                if !didExtEscape {
+                    didExtEscape = true
+                    log("   §\(tag) 走逃生腿：H:HOME → 启动链重进快手"
+                        + "（照 PC §1699 第三级；⛔ 只在认不出页面时才走）")
+                    _ = Navigator.switchToApp(named: s?.apps?.first ?? "kslite",
+                                              rec: rec, ble: ble, frame: grab,
+                                              baseW: baseW, baseH: baseH, yFix: yFix,
+                                              log: log)
+                    sleep(2.0)
+                    unknownRetry = 0        // ⭐ 换了一个 App ⇒ 重判预算归零
+                    continue
+                }
+                log("   §\(tag) ⛔ 逃生腿也走过了仍认不出 ⇒ **停手**（照 PC C0）")
                 return false
             }
             let r = nav.step(from: here, img: img) { [weak self] in self?.grab() }
@@ -3239,38 +3272,43 @@ final class FeatureEngine {
                 sleep(1.2)
             }
         case 6:
-            // ⭐⭐⭐⭐⭐ §2921 **第三方 App 逃生腿** —— 用户令 / PC §1699 第三级返回
+            // ⭐⭐⭐⭐⭐ §2921/§2930 **第三方 App 逃生腿**（用户令：「然后走返回程序」）
             //
             // ## 为什么必须补它（真机血案：只跑成 1 条）
-            // 安装腿点「打开」⇒ iOS **真的启动了第三方 App**（元宝）⇒ 它弹「欢迎使用/同意协议」
+            // 安装腿点「打开」⇒ iOS **真的启动了第三方 App**（元宝）⇒ 它弹协议墙/登录页
             // ⇒ 盖住整屏，而**所有返回锚都在快手里** ⇒ 每一条腿都找不到
             // ⇒ `§adbox_after ⛔ 未知页补救 2 次仍认不出 ⇒ 停手` ⇒ `§adbox 跑完 1 条`。
             //
-            // ## PC 的同级做法（`_1377_ad_loop.py:3302-3312` 逐字）
+            // ## PC 的同级做法（`_1377_ad_loop.py:3302-3312` 逐字）—— **三级返回**
             // ```python
             // for _i, _name in enumerate(("①左上角返回键", "②右缘侧滑 SWIPE_EDGE",
             //                              "③H:HOME+ensure_app 重进")):
             //     ...
             //     go_home("%s_ext" % tag); ensure_app("%s_exth" % tag)
             // ```
-            // ⇒ **第三级 = 回桌面 + 重新启动快手**。手机端 k≥6 曾被整段删掉（§2722），
-            //   而 §2722 删的是「**在快手自己的页面上**也退桌面」——**判据不同**：
-            //   ✅ 本腿**只在确认"当前不在快手"时才允许**（`ext_breadcrumb` 命中），
-            //      ⇒ ⛔ 不会重演 §2722 那个「每条广告都退桌面 3 次」的血案。
+            // ⇒ 手机端 k≥6 曾被整段删掉（§2722），而 §2722 删的是
+            //   「**在快手自己的页面上**也退桌面」——**判据不同**：
+            //   ✅ 本腿**只在"确认不在快手"时才允许**（`ext_breadcrumb` 或"没有快手锚点"）。
             //
-            // ## ⛔ 闸 = `ext_breadcrumb`（状态栏面包屑「‹ 上一个App」）
-            // 照 PC §1699d 的结构判据（⛔ 不认 App 名）；找不到 ⇒ **不放枪**，如实停手。
-            if nav.detect("ext_breadcrumb", img: img) != nil {
-                log("   §\(tag) 返回腿 k=6：★**第三方 App 逃生腿**（面包屑命中 ⇒ 不在快手）"
+            // ## ⛔ 闸：两种"不在快手"的信号（⛔ 满足一个就够，但不能凭空退桌面）
+            // ```
+            //   ① ext_breadcrumb 命中（状态栏面包屑「‹ 上一个App」，照 PC §1699d 的结构判据）
+            //   ② 页面**没有任何快手锚点**（pageHere == nil）且**有第三方特征**
+            // ```
+            // ⚠️ 元宝那种**原生 App** 没有面包屑（实测 ext_breadcrumb=False）
+            //   ⇒ 必须靠 ② 兜住，否则本腿对它永不生效（那正是本轮"手动返回"的原因）。
+            let noKuaishouAnchor = (nav.pageHere(img) == nil)
+            let breadcrumb = nav.detect("ext_breadcrumb", img: img) != nil
+            if breadcrumb || noKuaishouAnchor {
+                log("   §\(tag) 返回腿 k=6：★**第三方 App 逃生腿**"
+                    + "（面包屑=\(breadcrumb) ／ 无快手锚点=\(noKuaishouAnchor)）"
                     + " ⇒ H:HOME → 启动链重进快手（照 PC §1699 第三级）")
-                // ⚠️ `switchToApp` 是 **Navigator** 的静态方法（⛔ 不是 FeatureEngine 的）
-                //    ⇒ 必须写 `Navigator.switchToApp`（§2925 编译错误修）
                 _ = Navigator.switchToApp(named: s?.apps?.first ?? "kslite", rec: rec, ble: ble,
                                           frame: grab, baseW: baseW, baseH: baseH, yFix: yFix,
                                           log: log)
                 sleep(2.0)
             } else {
-                log("   §\(tag) 返回腿 k=6：没看到「跨 App 面包屑」⇒ **不放枪**"
+                log("   §\(tag) 返回腿 k=6：既无面包屑、页面又认得出快手锚点 ⇒ **不放枪**"
                     + "（⛔ 不盲目退桌面 —— §2722 血案就是「在快手页面上也退桌面」）")
             }
         default:
