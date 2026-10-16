@@ -459,6 +459,9 @@ final class FeatureEngine {
                 // ⇒ 我这次只是**把它接进返回循环**（⛔ 没有新造任何机制）。
                 var deadLegs = Set<Int>()
                 var lastSig: UIImage? = nil
+                // ⭐ §2971 上一轮那条腿**到底出手了没有**（returnToAd 的返回值）
+                //   ⛔ 只有"出手了 且 画面没变"才许记死 ⇒ 治冤杀（见 ②b 的血案注释）
+                var lastLegFired = false
                 for k in 0..<returnToAdRounds {
                     if isCancelled() { break }
                     guard let imr = grab() else { break }
@@ -488,12 +491,26 @@ final class FeatureEngine {
                     }
                     // ②b ⭐ A4：**上一轮那条腿有没有用**（画面变了吗）
                     //    ⇒ 没变 ⇒ 它在**这一页上**无效 ⇒ 记死，本轮跳过它直接换下一条
-                    if let ref = lastSig {
+                    //
+                    // ⛔⛔⛔ §2971 **必须再过一道"它到底出手了没有"**（真机血案）
+                    // 血案（`_2971` 真机日志逐字）：
+                    // ```
+                    // [19:14:57] §tap ⛔ 没找到「back_arrow」⇒ **不点**      ← 这一腿没出手
+                    // [19:15:01] §adbox ⏭ 返回腿 k=2 **点了画面没变** ⇒ 记死  ← 🔴 谎报"点了"
+                    // ```
+                    // ⇒ 四条腿（k=2/4/7/8）**一次都没出手**却被全判死 ⇒ 后面的路被自己堵死。
+                    // ✅ 修法：`returnToAd` 现在**返回它有没有出手**
+                    //   · 出手了 且 画面没变 ⇒ 记死（原语义，对）
+                    //   · 没出手            ⇒ **⛔ 不记死**（它只是这一帧没找到目标）
+                    if let ref = lastSig, lastLegFired {
                         if !nav.screenChanged(ref, imr) {
                             deadLegs.insert(k - 1)
                             log("   §adbox ⏭ 返回腿 k=\(k - 1) **点了画面没变** ⇒ 记死换下一条"
                                 + "（A4／MaaFW `wait_freezes`；⛔ 不重复点）")
                         }
+                    } else if let _ = lastSig, !lastLegFired {
+                        log("   §adbox ℹ️ 返回腿 k=\(k - 1) 上一轮**没出手**（没找到目标）"
+                            + "⇒ ⛔ 不记死（§2971：⛔ 不许把没出手的腿冤杀）")
                     }
                     // ③ 还在落地页 ⇒ **主动返回**（照 PC `return_to_ad`）
                     //    ⛔ 若这条腿已记死 ⇒ 直接跳到下一条（⛔ 不空转）
@@ -504,7 +521,7 @@ final class FeatureEngine {
                     }
                     log("   §adbox ↩ 还在落地页（第 \(k + 1)/\(returnToAdRounds) 次）⇒ 执行返回")
                     lastSig = imr
-                    returnToAd(imr, tag: "adbox_ret\(n + 1)_\(k)", k: k)
+                    lastLegFired = returnToAd(imr, tag: "adbox_ret\(n + 1)_\(k)", k: k)
                     sleep(returnToAdWait)
                 }
                 if backHome {
@@ -3184,7 +3201,32 @@ final class FeatureEngine {
     /// ⚠️ 本函数**只做"回"，⛔ 不管"到了没有"** —— 判"到了没有"由调用方的
     ///   `looksLikeAdPage` 循环负责（照 PC 的 `for k in range(9)` 结构）。
     /// - Parameter k: 第几轮（决定用哪条腿，照 PC 的轮次语义）
-    private func returnToAd(_ img: UIImage, tag: String, k: Int) {
+    /// - Returns: **这条腿到底出手了没有**（`true` = 真发了点击；`false` = 没找到目标、没出手）
+    ///
+    /// ## ⛔⛔⛔ §2971 为什么要返回这个（真机血案，用户令「都改了」）
+    ///
+    /// ### 血案（真机日志逐字，2026-10-16 19:14–19:15）
+    /// ```
+    /// [19:14:57] §adbox_ret5_2 返回腿 k=2：应用内「〈」
+    /// [19:14:57] §tap ⛔ 没找到「back_arrow」⇒ **不点**        ← ⛔ 这一腿**根本没出手**
+    /// [19:15:01] §adbox ⏭ 返回腿 k=2 **点了画面没变** ⇒ 记死换下一条   ← 🔴 谎报"点了"
+    /// ```
+    /// 同样被冤杀的还有 k=4（`没找到「退出直播间」⇒ 不放枪`）、k=7/k=8（`已走过一次 ⇒ 停手`）——
+    /// **四条腿一次都没出手，却全被判"点了没变"**。
+    ///
+    /// ### 📏 与 PC 控制器对照（用户令：「和PG控制器做对照」）
+    /// PC `_1377_ad_loop.py:2844` 的 App Store ✕ 是**无条件前置腿**（逐字注释）：
+    /// > `if click_appstore_x(img): return`
+    /// > 「（`click_appstore_x()`；**不经 k 轮次，每次进来都先过**）」
+    /// ⛔ 而我把它写进了 `case 0` ⇒ **k≥1 之后再也不试** ⇒
+    ///    从 App Store sheet 回不来时（k=6 回桌面又落回同一张 sheet），
+    ///    k=7/k=8 只能"如实停手" ⇒ **整条广告废掉**。
+    ///
+    /// ### ✅ 修法（照 PC，⛔ 不新造机制）
+    /// ① App Store ✕ 提成**无条件前置腿**（与 PC L2844 逐字同位置）
+    /// ② 本函数返回"有没有出手"⇒ 调用方**只有真出手过才许记死**
+    @discardableResult
+    private func returnToAd(_ img: UIImage, tag: String, k: Int) -> Bool {
         // ── 每轮先过的三层闸（照 PC 2815-2888，⛔ 顺序不许改）──
         //
         // # ⛔⛔⛔ §2948 **这三道闸原来是死的**（真机血案：广告页卡死在弹窗上）
@@ -3225,7 +3267,7 @@ final class FeatureEngine {
             log("   §\(tag) 返回闸①：系统弹窗（标题/形态闸命中）⇒ 点消极项"
                 + "（照 PC `dismiss_sys_prompt`；⛔ 原来写 detect(\"sys_prompt\") 恒 false）")
             _ = nav.tap("sys_prompt_deny", img: img, atomic: true)
-            return
+            return true
         }
         // ② ⭐ 券弹窗 ✕ —— **专用判据 `ModalX.findCoupon`**（照 PC `find_coupon_x` 的位置闸）
         //    ⛔ 原来写 `detect("coupon_x")`（不存在）⇒ 恒 false ⇒ 券弹窗永远没人关
@@ -3235,7 +3277,32 @@ final class FeatureEngine {
             log("   §\(tag) 返回闸②：券弹窗 ✕ 位置闸命中 @(\(Int(c.x)),\(Int(c.y)))"
                 + " ⇒ 点它（照 PC `click_coupon_x` §1724；⛔ 原来 detect(\"coupon_x\") 恒 false）")
             nav.tapPoint(Double(c.x), Double(c.y), why: "返回闸②券弹窗 ✕（位置闸）")
-            return
+            return true
+        }
+        // ②b ⭐⭐⭐⭐⭐ §2971 **App Store sheet 左上 ✕ —— 无条件前置腿**（照 PC L2844）
+        //
+        // ## PC 逐字（`_1377_ad_loop.py:2840-2845`）
+        // ```python
+        // # ⭐⭐⭐ §1637 第二件事：App Store 商品页（App 内模态）⇒ 点左上「取消 ✕」
+        // #   为什么排这么前：它就是**盖住整屏**的一层，下面什么都没有；
+        // #   而且它**不会自己消失** —— 每次回前台又跳一次
+        // #   ⇒ 后面 9 条腿（含 H:HOME+桌面图标）**全部无效**。
+        // if click_appstore_x(img):
+        //     return
+        // ```
+        // ⇒ 📏 PC 把它放在**券弹窗之前、且不经 k 轮次** —— **每轮进来都先过**。
+        //
+        // ## ⛔ 我原来错在哪（真机血案 19:15）
+        // 我把它写进 `case 0` ⇒ k≥1 就不再试。
+        // 真机后果：人在 App Store sheet 上，k=0 走了「〈」、k=1..5 全落空、
+        //   k=6 回桌面又被 iOS 恢复回**同一张 sheet**、k=7/k=8「如实停手」⇒
+        //   **整条广告废掉**（`_exp2969` 那段 9 腿空转就是它）。
+        // 手动验证：在这张 sheet 上点左上 ✕ **一次就回广告页**（19:17 实测）。
+        if nav.detect("appstore_x", img: img) != nil {
+            log("   §\(tag) 返回闸②b：⭐ App Store sheet 左上 ✕ ⇒ 点它"
+                + "（照 PC L2844 无条件前置腿；⛔ 原来写在 case 0 里 ⇒ k≥1 不再试）")
+            _ = nav.tap("appstore_x", img: img, atomic: true)
+            return true
         }
         // ③ 小店 H5（收银台/订单页）—— PC `handle_shop_h5` 自带状态机
         //    ⛔ 原来写 `detect("shop_h5_x")`（不存在）⇒ 恒 false
@@ -3245,44 +3312,34 @@ final class FeatureEngine {
         //       ⛔ 我不趁手乱写一个半成品 —— 先记录缺口，等真机遇到再照 PC 移植。
         //       （§2874 §3 已列此缺口；`shop_h5_x` 从未在 config 里存在过。）
 
-        // ④ ⭐⭐⭐⭐⭐ §2954 **直播间：下滑退出**（照 PC §1377d，⛔ 这才是直播间的出路）
+        // ── ⛔⛔⛔ §2958 **这里原来有「闸④：是直播间就先下滑」—— 已删除**
         //
-        // ## 用户令（逐字）
-        // > 「**你就自己跑都解决不了直播间弹窗问题么？**」
-        //
-        // ## ⛔ 为什么"回桌面再点快手"对直播间**无效**（真机实测，本轮的根因）
+        // ## 为什么删（我在 0.30 加错了，用户点破）
+        // 我把它当成"迷路在直播间，要退出去"，而 **PC 的口径完全不同**：
+        // ```python
+        // # _1377_ad_loop.py:8486-8491（PAGE_PLAN，唯一口径）
+        // "ad_live": "不点 CTA、不操作（用户令「直播间就不操作了」）；等倒计时 → 点 ✕ 收奖励"
         // ```
-        //   ① 快手停在直播间 ⇒ "回桌面 → 点快手图标"
-        //   ② 快手**恢复到同一个直播间**（它记住了上一页）⇒ 又回到 ①
-        //   ⇒ 实测：一条广告里「回桌面再点快手」跑了 4 次，**page 始终 = live**
+        // ⇒ ⭐ **直播间广告是一条"要等完、收奖励"的广告**，⛔ **不是要退出的陌生页面**。
+        //
+        // ## PC 的原始证据（真机日志 `_var/_1540_fuli_round.log` 逐字）
         // ```
-        // 📏 我 0.29 修的是"券弹窗"（那是一层遮盖）；**直播间本身**是另一回事：
-        //   它不是遮盖，**它就是那一页** ⇒ 必须先**离开这一页**，回桌面才有意义。
+        // L435  .. ★广告页（直播间）⇒ **先等 30s**（用户口径：等待30秒后互动完再关闭）
+        // L438  .. ★本条是「直播间形态」广告 ⇒ 不点 CTA，直接等倒计时 → 点 ✕ 收奖励
+        // L442  .. ★直播间 ⇒ 按用户令「不操作、别死定」：**只点右上 ✕**，不跑返回腿
+        // L447  == 第 12 条完成
+        // ```
         //
-        // ## ✅ PC 的出路（`_1377_ad_loop.py:360-363` 逐字）
-        // > 快手带货直播间整页没有 ✕（左上只有主播头像+标题，右上只有「更多直播/回归礼/抽大奖」），
-        // > 左边缘侧滑在部分房型上也不生效。**下滑**之后页面里才会出现一个
-        // > **「退出直播间」按钮（scr≈(225,649)）**，点它就直接回到**同一条广告页**。
-        // 📏 且 PC 的腿序是 `k=3 下滑 → k=4 点「退出直播间」`（L2909-2917）——
-        //    **先下滑，才点得到**。本机 k=3/k=4 已有，但**要保证它先于"回桌面"**。
+        // ## 用户令（PC 注释里留着的，逐字）
+        // > 「**你这执行有等30秒么 什么广告他都强退出？**」（§1534）
+        // > 「**进去就点X 卡死 出去进来像傻逼一样，最后点X**」（§1529）
+        // ⇒ ⛔ **我加的这道闸正是在"什么广告他都强退出"** —— 用户早就骂过这个方向。
         //
-        // ## ✅ 本闸做什么
-        // 若这一帧**是直播间**且**不是广告页**（没有「可领取/已成功领取」）⇒
-        // **先下滑**（把「退出直播间」唤出来），⛔ 不急着回桌面。
-        //   ⇒ 下一轮 k=4 就能点到「退出直播间」（0.29 已修好那个判据）。
-        // ⚠️ 闸 = `live_marker`（真机命中：`说点什么…` 输入框，直播间**独有**）
-        //    + ⛔ 排除广告页（广告页归广告模块，⛔ 导航不许碰）。
-        if nav.detect("live_marker", img: img) != nil,
-           !Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH,
-                                 roi: s?.ad_top_roi) {
-            log("   §\(tag) 返回闸④：⭐ **这是直播间**（live_marker 命中，非广告页）"
-                + " ⇒ **下滑**把「退出直播间」唤出来（照 PC §1377d：先下滑才点得到）")
-            let cmd = BLEController.swipe(x1: baseW / 2, y1: baseH * 0.30,
-                                          x2: baseW / 2, y2: baseH * 0.70,
-                                          speed: .fast, baseW: baseW, baseH: baseH, yFix: yFix)
-            ble.send(cmd)
-            return
-        }
+        // ## 「下滑 → 退出直播间」在 PC 里的**真正位置**
+        // `return_to_ad` 的 **k=3/k=4 导航返回腿**（L2909-2917）——
+        // 用途 = **"我迷路了、不知在哪一页"** 的兜底，
+        // ⛔ **不是**"关闭直播间广告"的动作（那会**白丢一条已到账的广告**）。
+        // ⇒ 本机 k=3/k=4 仍在（位置正确），⛔ 不再提前抢在广告模块之前开火。
 
         // ── ⭐⭐⭐⭐⭐ §2932 **回桌面再点快手：一趟里只许一次**（用户令） ──
         //
@@ -3337,16 +3394,13 @@ final class FeatureEngine {
             // ⇒ 在苹果落地页上点「返回」= 按外部页处理 ⇒ **退出快手** ⇒ k=6..8 退到桌面。
             // 📏 真机 trace 铁证：整轮 **0 条 `§click`**（什么都没点到），
             //   然后 `§adbox_ret N_6/7/8 返回腿 k=6/7/8：★终端腿 = 回主屏`。
-            if nav.detect("appstore_x", img: img) != nil {
-                log("   §\(tag) 返回腿 k=0：⭐ 苹果 App 落地页左上 ✕ ⇒ 点它（§2722 实测唯一出路）")
-                _ = nav.tap("appstore_x", img: img, atomic: true)
-                return
-            }
+            // ⭐ §2971 这里原来还有一份 `appstore_x` 检测 —— 已**上提成无条件前置腿**
+            //（见本函数开头「返回闸②b」）。留着会变成**两个真相源** ⇒ 已删，只留一份。
             // 面包屑「◀快手」（**OCR 定位**，⛔ 不是写死坐标）
             if nav.detect("breadcrumb", img: img) != nil {
                 log("   §\(tag) 返回腿 k=0：面包屑「◀快手」⇒ 点它（照 PC `click_breadcrumb`）")
                 _ = nav.tap("breadcrumb", img: img, atomic: true)
-                return
+                return true
             }
             // 旧版式 App Store 页左上「完成」（新版式是上面的 ✕；两者并存）
             //
@@ -3368,14 +3422,17 @@ final class FeatureEngine {
                     + "（照 PC `if \"完成\" in txt(BOX_DONE)`；⛔ 原来 detect(\"appstore_done\") 恒 false）")
                 nav.tapPoint(Double(done.center.x), Double(done.center.y),
                              why: "返回腿 k=0 应用内商店页完成/打开")
-                return
+                return true
             }
             log("   §\(tag) 返回腿 k=0：应用内「〈」⇒ 点它（照 PC `click_page_back`）")
-            _ = nav.tap("back_arrow", img: img, atomic: true)
+            // ⭐ §2971 **如实回报"到底出手没有"**（⛔ 不许谎报 ⇒ 见本函数头 §2971 血案）
+            return nav.tap("back_arrow", img: img, atomic: true)
         case 1, 2:
             // 应用内 WebView 左上「〈」—— §1416 实测：H5 订单页唯一出路
             log("   §\(tag) 返回腿 k=\(k)：应用内「〈」（H5 唯一出路，§1416）")
-            _ = nav.tap("back_arrow", img: img, atomic: true)
+            // ⭐ §2971 真机血案就是这里：`§tap ⛔ 没找到「back_arrow」⇒ 不点`
+            //   但调用方仍打印"点了画面没变" ⇒ 冤杀。⇒ 现在**如实返回**。
+            return nav.tap("back_arrow", img: img, atomic: true)
         case 3:
             // 下滑（沉浸式直播间：下滑后页面才出现「退出直播间」）
             log("   §\(tag) 返回腿 k=3：★下滑（沉浸式直播间先下滑才出「退出直播间」）")
@@ -3383,6 +3440,7 @@ final class FeatureEngine {
                                           x2: baseW / 2, y2: baseH * 0.70,
                                           speed: .fast, baseW: baseW, baseH: baseH, yFix: yFix)
             ble.send(cmd)
+            return true
         case 4:
             // 定位并点「退出直播间」
             //
@@ -3405,17 +3463,20 @@ final class FeatureEngine {
                     + "（照 PC `click_words(BOX_EXITLIVE)`；⛔ 原来 detect(\"exit_live\") 恒 false）")
                 nav.tapPoint(Double(hit.center.x), Double(hit.center.y),
                              why: "返回腿 k=4 退出直播间")
+                return true
             } else {
                 log("   §\(tag) 返回腿 k=4：没找到「退出直播间」⇒ 不放枪（铁律①）")
+                return false          // ⭐ §2971 没出手 ⇒ 如实回报（⛔ 不许冤杀）
             }
         case 5:
             // ⭐ **iOS 左边缘侧滑**（兜底；§1377b：沉浸式带货直播间整页无任何 ✕，只有它能返回）
             log("   §\(tag) 返回腿 k=5：★iOS 左边缘侧滑（中部 3 发 + 上部/H5 3 发，照 PC §1720）")
             for _ in 0..<3 {
-                if isCancelled() { return }
+                if isCancelled() { return true }
                 _ = nav.backEdge()
                 sleep(1.2)
             }
+            return true
         case 6:
             // ⭐⭐⭐⭐⭐ §2932 **回桌面再点快手**（用户令：「直接就命令回桌面 再点快手返回」）
             //
@@ -3430,7 +3491,7 @@ final class FeatureEngine {
                                     roi: s?.ad_top_roi) {
                 log("   §\(tag) 返回腿 k=6：⚠️ 这一帧**是广告页** ⇒ 不回桌面"
                     + "（§2722：广告页归广告模块，⛔ 退桌面会毁掉正在看的广告）")
-                return
+                return false          // ⭐ §2971 没出手 ⇒ 如实回报
             }
             log("   §\(tag) 返回腿 k=6：⭐⭐ **回桌面再点快手**"
                 + "（用户令；k=0..5 的页面出路都试过了才走这条）")
@@ -3438,6 +3499,7 @@ final class FeatureEngine {
                                       frame: grab, baseW: baseW, baseH: baseH, yFix: yFix,
                                       log: log)
             sleep(1.5)
+            return true
         default:
             // ⛔ §2932 **k≥7：如实停手**（⛔ 不再退桌面 —— k=6 已经退过一次了）
             //
@@ -3462,6 +3524,7 @@ final class FeatureEngine {
             // ⇒ 交给主循环重判（它可能已回广告页/中心）。
             log("   §\(tag) 返回腿 k=\(k)：⛔ k=6 的「回桌面重进」已走过一次 ⇒ 停手交回主循环"
                 + "（⛔ 不重复退桌面 —— §2932 血案）")
+            return false              // ⭐ §2971 没出手 ⇒ 如实回报（⛔ 不许冤杀）
         }
     }
 
