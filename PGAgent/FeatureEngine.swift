@@ -3351,14 +3351,56 @@ final class FeatureEngine {
         let bw = min(W - bx, Int(box.width)), bh = min(H - by, Int(box.height))
         guard bx < W, by < H, bw > 8, bh > 8 else { return nil }
         var best: (Double, Double, Int)?
-        guard let data = cg.dataProvider?.data,
-              let ptr = CFDataGetBytePtr(data) else { return nil }
-        let bpr = cg.bytesPerRow, bpp = cg.bitsPerPixel / 8
+
+        // ⭐⭐⭐⭐⭐ §2988 **换板子：⛔ 不再"直接读 cgImage 原始字节"（字节序是猜的）
+        //                     ⇒ 自己建一块**格式确定**的 RGBA 缓冲**
+        //
+        // ## ⛔⛔ 血案（本轮真机，2026-10-17 22:12 杰士邦广告）
+        // 旧代码最后一行是「照 PC 粉色判据 R>200 且 G<120 且 B<150」——
+        //   判据本身**对**，但**读出来的 r/g/b 三个分量是错的**：
+        // ```
+        // guard let data = cg.dataProvider?.data, let ptr = CFDataGetBytePtr(data)
+        // let r = Int(ptr[o]), g = Int(ptr[o+1]), b = Int(ptr[o+2])   // ⛔ 假设缓冲是 RGBA
+        // ```
+        // `FrameNormalizer.normalize` 走 `UIGraphicsImageRenderer` ⇒ 它给的缓冲是 **BGRA**:
+        // ```
+        // 真机 CTA 像素的真实颜色 = RGB(255,55,102)
+        //   按 RGBA 读 ⇒ r=255 g=55 b=102 ⇒ r>200 & g<120 & b<150 ⇒ **命中** ✅
+        //   按 BGRA 读 ⇒ r=102 g=55 b=255 ⇒ 102>200 为假      ⇒ **不命中** ⛔
+        // ```
+        // 📏 反推（决定性）：**若缓冲真是 RGBA，真机就必然命中**（离线 18493 px、居中 0 偏离）
+        //   ⇒ 可真机 trace 逐字说「⛔ 连粉带都没有」⇒ **只可能是 BGRA 被当 RGBA 读**。
+        // ⇒ 判据没坏，**板子（读字节的方式）坏了** ⇒ 照用户口径：**换板子，不贴胶布**。
+        //
+        // ## ✅ 换成仓库里**已经被真机验证过**的那块板子
+        // 同一个仓库里 `ColorBlob.findCoinBall`（ColorBlob.swift:75-82）早就是这么写的：
+        // ```swift
+        // // ③ 画进 RGBA 缓冲（⚠️ premultipliedLast + 默认字节序 ⇒ 内存里就是 R,G,B,A）
+        // CGContext(data: &buf, ..., bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        // ```
+        // 📏 为什么这块板子是好的：**格式由建立缓冲的人指定**，
+        //   ⛔ 不是"读的时候猜来源是什么格式" ⇒ 字节序不再有假设空间。
+        //
+        // ## ⚠️ 代价（诚实记录）
+        // 多一次整帧绘制（451×977×4 ≈ 1.7MB）＋ 多一份内存。
+        //   但本函数**只在广告页 CTA 兜底时调用**（一条广告一次），不在热路径上 ⇒ 可接受。
+        //   ⛔ 不要图省事"两种解读都试"（`findInstallBtn` 那种写法）—— 那是**胶布**：
+        //     它对蓝/粉两种极性都可能误判，且把"我搞不清格式"永久固化进代码。
+        var buf = [UInt8](repeating: 0, count: W * H * 4)
+        guard let ctx = CGContext(data: &buf, width: W, height: H,
+                                  bitsPerComponent: 8, bytesPerRow: W * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: W, height: H))
+        // ⚠️ CGContext 原点在**左下** ⇒ 缓冲第 0 行是图像的**底行**
+        //    ⇒ 读第 y 行要用 `(H - 1 - y)`（与 `ColorBlob.findCoinBall` 的翻行一致）
         for y in by..<(by + bh) {
             var minX = -1, maxX = -1
+            let srcRow = (H - 1 - y) * W * 4
             for x in bx..<(bx + bw) {
-                let o = y * bpr + x * bpp
-                let r = Int(ptr[o]), g = Int(ptr[o + 1]), b = Int(ptr[o + 2])
+                let o = srcRow + x * 4
+                let r = Int(buf[o]), g = Int(buf[o + 1]), b = Int(buf[o + 2])
                 // PC 的粉色判据：R>200 且 G<120 且 B<150
                 // ⭐ §2645 三个阈值现在来自配置（`cta_color`）；⛔ 缺省逐字等于上面那句
                 if Double(r) > rMin && Double(g) < gMax && Double(b) < bMax {
