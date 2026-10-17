@@ -194,6 +194,12 @@ final class Runner: ObservableObject {
         let nav = Navigator(cfg: cfg, rec: rec, ble: ble) { [weak self] s in
             self?.append(s)
         }
+        // ⭐ §3003 **注入帧提供者** —— 供漏斗里的「外部 App 腿」抓新帧复核
+        //   （`browseExternalApp` 上滑后要确认是否真回到广告页；PC `:3313-3321` 同做法）。
+        //   ⛔ 不注入也能跑，但复核会变成盲的 ⇒ 可能假报「已回广告页」。
+        nav.frameProvider = { [weak self] in
+            self?.grabSync()
+        }
 
         let target = dest ?? cfg.settings?.target ?? "center"
         log("§run ▶️ 开始 目标=\(target) 最大步数=\(maxSteps) 广告停留=\(Int(adStayMin))~\(Int(adStayMax))s")
@@ -349,6 +355,17 @@ final class Runner: ObservableObject {
         var lastSig = ""
         /// ⭐ 连续「认不出」计数（见 `unknownLimit` 的说明）
         var unknownStreak = 0
+        /// ⭐⭐⭐ §3003 **unknown 兜底逃逸计数**（⛔ 防无限循环）
+        ///
+        /// ## 为什么必须单独计数（第一性原理）
+        /// 原来 `unknownStreak >= unknownLimit` 时就直接 `finish` ⇒ 不会循环。
+        /// 现在改成**兜底出手后 `unknownStreak = 0` 重来** —— 若兜底也没让页面可识别，
+        /// 就会「6 帧 → 兜底 → 置 0 → 再 6 帧 → 兜底 → …」**永远不退出**。
+        /// ⇒ 必须有个**不重置**的总次数上限，超了就如实停手。
+        ///
+        /// 📏 上限取 `unknownLimit`（默认 6）：即最多做 6 轮兜底（3 轮返回 + 3 轮回快手），
+        ///    按 PC 的经验足够走出来；再走不出来就是真卡死，⛔ 必须停手而不是空转。
+        var escapeTries = 0
 
         for k in 0..<maxSteps {
             if cancelFlag { finish("用户停止"); return }
@@ -414,8 +431,65 @@ final class Runner: ObservableObject {
                     unknownStreak = 0
                 }
                 if unknownStreak >= unknownLimit {
-                    finish("⛔ 连续 \(unknownLimit) 帧认不出 ⇒ 停手（不盲点）")
-                    return
+                    // ⭐⭐⭐⭐⭐ §3003 **不再直接死 —— 照 PC 的 unknown 兜底腿序**
+                    //
+                    // ## 用户令（本轮，逐字）
+                    // > 「**外部有返回的，快手都有锚点 外部页面应该也有锚点
+                    // >    没有锚点判断未知的也可以用兜底返回快手**」
+                    //
+                    // ## ⛔ 原来的行为（就是「卡死」）
+                    // ```swift
+                    // finish("⛔ 连续 N 帧认不出 ⇒ 停手（不盲点）")   // ← 直接死
+                    // ```
+                    // 而 PC `_1377:9157-9214` 在同样情况下有**五级出口**：
+                    // ```
+                    // ① find_page_back      暗细高 V
+                    // ② find_ks_back_circle 圆底白勾
+                    // ③ find_white_chevron  黑底白勾
+                    // ④ find_close_x        左上 ✕
+                    // ⑤ go_home + 点桌面图标（= iOS 的 switchToApp）
+                    // ```
+                    // 📏 PC 血案（`_var/_1751_cycle_live.log`）：跳过①~④直接回桌面重进
+                    //   ⇒ iOS 不杀后台 ⇒ **重进还是同一页** ⇒ 死循环 4 轮。
+                    //
+                    // ## 本轮实现
+                    // ①~③ 由 `nav.escapeUnknownPage` 走（元素已在 config 里）；
+                    // 都不成 ⇒ ⑤ `switchToApp` 回快手（真机验证过的组件）。
+                    // ⚠️ 第 ④ 条（左上 ✕）iOS 没有等价元素，⛔ 不自造（详见 escapeUnknownPage 注释）。
+                    //
+                    // ## ⛔ 逃逸次数上限（防无限循环，见 `escapeTries` 的注释）
+                    escapeTries += 1
+                    if escapeTries > unknownLimit * 2 {
+                        let msg = "⛔ 连续认不出 + \(escapeTries - 1) 轮兜底（返回键/回快手）都无法恢复"
+                            + " ⇒ 停手（⛔ 不再空转；照 PC `:9215` 「N 次都没到金币中心」的如实报）"
+                        log("§run \(msg)")
+                        finish(msg)
+                        return
+                    }
+                    log("§run ⚠️ unknown 兜底第 \(escapeTries)/\(unknownLimit * 2) 次（"
+                        + "先返回键、再回快手，照 PC `:9157-9214`）")
+                    let grabbed = grabSync()
+                    if let g = grabbed, nav.escapeUnknownPage(g) {
+                        log("§run ★ unknown 兜底：已点返回键 ⇒ 下轮重新判页")
+                        DispatchQueue.main.async { self.lastAction = "unknown-escape-back" }
+                        unknownStreak = 0
+                        sleep(stepWait)
+                        continue
+                    }
+                    log("§run ⚠️ unknown 兜底：三条返回腿都没命中 ⇒ 回快手重进（PC `:9202` 同做法）")
+                    DispatchQueue.main.async { self.lastAction = "unknown-escape-home" }
+                    let apps = cfgStore.cfg?.settings?.apps ?? []
+                    let which = apps.first ?? "kslite"
+                    // ⚠️ 参数形式照本文件 L267-272 的既有调用（同一静态方法）
+                    _ = Navigator.switchToApp(named: which, rec: rec, ble: ble,
+                                              frame: { [weak self] in self?.grabSync() },
+                                              baseW: cfgStore.cfg?.settings?.base_w ?? 451,
+                                              baseH: cfgStore.cfg?.settings?.base_h ?? 977,
+                                              yFix: cfgStore.cfg?.settings?.y_fix ?? 4,
+                                              log: { [weak self] s in self?.append(s) })
+                    unknownStreak = 0
+                    sleep(stepWait)
+                    continue
                 }
                 writeHeartbeat(["phase": "unknown-retry", "k": k,
                                 "unknownStreak": unknownStreak])
