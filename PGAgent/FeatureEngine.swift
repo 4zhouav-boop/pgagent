@@ -1328,6 +1328,37 @@ final class FeatureEngine {
             _ = nav.tap("pill_x", img: img, atomic: true)
             return true
         }
+        // ⭐⭐⭐⭐⭐ §2985 **腿③-b 顶栏胶囊 ✕ 的 OCR 兜底**（`ocr_tail_x`，配置驱动）
+        //
+        // ## ⛔ 为什么必须补（真机实证，2026-10-17）
+        // `run_trace.log` 里 **42 次**「⛔ 点了也离不开广告页 ⇒ 本条不计入完成」，
+        // 而真机 `/recogdiag` 同帧原始输出：
+        // ```
+        // pill_x      {"hit": false}                        ← ⛔ 模板 miss
+        // ad_capsule  {"hit": true, "ev":"已成功领取814金币×"}
+        // ```
+        // 根因：iOS Vision 把这个 ✕ **合并进了文本词元**
+        // （`『已成功领取814金币 ×』x=52.5 w=163.1 ⇒ 右边缘 215.6, y=89.5`）
+        // ⇒ 它不是独立图形 ⇒ **任何模板都匹配不到**。
+        //
+        // ## 判据来源（⛔ 逐字移植 PC，不自造）
+        // `_1377_ad_loop.py:3973 find_toast_x(roi=(10,84,300,124))` +
+        // `:4342 click_toast_x` 的**到账闸**（倒计时没走完 ⛔ 不许点 ✕）。
+        // 三条闸（带内 / 坐标窗口 / 到账词）**全部放配置**，见
+        // `elements.pill_x_ocr` 的 `x_range`/`y_range`/`require_words`。
+        //
+        // ## 离线复算（`_dev/_2985_claimx_verify.py`，346 帧全量，已跑通）
+        // ```
+        // 真机 ✕ 实测：x ∈ [212.7, 228.5]  y ∈ [88.8, 91.6]
+        // POS 广告页 89/111 = 80.2%    NEG 非广告页 0/235 = 0.0%
+        // ```
+        // ⚠️ 到账闸在这里**已经由配置的 `require_words` 表达**（缺省「已成功领取」），
+        //    所以本腿**不需要**再调 `adCountdownRunning`（避免两套闸漂移）。
+        if nav.detect("pill_x_ocr", img: img) != nil {
+            log("   §\(tag) 顶栏胶囊 ✕ —— **模板 miss，走 OCR 兜底腿**（§2985）⇒ 点它")
+            _ = nav.tap("pill_x_ocr", img: img, atomic: true)
+            return true
+        }
         return false
     }
 

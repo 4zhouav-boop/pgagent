@@ -124,6 +124,85 @@ final class Navigator {
                                   rect: CGRect(x: c.x - 15, y: c.y - 15,
                                                width: 30, height: 30),
                                   score: 1.0, evidence: "color/coin_ball")
+        // ⭐⭐⭐⭐⭐ §2985 **顶栏胶囊 ✕ 的 OCR 兜底定位**（`match: "ocr_tail_x"`）
+        //
+        // ## ⛔ 为什么必须有这一种（真机实证，2026-10-17，⛔ 不是推测）
+        // 真机 `_tmp_stuck_after.jpg` 的 `/recogdiag` 原始输出：
+        // ```
+        // pill_x      {"hit": false}                        ← ⛔ 模板**不命中**
+        // ad_capsule  {"hit": true, "ev":"已成功领取814金币×", "x":52,"y":81}
+        // ```
+        // 而 `pill_x` 是**收奖励的唯一入口**（`FeatureEngine.swift:1320`）⇒
+        // 模板 miss ⇒ 一次都没点 ⇒ 日志刷 42 次
+        // 「⛔ 点了也离不开广告页 ⇒ 本条不计入完成」⇒ 收奖励条数不涨
+        // ⇒ **无进展闸触发停手**（`run_trace.log` 统计：无进展 73 次最多）。
+        //
+        // ## 为什么模板会 miss —— 根因
+        // iOS Vision 把这个 ✕ **合并进了文本词元**：
+        // ```
+        // 『已成功领取814金币 ×』  x=52.5 w=163.1 ⇒ 右边缘 = 215.6, 中心 y = 89.5
+        // ```
+        // ⇒ 那不是一个独立图形，而是**文本的尾字符** ⇒ 任何模板都匹配不到它。
+        //
+        // ## PC 的权威依据（`_1377_ad_loop.py`，逐字）
+        // ```python
+        // L3973: def find_toast_x(img, roi=(10, 84, 300, 124))    ← 限定带
+        // L1565-1570 真机验证过的真实 ✕: (210.5,88.5) (213.5,88.5) (214,89)
+        // L1885: ⛔ 全屏搜有 26 帧假阳（倒计时文案里的 × 与关闭 ✕ 同形）
+        //        ⇒ **必须限定带**；限定带后 0 假阳
+        // ```
+        //
+        // ## 离线复算定标（`_dev/_2985_claimx_verify.py`，346 帧全量）
+        // ```
+        // 真机 ✕ 实测分布：x ∈ [212.7, 228.5]   y ∈ [88.8, 91.6]
+        // 判据 = roi 带内 ∧ 词元含 ✕ 类字符 ∧ 点落窗口 ∧ 顶栏含「已成功领取」
+        //   POS 广告页 89/111 = 80.2%
+        //   NEG 非广告页 0/235 = 0.0%     ← 收紧前是 24 张假阳（y≈111 的 H5 角标 + x≈254 的新广告）
+        // ```
+        // ⛔ 三条闸的缺省值 = 上面**复算通过**的那组，⛔ 不是猜的。
+        case "ocr_tail_x":
+            let items = rec.ocr(img, minConfidence: e.min_conf ?? cfg.settings?.ocr_min_confidence ?? 0.5)
+            let band = r                                    // PC `find_toast_x` 的限定带
+            let xr = e.x_range.flatMap { $0.count >= 2 ? ($0[0], $0[1]) : nil } ?? (200.0, 240.0)
+            let yr = e.y_range.flatMap { $0.count >= 2 ? ($0[0], $0[1]) : nil } ?? (86.0, 96.0)
+            let crosses = Set(e.cross_chars ?? ["×", "✕", "╳", "x", "X"])
+            // ① 到账闸：必须读到 `require_words` 里任一词（缺省「已成功领取」）
+            let req = e.require_words ?? ["已成功领取"]
+            if !req.isEmpty {
+                let bandText = items.reduce(into: "") { acc, it in
+                    let c = CGRect(x: it.1.origin.x + it.1.width / 2,
+                                   y: it.1.origin.y + it.1.height / 2,
+                                   width: 1, height: 1)
+                    if let b = band, b.contains(c) { acc += it.0 }
+                }
+                let compact = bandText.replacingOccurrences(of: " ", with: "")
+                if !req.contains(where: { compact.contains($0) }) { return nil }
+            }
+            // ② 在带内找含 ✕ 类字符的词元，取**该字符的右边缘**作点击点
+            var best: (x: Double, y: Double, ev: String)? = nil
+            for it in items {
+                let text = it.0, box = it.1
+                // ⚠️ 词元**中心**必须落在带内（PC 的 `txt(img, box)` 口径）
+                let center = CGPoint(x: box.origin.x + box.width / 2,
+                                     y: box.origin.y + box.height / 2)
+                if let b = band, !b.contains(center) { continue }
+                // 取词元里**最后一个** ✕ 类字符
+                var lastIdx: Int? = nil
+                for (i, ch) in text.enumerated() where crosses.contains(String(ch)) { lastIdx = i }
+                guard let li = lastIdx else { continue }
+                let frac = Double(li + 1) / Double(max(1, text.count))
+                let px = box.origin.x + box.width * frac
+                let py = box.origin.y + box.height / 2
+                // ③ 坐标窗口闸（离线复算定的，⛔ 不能省）
+                if !(xr.0...xr.1).contains(px) || !(yr.0...yr.1).contains(py) { continue }
+                if best == nil || px > best!.x {
+                    best = (px, py, "ocr_tail_x『\(text)』→(\(Int(px)),\(Int(py)))")
+                }
+            }
+            guard let b2 = best else { return nil }
+            return Recognizer.Hit(name: name,
+                                  rect: CGRect(x: b2.x - 12, y: b2.y - 12, width: 24, height: 24),
+                                  score: 1.0, evidence: b2.ev)
         default:
             return nil
         }
