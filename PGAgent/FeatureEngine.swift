@@ -757,27 +757,50 @@ final class FeatureEngine {
                 //         reason = "奖励面板没出现 ⇒ 已停手"                          # ⛔ 两条都不成立 ⇒ 不算完成
                 // ```
                 // ⇒ ⭐ **"已成功领取"从来不是完成判据** —— PC 认的是「**面板**」或「**回中心**」。
+                //
+                // ⛔⛔⛔ §2977 **远端 §2974 这版还留着一个误判（真机事实，不是我觉得）**
+                // 判据① 写成 `if finishAdPanel(im5, …) { leftAd = true }` ——
+                // 而 `finishAdPanel` 的**返回值契约**是「**已点掉一层**（调用方应重抓帧再判）」
+                // （见它自己的文档 L1243），三条腿里任何一条命中都返回 true：
+                // ```
+                //   ① stay_panel_btn（挽留面板「继续观看」）  ← 点完人**还在广告页**
+                //   ② panel_close_x（面板右上小 ✕）           ← 可能是别的弹层
+                //   ③ pill_x（顶栏胶囊 ✕）                    ← 点完也可能还在广告页
+                // ```
+                // ⇒ 拿它当"本条完成"⇒ **点一次胶囊 ✕ 就 +1**，而人可能还在同一条广告上
+                //   ⇒ 与 §2974 修掉的那个"自证循环"是**同一个病**，只是换了个假阳性来源。
+                //
+                // ✅ 正解（照 PC `at_center`，`_1377_ad_loop.py:9777-9804`）：
+                //   **完成 = 页面真的变了**，只认两个归宿：
+                //     ① **真落回金币中心**（`center_marker` 元素命中，⛔ 不用广告页放行短路）
+                //     ② 页型判据确认**已不在广告页**
+                //   `finishAdPanel` 仍然要调（它负责点 ✕ / 补全），但**只当"推进动作"**，
+                //   它的返回值**不再单独置 leftAd** —— 下一轮回环由 ①/② 判。
                 var leftAd = false
-                for _ in 0..<6 {
+                for i5 in 0..<6 {
                     if isCancelled() { break }
                     guard let im5 = grab() else { break }
-                    // ① PC 归宿①：奖励面板出现 ⇒ 点它的主按钮（进下一条）
-                    if finishAdPanel(im5, tag: "adbox_claim\(n + 1)") {
-                        log("   §adbox ✅ 奖励面板已出现并点了主按钮 ⇒ 本条完成")
+                    // ① PC 归宿②（最硬）：真落回金币中心 ⇒ 本条完成
+                    if nav.detect("center_marker", img: im5) != nil {
+                        log("   §adbox ✅ 已真落回金币中心 ⇒ 本条完成（第 \(i5 + 1) 次检查）")
                         leftAd = true
                         break
                     }
-                    // ② PC 归宿②：已经不在广告页 ⇒ 本条完成
+                    // ② PC 归宿②（等价）：页型确认已不在广告页 ⇒ 本条完成
                     if !Self.looksLikeAdPage(im5, rec: rec, nav: nav, bw: baseW, bh: baseH,
                                              roi: s?.ad_top_roi) {
-                        log("   §adbox ✅ 已离开广告页 ⇒ 本条完成")
+                        log("   §adbox ✅ 已离开广告页（页型判据）⇒ 本条完成")
                         leftAd = true
                         break
+                    }
+                    // ③ 还在广告页：**推进**（点面板主按钮 / 面板✕ / 胶囊✕），⛔ 不算完成
+                    if finishAdPanel(im5, tag: "adbox_claim\(n + 1)") {
+                        log("   §adbox ⏭ 已点掉一层（⛔ 还在广告页，不算完成）⇒ 重抓帧再判")
                     }
                     sleep(1.5)
                 }
                 if !leftAd {
-                    log("   §adbox ⛔ 点不掉 ✕、也等不到「已成功领取」⇒ **本条不计入完成**"
+                    log("   §adbox ⛔ 点了也离不开广告页 ⇒ **本条不计入完成**"
                         + "（⛔ 不假报成功；若持续如此，循环头的无进展闸会停手）")
                     // 清掉"每条一次"标志 ⇒ 允许下一轮重新尝试收尾（但仍受无进展闸约束）
                     dwelledThisAd = false
@@ -975,24 +998,29 @@ final class FeatureEngine {
                 }
                 // ⭐⭐⭐⭐⭐ §2824/§2974 **确认到账才计数**（⛔ 不再无条件 `n += 1`）
                 // 判据与「广告页」分支**同一套**（照 PC 的两个归宿）：
-                //   ① 奖励面板出现并点了主按钮  ② 已经不在广告页
+                //   ① **真落回金币中心**（`center_marker`）  ② 页型确认**已不在广告页**
                 // ⛔⛔ §2974：**删掉原来的「顶栏『已成功领取』就算完成」** —— 那是无限转化的根因
                 //   （与 G3 的等待条件自证循环 ⇒ ✕ 一次没点就宣布完成 ⇒ 卡在同一条反复转化）。
                 //   完整血案与 PC 对照见「广告页」分支里的 §2974 注释块。
+                // ⛔⛔ §2977：**`finishAdPanel` 的返回值不是完成判据**（它只表示"点掉一层"，
+                //   见其文档 L1243；点胶囊✕后人也可能还在广告页）⇒ 只当推进动作，完成仍由 ①/② 判。
                 var leftAd2 = false
-                for _ in 0..<6 {
+                for i6 in 0..<6 {
                     if isCancelled() { break }
                     guard let im6 = grab() else { break }
-                    if finishAdPanel(im6, tag: "adbox_claimw\(n + 1)") {
-                        log("   §adbox ✅ 奖励面板已出现并点了主按钮 ⇒ 本条完成")
+                    if nav.detect("center_marker", img: im6) != nil {
+                        log("   §adbox ✅ 已真落回金币中心 ⇒ 本条完成（第 \(i6 + 1) 次检查）")
                         leftAd2 = true
                         break
                     }
                     if !Self.looksLikeAdPage(im6, rec: rec, nav: nav, bw: baseW, bh: baseH,
                                              roi: s?.ad_top_roi) {
-                        log("   §adbox ✅ 已离开广告页 ⇒ 本条完成")
+                        log("   §adbox ✅ 已离开广告页（页型判据）⇒ 本条完成")
                         leftAd2 = true
                         break
+                    }
+                    if finishAdPanel(im6, tag: "adbox_claimw\(n + 1)") {
+                        log("   §adbox ⏭ 已点掉一层（⛔ 还在广告页，不算完成）⇒ 重抓帧再判")
                     }
                     sleep(1.5)
                 }
@@ -3878,8 +3906,29 @@ final class FeatureEngine {
                                            extraKeys: [String]?,
                                            grab: () -> UIImage?,
                                            isCancelled: () -> Bool) {
-        // ⛔ 只认「安装」两个字（照 PC）；ROI = 屏幕中部（弹层按钮行）
-        let roi = CGRect(x: 0, y: 380, width: 451, height: 320)
+        // ⭐⭐⭐ §2977 **补形状腿 + 改 ROI**（照 PC `_1377_ad_loop.py:8667 find_install_btn`）
+        //
+        // ## ⛔⛔ 血案（真机 2026-10-17 12:11~12:15，**3/3 条全落空**，逐字日志）
+        // ```
+        // §adbox_inst1 安装确认弹层：6 轮都没出现 ⇒ ⛔ 不动（照 PC：无弹层就不动）
+        // ```
+        // 而**同一时刻抓帧**（`_tmp_2975_run4.png`）上，「安装」蓝按钮**明明在**：
+        // ```
+        // 归一化 451×977 后实测：bbox x[166,284] y[896,933]  w=119 h=38  蓝像素 4023
+        // 旧 ROI = CGRect(y: 380, height: 320) ⇒ y 380..700 ⇒ **零重叠**（结构性恒不命中）
+        // ```
+        // ## ⛔ 第二个错：只有**文字腿**（`s == "安装"`）—— iOS 的「安装」是**蓝底白字**，
+        //    OCR 经常读不出（PC 注释逐字：`y>=860` 的 OCR **一个字都没读到**）。
+        //
+        // ## ✅ PC 的正解（两条腿**互补**，参数逐字照抄）
+        // ```python
+        // INSTALL_BTN_BLUE = (180, 80, 80, 200)   # (b>, b-r>, g>, g<)
+        // INSTALL_BTN_BOX  = (60, 180, 22, 60)    # (w_min, w_max, h_min, h_max) 实测 118×38
+        // _m[:int(_H * 0.85), :] = False          # ⛔ 只在下半屏找
+        // ```
+        // 📏 PC 注释真值：蓝块 `x[167,284] y[896,933]` 中心 `(225.5,914.5)`；
+        //    我在真机帧上复算 = `x[166,284] y[896,933]` 中心 `(225.0,914.5)`（差 ≤0.5px）
+        //    ⇒ **PC 参数可直接平移**，⛔ 不是我又猜一套。
         for i in 0..<6 {
             if isCancelled() { return }
             // ⭐ 可中断的等待（每 0.2s 检查一次取消，照 `sleepWithCancel`）
@@ -3892,18 +3941,79 @@ final class FeatureEngine {
             if isCancelled() { return }
             // 每一轮**重新抓帧**（弹层会动/会晚到）
             guard let cur = grab() else { continue }
-            let items = rec.ocrRegion(cur, rect: roi, minConfidence: 0.3)
+            // ① 文字腿（保留；ROI 扩到**屏幕下半区** —— 「安装」在弹层底部）
+            let roiText = CGRect(x: 0, y: 380, width: 451, height: 597)   // y 380..977
+            let items = rec.ocrRegion(cur, rect: roiText, minConfidence: 0.3)
             for (t, r, _c) in items {
                 let s = t.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard s == "安装" || s == "安装APP" else { continue }
                 if forbidden(t, extraKeys: extraKeys) != nil { continue }
-                log("   §\(tag) 安装确认弹层：「\(t)」@(\(Int(r.midX)),\(Int(r.midY)))"
+                log("   §\(tag) 安装确认弹层[文字腿]：「\(t)」@(\(Int(r.midX)),\(Int(r.midY)))"
                     + "（第 \(i + 1) 轮轮询命中）⇒ 补一枪")
-                nav.tapPoint(Double(r.midX), Double(r.midY), why: "安装确认弹层")
+                nav.tapPoint(Double(r.midX), Double(r.midY), why: "安装确认弹层[文字腿]")
+                return
+            }
+            // ② ⭐ 形状腿（照 PC `find_install_btn`）—— 蓝底白字 OCR 读不出时靠它
+            if let p = Self.findInstallBtn(cur) {
+                log("   §\(tag) 安装确认弹层[形状腿]：蓝色大按钮 @(\(Int(p.x)),\(Int(p.y)))"
+                    + "（第 \(i + 1) 轮轮询命中，OCR 读不出蓝底白字）⇒ 补一枪")
+                nav.tapPoint(Double(p.x), Double(p.y), why: "安装确认弹层[形状腿]")
                 return
             }
         }
-        log("   §\(tag) 安装确认弹层：6 轮都没出现 ⇒ ⛔ 不动（照 PC：无弹层就不动）")
+        log("   §\(tag) 安装确认弹层：6 轮都没出现（文字腿+形状腿都没中）⇒ ⛔ 不动"
+            + "（照 PC：无弹层就不动）")
+    }
+
+    /// ⭐⭐⭐ §2977 **「安装」确认层的蓝色大按钮**（形状腿）—— 逐字照抄 PC `find_install_btn`
+    ///
+    /// PC 依据（`_1377_ad_loop.py:8655-8695`，逐字）：
+    /// ```
+    /// ⛔ 真机血案：确认层**明明在**，但 `y>=860` 的 OCR **一个字都没读到**（蓝底白字）
+    /// ⭐ 形状判据实测：蓝色像素 3980 个，下半屏蓝块 `x[167,284] y[896,933]`
+    ///    ⇒ 中心 (225.5, 914.5)，用户截图量出 (225.8, 915.0) ⇒ **0.3px 精度**
+    /// ```
+    /// 判据：**下半屏**（`y > 0.85H`）的蓝色圆角大按钮，外接框 60~180 × 22~60。
+    /// ⚠️ §2631 全局适配：PC 的 `0.85H` 是**比例**，本函数**先归一到基准**再按比例算
+    ///   （⛔ 不在原始帧上索引 —— 那正是 §2631 血案的形态）。
+    static func findInstallBtn(_ img: UIImage) -> CGPoint? {
+        let base = FrameNormalizer.normalize(img)
+        guard let cg = base.cgImage, let data = cg.dataProvider?.data,
+              let ptr = CFDataGetBytePtr(data) else { return nil }
+        let w = cg.width, h = cg.height
+        let bpr = cg.bytesPerRow, bpp = cg.bitsPerPixel / 8
+        // PC `INSTALL_BTN_BLUE = (180, 80, 80, 200)` → (b>, b-r>, g>, g<)
+        // ⚠️ 与 §2969 同源风险：这里**直接读 cgImage 原始字节**，若缓冲是 BGRA 则 R/B 读反。
+        //    故**两种解读都试**（RGBA 优先，BGRA 兜底），命中任一即用 —— 免得再踩一次字节序坑。
+        func scan(_ bgra: Bool) -> (CGRect, Int)? {
+            var minX = w, minY = h, maxX = -1, maxY = -1, n = 0
+            let yFrom = Int(Double(h) * 0.85)
+            for y in yFrom..<h {
+                let row = y * bpr
+                for x in 0..<w {
+                    let o = row + x * bpp
+                    let c0 = Int(ptr[o]), c1 = Int(ptr[o + 1]), c2 = Int(ptr[o + 2])
+                    let r = bgra ? c2 : c0
+                    let g = c1
+                    let b = bgra ? c0 : c2
+                    if b > 180 && (b - r) > 80 && g > 80 && g < 200 {
+                        n += 1
+                        if x < minX { minX = x }; if x > maxX { maxX = x }
+                        if y < minY { minY = y }; if y > maxY { maxY = y }
+                    }
+                }
+            }
+            guard n >= 300, maxX >= minX, maxY >= minY else { return nil }
+            return (CGRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1), n)
+        }
+        for bgra in [false, true] {
+            guard let (rect, _n) = scan(bgra) else { continue }
+            // PC `INSTALL_BTN_BOX = (60, 180, 22, 60)`：实测 118×38
+            guard rect.width >= 60, rect.width <= 180,
+                  rect.height >= 22, rect.height <= 60 else { continue }
+            return CGPoint(x: rect.midX, y: rect.midY)
+        }
+        return nil
     }
 
     /// ⭐⭐⭐ §2896 **是不是 App Store 模态页** —— 判据已按**新版式**重写。
