@@ -932,8 +932,10 @@ final class Navigator {
     ///
     /// - Returns: `true` = 已点「打开」（⛔ 不代表弹窗一定消失，调用方要复核）。
     /// - Parameter frame: 抓新帧的闭包（`Navigator` 自己没有取帧能力，见上面的说明）。
+    ///   ⚠️ 必须 `@escaping` —— 它会被放进 `attempts` 数组的闭包里
+    ///   （与 `browseExternalApp` 同一个 CI #179 报错族）。
     @discardableResult
-    func handleAppJump(_ img: UIImage, frame: () -> UIImage?) -> Bool {
+    func handleAppJump(_ img: UIImage, frame: @escaping () -> UIImage?) -> Bool {
         // ── ① 标题闸：只认 App 跳转型 ──
         let t = sysText(img, Self.boxSysLoose)
         let titleHit = t.contains("想要打开") || (t.contains("想要") && t.contains("打开"))
@@ -1211,9 +1213,11 @@ final class Navigator {
     /// | ③`H:HOME`+`ensure_app` | `switchToApp`（`H:HOME` + 上滑 ×2 + 点图标） | `Navigator.switchToApp` 已真机验证（§2364 命令表） |
     ///
     /// - Returns: `true` = 已复核「回到广告页」；`false` = 三级都没确认（⛔ 如实报，不伪造成功）。
+    /// - Parameter frame: ⚠️ 必须 `@escaping` —— 它会被放进 `legs` 数组的闭包里
+    ///   （CI #179: `escaping closure captures non-escaping parameter 'frame'`）。
     @discardableResult
     func browseExternalApp(_ img: UIImage,
-                           frame: () -> UIImage?,
+                           frame: @escaping () -> UIImage?,
                            switchToApp: (() -> Bool)? = nil) -> Bool {
         // PC `:3281` 逐字：`_ns = random.randint(5, 8)`
         let n = Int.random(in: 5...8)
