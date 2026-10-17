@@ -1160,7 +1160,73 @@ final class Navigator {
     ///     return ("可领取" in _t) or ("已成功领取" in _t)
     /// ```
     /// ⇒ 判据 = 顶栏重新读到**广告胶囊**（倒计时/已领取）。
+    /// ⭐⭐⭐⭐⭐ §3006 **`isHomescreen` —— 逐字移植 PC `_1377_ad_loop.py:7921-7929`**
+    ///
+    /// ## PC 原文（逐字，含它自己的真机定标）
+    /// ```python
+    /// def is_homescreen(img):
+    ///     """是不是 iOS 桌面/资源库 —— 翻页前的**安全闸**（⛔ 免得 HOME 万一没生效、在 App 里乱滑）。
+    ///     §1642 真机定标：桌面每页底部都有「搜索」胶囊 @scr(≈226, 814)；
+    ///     App 资源库页顶部是「App 资源库」搜索框。"""
+    ///     if "搜索" in txt(img, (150, 780, 320, 860)):
+    ///         return True
+    ///     return "资源库" in txt(img, (0, 60, 451, 140))
+    /// ```
+    ///
+    /// ## 为什么外部 App 腿**必须**有这块板子（真机血案 `_3004b`）
+    /// 第三级返回腿 `H:HOME` 的**必经中间态就是 iOS 桌面**：
+    /// ```
+    ///   百度协议墙 --H:HOME--> iOS 桌面 --点快手图标--> 快手
+    /// ```
+    /// 而 `extBackOk` 若只认「快手页型」，那么**站在桌面上会被判成"还没回来"**
+    /// ⇒ 第三级腿明明成功了也被判失败 ⇒ 继续空转。
+    ///
+    /// ## 📏 真机帧复算（`_3004b` s03/s05 桌面两帧，逐字 OCR 输出）
+    /// ```
+    ///   'Q 搜索'  x∈[203,248] y∈[805,821]      ← 落在 PC ROI (150,780,320,860) 内 ✅
+    /// ```
+    /// 与 PC 定标的 `(≈226, 814)` 完全吻合。
+    func isHomescreen(_ img: UIImage) -> Bool {
+        let mc = cfg.settings?.ocr_min_confidence ?? 0.3
+        // ① 桌面每页底部都有「搜索」胶囊（PC `(150, 780, 320, 860)`）
+        let band = rec.ocrRegion(img, rect: CGRect(x: 150, y: 780, width: 170, height: 80),
+                                 minConfidence: mc)
+        if band.contains(where: { $0.0.contains("搜索") }) { return true }
+        // ② App 资源库页顶部是「App 资源库」搜索框（PC `(0, 60, 451, 140)`）
+        let top = rec.ocrRegion(img, rect: CGRect(x: 0, y: 60, width: baseW, height: 80),
+                                minConfidence: mc)
+        return top.contains(where: { $0.0.contains("资源库") })
+    }
+
+    /// ⭐⭐⭐⭐⭐ §3006 **「回到快手了没有」—— 用页型判，⛔ 不用广告页顶栏**
+    ///
+    /// ## ⛔⛔ 原来这块板子是坏的（真机血案 `_3004b`）
+    /// 旧实现：`sysText(img, bAppTop)` 含「可领取/已成功领取」才算回来了。
+    /// 那是**快手广告页的胶囊文案** —— 在百度/天猫/美团那些外部 App 里
+    /// **永远不可能出现** ⇒ `extBackOk` 恒 false：
+    /// ```swift
+    ///   switchToApp 返回 true（H:HOME 回了快手）⇒ 但复核仍然 false ⇒ 判"没回去"
+    /// ```
+    /// 真机后果（`_3004b` 实机 30 帧）：`§tap ⛔ 没找到「back_arrow」⇒ 不点` 连打 15 次，
+    /// 画面 144 秒不动。
+    ///
+    /// ## ✅ 正解（用户令，逐字）
+    /// > 「**它到了页面不就直到回来了么，而且不是回快手是回启动的那个广告程序。**」
+    /// ⇒ 判据 = **页型被认出来**（说明人已经在一个**快手 App 的已知页面**上），
+    ///   ⛔ 不是「某个特定页面的某个特定文案」。
+    ///
+    /// ## 📏 为什么用 `pageHere(includeIslands: true)`
+    /// `ad_video` 带 `island:true`，而 `pageHere()` 默认跳过孤岛页（导航语义，§2979）
+    /// ⇒ 广告页会被判成 `unknown`。这里要的是**识别语义**（"人在不在快手"），
+    /// ⇒ 必须显式开 `includeIslands:true`。
+    ///
+    /// ⚠️ `nil`（真 unknown，比如还在百度协议墙）⇒ 返回 false ⇒ 继续走下一级腿。✅ 正确。
     func extBackOk(_ img: UIImage) -> Bool {
+        // ① ⭐ 人在 iOS 桌面 ⇒ 「外部 App 已经退出去了」（第三级腿的必经中间态）
+        if isHomescreen(img) { return true }
+        // ② 快手 App 的任一已知页型（含孤岛 ad_video）⇒ 人已经回到快手里了
+        if pageHere(img, includeIslands: true) != nil { return true }
+        // ③ 兜底：顶栏仍是广告胶囊（PC `:3251` 的原始判据，保留 —— 它对广告页最硬）
         let t = sysText(img, PageKinds.bAppTop)
         return t.contains("可领取") || t.contains("已成功领取")
     }
@@ -1248,6 +1314,12 @@ final class Navigator {
         }
 
         // ── ④ 三级返回腿（PC `:3301-3325`；每级动作后抓帧、用顶栏复核）──
+        //
+        // ⛔⛔ §3006 **第三级原来是死的**（真机审计）：`switchToApp` 默认 `nil`
+        //   ⇒ `switchToApp?() ?? false` **恒 false** ⇒ H:HOME+重进这条腿**从不出手**。
+        //   而调用方 `runFunnel` 也一直没传（`_ = browseExternalApp(img, frame: grabFrame)`）
+        //   ⇒ 外部 App 里前两级（左上角返回/侧滑）一失败，就**没有第三级兜底**了。
+        //   ✅ 现在：闭包由调用方注入（`runFunnel` 传真实的 `switchToApp`）。
         let legs: [(String, () -> Bool)] = [
             ("①左上角返回键", { self.extTapBack(frame() ?? img) }),
             ("②右缘侧滑(backEdge)", { self.backEdge() }),
@@ -1258,14 +1330,14 @@ final class Navigator {
             Thread.sleep(forTimeInterval: 3.2)              // PC `:3313` wait(3.2)
             guard let im2 = frame() else { continue }
             if extBackOk(im2) {
-                log("   .. ★已打开外部 App 并上滑 \(n) 次 ⇒ 返回 ⇒ 回广告页"
+                log("   .. ★已打开外部 App 并上滑 \(n) 次 ⇒ 返回 ⇒ **已回到快手/桌面**"
                     + "（返回腿\(name) 生效，进入外部 App=\(entered)）")
                 return true
             }
             let top = sysText(im2, PageKinds.bAppTop)
-            log("   .. 外部 App 返回腿\(name) 未确认回广告页（顶栏 \(top.prefix(26).debugDescription)）⇒ 换下一条")
+            log("   .. 外部 App 返回腿\(name) 未确认回到快手（顶栏 \(top.prefix(26).debugDescription)）⇒ 换下一条")
         }
-        log("   .. ⬜ 已打开外部 App 并上滑 \(n) 次，但三级返回**都没确认回到广告页**"
+        log("   .. ⬜ 已打开外部 App 并上滑 \(n) 次，但三级返回**都没确认回到快手**"
             + "（如实报 ⬜，交给后面 9 轮返回腿兜底）")
         return false
     }
@@ -1511,7 +1583,16 @@ final class Navigator {
                 if handleAppJump(img, frame: grabFrame) {
                     funnelLast[it.element] = now
                     log("   §funnel sys_prompt_allow ★ App 跳转型弹窗已点「打开」，开始外部 App 腿")
-                    _ = browseExternalApp(img, frame: grabFrame)
+                    // ⭐ §3006 第三级返回腿必须有真实闭包（原来传 nil ⇒ 恒 false ⇒ 死腿）
+                    //   闭包语义照 PC `:3309-3312`：`go_home()` + `ensure_app()` = 回桌面点快手图标。
+                    let backToKs: () -> Bool = { [weak self] in
+                        guard let s = self else { return false }
+                        return Navigator.switchToApp(named: "快手", rec: s.rec, ble: s.ble,
+                                                     frame: { s.frameProvider?() },
+                                                     baseW: s.baseW, baseH: s.baseH,
+                                                     yFix: s.yFix, log: { s.log($0) })
+                    }
+                    _ = browseExternalApp(img, frame: grabFrame, switchToApp: backToKs)
                     return true
                 }
                 // ② PC `:3338` 的兜底：点消极项（权限型 / 跳转型定位失败都走这里）
@@ -1555,11 +1636,46 @@ final class Navigator {
             // ⇒ ✅ 改用专用判据 `findConsentAllow`（照 `findBottomPopup` 的同一套做法）：
             //    先排除「不同意」，再找**整词等于**「同意/我同意/接受」的那一枚。
             //
-            // ## ⛔ 闸 = `consent_dialog`（「同意」+「不同意」同现）
-            // ⇒ 只在**协议弹窗**上出手；⛔ 不碰权限弹窗（那走 `sys_prompt_deny` 点消极项）。
+            // ## ⛔⛔⛔ §3005 **原来的闸 `consent_dialog` 是坏的 —— 已删（真机+复算双证）**
+            //
+            // 原写法：`if detect("consent_dialog") != nil, let hit = findConsentAllow(...)`
+            // ⇒ 真机血案（2026-10-17 `_3004b` 真机 30 帧）：百度极速版协议墙上
+            //   `consent_allow hit=true ev=不同意/同意`（判据是好的），
+            //   而 `consent_dialog hit=false`（闸是坏的）⇒ **腿一次都没出手**
+            //   ⇒ 卡在协议墙 **144 秒**（s12~s29 连续 18 帧同一画面）。
+            //
+            // ## 📏 闸为什么恒 false（真帧复算，不是推测）
+            // `Recognizer.findWords` 一个 OCR 框**只认第一个命中的词**后就 `break`：
+            // ```swift
+            // for w in words where Self.fuzzyContains(txt, w) { ...; break }
+            // ```
+            // 而 `"不同意".contains("同意") == true` ⇒ 「不同意」框被词表首项「同意」抢走
+            // ⇒ 「不同意」这个词**永远收不到框** ⇒ `perWord.count=1 < min_hits=2` ⇒ 恒 false。
+            // ```
+            //   真帧复算（s12/s20/s29 三帧一致）：
+            //     consent_dialog  perWord=['同意']        count=1 ⇒ ⛔ 不命中
+            //     去掉 break 后   perWord=['不同意','同意'] count=2 ⇒ 命中
+            // ```
+            // ⚠️ 但 `break` 是**识别层共享语义**（5 个 min_hits≥2 元素都靠它），
+            //   改它影响面过大 ⇒ 按「换坏板子」原则，**改用下面这块本来就完好的板子**。
+            //
+            // ## ✅ 正解：闸由 `findConsentAllow` **自己**承担（它自带三重防误点）
+            // ```swift
+            //   ① ⛔ 含「不同意」⇒ 跳过（⛔ 绝不点拒绝项）
+            //   ② ⛔ 含「登录/登陆/登入」⇒ 跳过（登录红线）
+            //   ③ ✅ 必须**整词等于**「同意/我同意/接受/同意并继续」（⛔ 不用 contains）
+            //   ④ ⛔ 与「不同意」框重叠 ⇒ 跳过（防止同一个块被切开）
+            // ```
+            // ⇒ 这四道就是 PC `dismiss_sys_prompt` 那种「**判据本身就是闸**」的设计，
+            //   ⛔ 不需要外面再套一个 `consent_dialog`。
+            //
+            // ## 📏 真帧复算（`_3004b` 真机帧，POS+NEG）
+            // ```
+            //   POS：百度协议墙 s12~s29  ⇒ 18/18 全部命中「同意」@(225.5,651.2)
+            //   NEG：桌面/系统弹窗/广告页/百度首页 6 帧 ⇒ 6/6 全部 None（零误伤）
+            // ```
             if it.element == "consent_allow" {
-                if detect("consent_dialog", img: img) != nil,
-                   let hit = FeatureEngine.findConsentAllow(img, rec: rec, bw: baseW,
+                if let hit = FeatureEngine.findConsentAllow(img, rec: rec, bw: baseW,
                                                             loginKeys: cfg.settings?.login_keys) {
                     funnelLast[it.element] = now
                     log("   §funnel consent_allow（协议弹窗 ⇒ **同意**）「\(hit.tag)」"
