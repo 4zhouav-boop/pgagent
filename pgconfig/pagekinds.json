@@ -1,0 +1,303 @@
+{
+  "_schema": "pg-pagekinds/1",
+  "_doc": "§2979 页型注册表（iOS 唯一数据源）。**逐字移植**自 PC _dev/anchors/registry.json。⛔ 无 island 概念：PC 的 ad_video 是 order=7 正常参与判序的页型，不排除。⛔ 判序 == PC page_kind() 的 order 升序。",
+  "_source": "_dev/anchors/registry.json",
+  "_source_sha256": "09c2845dcddfa35660d6e889571f2aa8b865e976d3f331b0199bdb4fc4896013",
+  "base": {
+    "BASE_W": 451,
+    "BASE_H": 977
+  },
+  "entries": [
+    {
+      "page_kind": "home",
+      "order": 1,
+      "predicate": "is_homescreen",
+      "roi": [
+        0.33259,
+        0.79836,
+        0.70953,
+        0.88025
+      ],
+      "negative_pairs": [
+        "center",
+        "feed",
+        "stay",
+        "ad_video",
+        "ad_live",
+        "appstore",
+        "landing"
+      ]
+    },
+    {
+      "page_kind": "center",
+      "order": 2,
+      "predicate": "on_center",
+      "roi": [
+        0.0,
+        0.06346,
+        1.0,
+        0.19447
+      ],
+      "negative_pairs": [
+        "feed",
+        "ad_video",
+        "ad_live",
+        "appstore",
+        "landing",
+        "home"
+      ]
+    },
+    {
+      "page_kind": "mall",
+      "order": 3,
+      "predicate": "mall_row",
+      "roi": [
+        0.0,
+        0.1535,
+        1.0,
+        0.2661
+      ],
+      "negative_pairs": [
+        "feed",
+        "ad_video",
+        "ad_live"
+      ]
+    },
+    {
+      "page_kind": "draft",
+      "order": 4,
+      "predicate": "draft",
+      "roi": [
+        0.0,
+        0.06346,
+        1.0,
+        0.1433
+      ],
+      "negative_pairs": [
+        "feed",
+        "center"
+      ]
+    },
+    {
+      "page_kind": "feed",
+      "order": 5,
+      "predicate": "app_chrome",
+      "roi": [
+        0.0,
+        0.06346,
+        1.0,
+        0.1433
+      ],
+      "negative_pairs": [
+        "ad_live",
+        "center",
+        "ad_video"
+      ]
+    },
+    {
+      "page_kind": "stay",
+      "order": 6,
+      "predicate": "is_stay_panel",
+      "roi": [
+        0.0,
+        0.32753,
+        1.0,
+        0.68577
+      ],
+      "negative_pairs": [
+        "ad_video",
+        "ad_live"
+      ]
+    },
+    {
+      "page_kind": "ad_video",
+      "order": 7,
+      "predicate": "ad_capsule",
+      "roi": [
+        0.0,
+        0.05629,
+        1.0,
+        0.16377
+      ],
+      "negative_pairs": [
+        "landing",
+        "appstore",
+        "feed"
+      ]
+    },
+    {
+      "page_kind": "ad_live",
+      "order": 8,
+      "predicate": "ad_live_bot",
+      "roi": [
+        0.0,
+        0.87513,
+        1.0,
+        1.0
+      ],
+      "negative_pairs": [
+        "feed"
+      ]
+    },
+    {
+      "page_kind": "appstore",
+      "order": 9,
+      "predicate": "appstore_wide",
+      "roi": [
+        0.0,
+        0.30706,
+        1.0,
+        1.0
+      ],
+      "negative_pairs": [
+        "ad_video",
+        "landing"
+      ]
+    },
+    {
+      "page_kind": "landing",
+      "order": 10,
+      "predicate": "landing_wide",
+      "roi": [
+        0.0,
+        0.30706,
+        1.0,
+        1.0
+      ],
+      "negative_pairs": [
+        "ad_video",
+        "appstore",
+        "feed"
+      ]
+    },
+    {
+      "page_kind": "ext_landing",
+      "order": 11,
+      "predicate": "ext_landing",
+      "roi": [
+        0.0,
+        0.06346,
+        1.0,
+        0.1433
+      ],
+      "negative_pairs": [
+        "ad_video",
+        "appstore",
+        "feed"
+      ]
+    },
+    {
+      "page_kind": "ad_live",
+      "order": 12,
+      "predicate": "is_live_now",
+      "roi": [
+        0.0,
+        0.87513,
+        1.0,
+        1.0
+      ],
+      "negative_pairs": [
+        "feed",
+        "ad_video"
+      ]
+    },
+    {
+      "page_kind": "home_library",
+      "order": 13,
+      "predicate": "\"资源库\" in txt(roi)",
+      "roi": [
+        0.0,
+        0.06141,
+        1.0,
+        0.1433
+      ],
+      "negative_pairs": [
+        "home_sub",
+        "home_main",
+        "home",
+        "home_today"
+      ]
+    },
+    {
+      "page_kind": "home_today",
+      "order": 14,
+      "predicate": "desk_today",
+      "roi": [
+        0.0,
+        0.0,
+        1.0,
+        0.35
+      ],
+      "negative_pairs": [
+        "home_sub",
+        "home_main",
+        "home",
+        "home_library"
+      ]
+    },
+    {
+      "page_kind": "home_main",
+      "order": 15,
+      "predicate": "desk_main",
+      "roi": [
+        0.33259,
+        0.79836,
+        0.70953,
+        0.88025
+      ],
+      "negative_pairs": [
+        "home_sub",
+        "home_library",
+        "home_today"
+      ]
+    },
+    {
+      "page_kind": "home_sub",
+      "order": 16,
+      "predicate": "\"搜索\" in txt(roi)",
+      "roi": [
+        0.33259,
+        0.79632,
+        0.70953,
+        0.88229
+      ],
+      "negative_pairs": [
+        "home_main",
+        "home_library",
+        "home_today"
+      ]
+    },
+    {
+      "page_kind": "search_result",
+      "order": 17,
+      "predicate": "search_result",
+      "roi": [
+        0.0,
+        0.06346,
+        1.0,
+        0.1863
+      ],
+      "negative_pairs": [
+        "feed",
+        "mall",
+        "ad_video"
+      ]
+    },
+    {
+      "page_kind": "goods_detail",
+      "order": 18,
+      "predicate": "goods_detail",
+      "roi": [
+        0.0,
+        0.84,
+        1.0,
+        1.0
+      ],
+      "negative_pairs": [
+        "feed",
+        "mall",
+        "search_result"
+      ]
+    }
+  ]
+}

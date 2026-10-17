@@ -158,7 +158,9 @@ final class Navigator {
     ///   ⛔ 这与 §2247 记的是**同一类**（当时是 mall 被 feed 抢："商城页也有底栏首页"）。
     ///   📏 一句话：**底栏信号对"我在哪"没有区分度**
     ///      ⇒ 凡靠"页面独有识别性"的页型，必须排在**只靠底栏**的页型之前。
-    /// ⚠️ `ad_video` 是**孤岛**（`island:true`）⇒ 不参与"我在哪"（见下）
+    /// ⚠️ §2979：`ad_video` 仍是 `island:true`，但 **`pageHere(includeIslands: true)` 会判它**。
+    ///    “导航不碰广告页”由**调用方传默认值 `false`** 保证（默认零回归），
+    ///    ⛔ 不是靠识别层假装看不见（那正是四套判据互相否定的根因）。
     static let pageOrder: [String] = [
         "center",
         "ext_landing",   // ⭐ 必须在 feed 之前（外部页底部也有「首页」）
@@ -177,7 +179,43 @@ final class Navigator {
     /// 页面判定（支持 `not` 反向）
     ///
     /// ⭐ 按 `pageOrder` 排序遍历（⛔ 不靠字典顺序，见 `pageOrder` 的说明）
-    func pageHere(_ img: UIImage) -> String? {
+    ///
+    /// # ⭐⭐⭐⭐⭐ §2979 **`includeIslands` —— 把“识别”与“导航”两件事分开**
+    ///
+    /// ## ⛔⛔ 血案（真机 2026-10-17，本轮逐字日志）
+    /// ```
+    /// 13:41:47  已回广告页（第 1 次检查）⇒ 继续等倒计时
+    /// 13:41:50  顶栏还有倒计时 ⇒ 不点胶囊 ✕（连拒 6 轮）
+    /// 13:42:01  ⛔ 点了也离不开广告页 ⇒ 本条不计入完成
+    /// 13:42:02  ✅ 已回广告页（第 1 次检查）      ← 同一时刻两个判据结论相反
+    /// ```
+    /// 根因：`ad_video` 带 `island:true` ⇒ 本函数 `continue` 跳过它 ⇒ **广告页永远 `unknown`**。
+    /// 而元素识别层明明 100% 命中（同帧 `/recogdiag` 原始输出）：
+    /// ```
+    /// ad_capsule {"hit":true,"score":1,"ev":"已成功领取591金币×","x":52,"y":81}
+    /// ad_mark    {"hit":true,"score":1,"ev":"广告","x":348,"y":83}
+    /// 而 page = "(unknown)"
+    /// ```
+    /// ⇒ 于是项目里长出**四套并行判据**（`pageHere` / `looksLikeAdPage`×21 处 /
+    ///   `cfg.pages["ad_video"].check` 直读 / `Runner:377` 死分支），互相否定。
+    ///
+    /// ## ✅ 正解：`island` 的**本意**是“导航不要碰广告页”，⛔ 不是“识别层假装看不见”
+    /// PC 早就是这么分的（`_dev/anchors/registry.json`）：**18 个页型全部参与判序**，
+    /// `ad_video` 是 **order=7 的正常页型**；“不碰它”由**消费侧**（`PAGE_PLAN`）表达。
+    /// ```python
+    /// PAGE_PLAN["ad_video"] = "等倒计时(30~60 随机) → 点 CTA 做转化 → 点 ✕ 收奖励"
+    /// ```
+    ///
+    /// ⇒ 本函数拆成两个语义：
+    ///   · `includeIslands: false`（默认）—— **导航用**：孤岛页不参与“我在哪” ⇒ 行为与以前**完全一致**
+    ///   · `includeIslands: true`  —— **识别用**：孤岛页正常参与判序 ⇒ 广告页能判成 `ad_video`
+    ///     ⛔ 调用方拿到 `ad_video` 后自己决定“不碰”（这才是 `PAGE_PLAN` 的语义）
+    ///
+    /// ⛔ 为什么不直接把 `island` 删掉：那会让**所有**导航分支突然“认得”广告页 ⇒
+    ///   行为面过大（advisor 提醒正确）。用参数控制 ⇒ **默认零回归**，只有需要判断广告页的地方显式开启。
+    ///
+    /// - Parameter includeIslands: 是否让孤岛页（如 `ad_video`）参与判序。见上方说明。
+    func pageHere(_ img: UIImage, includeIslands: Bool = false) -> String? {
         // ① 先按显式优先级排；② 没在优先级表里的页型**排到最后**（新加的页型不会抢占）
         let names = cfg.pages.keys.sorted { a, b in
             let ia = Self.pageOrder.firstIndex(of: a) ?? Int.max
@@ -186,7 +224,8 @@ final class Navigator {
         }
         for pname in names {
             guard let p = cfg.pages[pname] else { continue }
-            if p.island == true { continue }              // 孤岛页不参与"我在哪"
+            // ⭐ §2979：默认跳过孤岛页（导航语义）；`includeIslands=true` 时正常判（识别语义）
+            if p.island == true, !includeIslands { continue }
             guard let checks = p.check else { continue }
             var ok = true
             for c in checks where detect(c, img: img) == nil { ok = false; break }

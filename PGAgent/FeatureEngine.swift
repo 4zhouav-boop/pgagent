@@ -1187,20 +1187,32 @@ final class FeatureEngine {
     /// ⛔ 三级**都是"广告页独有"的信号**，⛔ 不是放宽（快手内容页没有胶囊 ✕）。
     static func looksLikeAdPage(_ img: UIImage, rec: Recognizer, nav: Navigator,
                                bw: Double, bh: Double, roi: [Double]? = nil) -> Bool {
-        // ① PC 原判据（顶栏原文子串，⛔ 不靠元素匹配）
+        // ⭐⭐⭐⭐⭐ §2979 **本函数已改为统一识别层的薄封装** —— ⛔ 不再自己写一套判据
         //
-        // ⭐⭐⭐⭐⭐ §2645 **ROI 改走 `adTopROI(...)`（唯一读取点）**
-        //   改动前这里硬编码 `CGRect(x: 0, y: 62, width: bw, height: 78)`；
-        //   `roi == nil`（老配置 / 调用方没传）⇒ `adTopROI` 返回的**逐字就是它**。
-        let items = rec.ocrRegion(img, rect: adTopROI(roi, bw: bw, bh: bh),
-                                  minConfidence: 0.3)
-        let t = items.map(\.0).joined()
-        if t.contains("可领取") || t.contains("已成功领取") { return true }
-        // ② 兜底：倒计时胶囊形态（`Ns后可领取N金币`）
-        if t.contains("秒") && t.contains("金币") { return true }
-        // ③ 兜底：胶囊 ✕ 模板（纯像素；`ad/pill_x.png`）
-        if nav.detect("pill_x", img: img) != nil { return true }
-        return false
+        // ## ⛔ 为什么必须改（第一性原理）
+        // 本函数原来是一套**独立 OCR 判据**，而项目里同时还有：
+        //   · `Navigator.pageHere()`（因 `island:true` 永远判不出广告页）
+        //   · `Navigator:1166` 直读 `cfg.pages["ad_video"].check`
+        //   · `Runner:377` 的 `page == "ad_video"` 死分支
+        // ⇒ **四套判据互相否定**。真机逐字证据（2026-10-17）：
+        // ```
+        // 13:41:47  已回广告页（第 1 次检查）⇒ 继续等倒计时
+        // 13:42:01  ⛔ 点了也离不开广告页 ⇒ 本条不计入完成
+        // 13:42:02  ✅ 已回广告页（第 1 次检查）      ← 同一时刻结论相反
+        // ```
+        // PC 只有**一份**判据（`page_kind()` + `_pred_ad_capsule`），且
+        // `_dev/anchors/registry.json` 里 `ad_video` 是 **order=7 的正常页型**。
+        //
+        // ⇒ 现在本函数 = `PageKinds.detect(...).kind == .adVideo`（统一层），
+        //    `ad_video` 判据在 `PageKinds.entries` order=7（**逐字移植** PC `_pred_ad_capsule`）。
+        //    保留本函数名是为了**不改 21 处调用点**（改签名要全链路回归），但**判据只有一个来源**。
+        //
+        // ⚠️ `roi` 参数保留兼容，但不再使用 —— 统一层用 PC 的 `B_CAPSULE=(0,55,451,160)`
+        //    宽带（PC 注释：窄带 `BOX_TOP` 的 y1=140 会把 y≈140 的胶囊**恰好切掉**）。
+        _ = (roi, bw, bh)
+        let sheet = PageKinds.OcrSheet(img: img, ocr: RecognizerOcr(rec: rec))
+        // ⭐ 桌面子判据不参与（照 PC 默认 `_DESKTOP_KINDS` 不启用）
+        return PageKinds.detectFrom(sheet: sheet).kind == .adVideo
     }
 
     /// ⭐⭐⭐⭐⭐ §2832 **等待期间的"只补全"闸** —— 照 PC `click_toast_x` **第一段**（L4333）

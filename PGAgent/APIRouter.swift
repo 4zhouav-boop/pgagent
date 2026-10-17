@@ -418,9 +418,24 @@ final class APIRouter {
             guard let c = cfgStore.cfg else {
                 return .json(["ok": false, "error": "配置未加载"], status: 500)
             }
-            let nav = Navigator(cfg: c, rec: makeRecognizer(), ble: ble) { _ in }
+            let rec = makeRecognizer()
+            let nav = Navigator(cfg: c, rec: rec, ble: ble) { _ in }
+            // ⭐ §2979 两套结果**同时返回**，便于对拍（过渡期用，稳定后只留 unified）
             let here = nav.pageHere(img) ?? "unknown"
-            return .json(["ok": true, "page": here])
+            let hereWithIslands = nav.pageHere(img, includeIslands: true) ?? "unknown"
+            let pk = PageKinds.detect(img, ocr: RecognizerOcr(rec: rec))
+            return .json([
+                "ok": true,
+                "page": here,
+                // ⭐ 统一识别层结果（§2979 新增，唯一判据来源）
+                "unified": pk.kind.rawValue,
+                "evidence": pk.evidence,
+                "order": pk.order == Int.max ? -1 : pk.order,
+                // 旧导航判据（含 island 跳过）—— 过渡期供对拍
+                "navLegacy": here,
+                // 导航判据但**让孤岛页参与**（§2979 的 includeIslands）
+                "navWithIslands": hereWithIslands,
+            ])
 
         case ("POST", "/nav"):
             let (im, err) = loadImage(r.query)
