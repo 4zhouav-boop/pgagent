@@ -19,6 +19,18 @@ final class Navigator {
 
     private var funnelLast: [String: Date] = [:]
 
+    /// ⭐ §3003 **帧提供者**（可选注入）—— 供 `runFunnel` 里的外部 App 腿复核用。
+    ///
+    /// ## 为什么要这个属性（⛔ 不是多此一举）
+    /// `runFunnel` 有 **8 个调用点**（`FeatureEngine` 7 处 + `Runner` 1 处），
+    /// 而外部 App 腿需要「点完再抓一帧复核」。
+    /// 若给 `runFunnel` 加参数 ⇒ **8 个调用点全要改**（违背「改动最小化」）。
+    /// ⇒ 改成属性注入：调用方启动时设一次，`runFunnel` 内部按需调用。
+    ///
+    /// ⛔ 不设也能跑（`nil` ⇒ 拿不到新帧就退回入参那张，`⛔ 不因此整段放弃`）。
+    ///   但那样外部 App 腿的复核会是**盲的**，所以 `Runner` 启动时会注入。
+    var frameProvider: (() -> UIImage?)?
+
     init(cfg: PGConfig, rec: Recognizer, ble: BLEController, log: @escaping (String) -> Void) {
         self.cfg = cfg
         self.rec = rec
@@ -808,6 +820,519 @@ final class Navigator {
         return true
     }
 
+    // MARK: - ⭐⭐⭐⭐⭐ §3003 系统弹窗：App 跳转型 ⇒ 点「打开」外跳（照 PC `handle_app_jump`）
+
+    /// PC 的 `SYS_ALLOW` 词表（`_1377_ad_loop.py:3075` 逐字）。
+    ///
+    /// ```python
+    /// SYS_ALLOW = ("打开", "允许", "继续", "好")   # §1699；「打开」优先
+    /// ```
+    /// ⚠️ PC 在 `:6003` 自己写着「⛔ 绝不点继续」⇒ 但 `SYS_ALLOW` 里仍留着「继续」。
+    ///    本实现**逐字照抄**（含「继续」），顺序也不改 —— 因为 PC 的循环是
+    ///    `for kw in SYS_ALLOW` 且命中即 break ⇒ **顺序即优先级**，「打开」在第一位。
+    static let sysAllowKeys = ["打开", "允许", "继续", "好"]
+
+    /// PC 的 `SYS_DENY` 词表（`_1377_ad_loop.py:3042` 逐字）。
+    ///
+    /// ```python
+    /// SYS_DENY = ("不允许", "取消", "拒绝")     # 一律**只点消极项**
+    /// ```
+    static let sysDenyKeys = ["不允许", "取消", "拒绝"]
+
+    /// PC 的按钮定位框（`_1377_ad_loop.py:3041/417/422` 逐字）。
+    ///
+    /// ```python
+    /// SYS_BTN_BAND = (0, 500, 451, 650)    # 按钮带（形态命中时首选）
+    /// BOX_SYSBTN   = (60, 480, 420, 578)   # 「取消」窄条（文案命中时首选，便宜）
+    /// BOX_SYSBTN2  = (40, 460, 430, 600)   # 加宽兜底
+    /// ```
+    static let sysBtnBand = CGRect(x: 0, y: 500, width: 451, height: 150)
+    static let boxSysBtn  = CGRect(x: 60, y: 480, width: 360, height: 98)
+    static let boxSysBtn2 = CGRect(x: 40, y: 460, width: 390, height: 140)
+
+    /// PC `BOX_SYS`（标题行，`_1377_ad_loop.py:404` 逐字）。
+    ///
+    /// ```python
+    /// BOX_SYS = (100, 458, 360, 518)    # iOS 系统跳转弹窗标题「想要打开」
+    /// ```
+    /// ⚠️ ⛔ 本常量**只用于「复核弹窗还在不在」**（`extPromptStill`），不用于点按钮。
+    ///    真机 iOS 26.1 实测标题已上移到 `y∈[447.28,470.04]`（PC 自己预告过
+    ///    「弹窗位置会随 iOS 版本浮动」`_1377:3353`）⇒ 复核时用**放宽版**。
+    static let boxSysLoose = CGRect(x: 40, y: 430, width: 380, height: 70)
+
+    /// PC `BOX_MID`（`_1377_ad_loop.py:405` 逐字）—— 「形态判据」读的**中段**。
+    ///
+    /// ```python
+    /// BOX_MID = (0, 550, 451, 600)
+    /// ```
+    /// ⚠️ PC 用它读 `shape_hit`（「不允许」+「允许」）。真机 iOS 26.1 实测按钮行
+    ///    在 `y∈[512.6,535.4]` ⇒ PC 的 `y0=550` **已经在按钮下方** ⇒ 会 miss。
+    ///    ⇒ 本实现用**放宽版**（照 `sys_prompt_title` 的同一条理由：
+    ///      PC 自己写着「弹窗位置会随 iOS 版本浮动」`:3353`）。
+    static let boxSysMid = CGRect(x: 0, y: 480, width: 451, height: 110)
+
+    /// ⭐ PC `text()` 的等价物：读框内 OCR 并拼成一串（去空格）。
+    ///
+    /// PC 原写法（`_1377:3367`）：
+    /// ```python
+    /// t = txt(img, BOX_SYS).replace(" ", "").replace("\u3000", "")
+    /// ```
+    /// ⇒ ⛔ 关键：**去空格**。不改的话「想要 打开」这种被 Vision 拆开的情况会漏判。
+    private func sysText(_ img: UIImage, _ box: CGRect) -> String {
+        let ws = rec.ocrRegion(img, rect: box,
+                               minConfidence: cfg.settings?.ocr_min_confidence ?? 0.3)
+        return ws.map { $0.0 }.joined()
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "\u{3000}", with: "")
+    }
+
+    /// ⭐ PC `_ext_prompt_still`（`_1377:3170-3173` 逐字）：复核「想要打开」弹窗**是否仍在**。
+    ///
+    /// ```python
+    /// t = txt(im, BOX_SYS).replace(" ", "").replace("\u3000", "")
+    /// return ("想要打开" in t) or (("想要" in t) and ("打开" in t))
+    /// ```
+    func extPromptStill(_ img: UIImage) -> Bool {
+        let t = sysText(img, Self.boxSysLoose)
+        return t.contains("想要打开") || (t.contains("想要") && t.contains("打开"))
+    }
+
+    /// ⭐⭐⭐⭐⭐ §3003 **App 跳转型系统弹窗 ⇒ 点肯定项「打开」**
+    ///
+    /// ## 逐字移植 PC `_1377_ad_loop.py:3182-3246 handle_app_jump`
+    ///
+    /// ```python
+    /// def handle_app_jump(img, tag):
+    ///     if not EXT_OPEN: return False
+    ///     tt0 = txt(img, BOX_SYS)...
+    ///     title_hit = ("想要打开" in tt0) or (("想要" in tt0) and ("打开" in tt0))
+    ///     if not title_hit:
+    ///         # 纯 shape_hit（不允许+允许 = 权限类）⇒ ⛔ 不算 App 跳转
+    ///         return False
+    ///     # 找肯定项：SYS_BTN_BAND → BOX_SYSBTN → BOX_SYSBTN2；词表 SYS_ALLOW，「打开」优先
+    ///     for bb in (SYS_BTN_BAND, BOX_SYSBTN, BOX_SYSBTN2):
+    ///         for tt, cx, cy in words(img, bb):
+    ///             for kw in SYS_ALLOW:
+    ///                 if kw in tt:
+    ///                     click_at(plog(cx, cy))
+    /// ```
+    ///
+    /// ## ⛔⛔ 三条**必须照抄**的细节（我差点踩坑，逐条记证据）
+    /// ① **点击用「单词框自己的中心」**（`cx, cy`），⛔ 不是并集框。
+    ///    真机实测（`_var/_3001_stuck/now2.jpg`）：词表「打开」同时命中
+    ///    **标题**「"快手极速版"想要打开"百度"」`x∈[92.2,358.8]` 与
+    ///    **按钮**「打开」`x∈[289.3,331.9]`；`Recognizer` 会把同词所有框**并起来**
+    ///    ⇒ 并集中心 `(225.5, 491.3)`，而按钮真实中心 `(310.6, 524.0)`
+    ///    ⇒ **偏 85px，正好点在两钮之间的空白处**。
+    ///    这恰是 PC `:3346-3347` 记的坑：「取消 x≈148、打开 x≈302、CTA x≈225 夹在中间」。
+    /// ② **找不到肯定项 ⇒ ⛔ 不放枪**（返回 false），交回 `dismissSysPrompt` 点消极项。
+    ///    PC `:3217-3219` 逐字：「认出 App 跳转型弹窗但没定位到肯定项 ⇒ ⛔ 不放枪」。
+    /// ③ **权限型必须排除**：`title_hit` 不成立就直接 false（PC `:3199-3203`）。
+    ///    ⇒ 定位/通知/相机那种「不允许+允许」**永远走不到这里**，仍由 deny 点取消。
+    ///
+    /// - Returns: `true` = 已点「打开」（⛔ 不代表弹窗一定消失，调用方要复核）。
+    /// - Parameter frame: 抓新帧的闭包（`Navigator` 自己没有取帧能力，见上面的说明）。
+    @discardableResult
+    func handleAppJump(_ img: UIImage, frame: () -> UIImage?) -> Bool {
+        // ── ① 标题闸：只认 App 跳转型 ──
+        let t = sysText(img, Self.boxSysLoose)
+        let titleHit = t.contains("想要打开") || (t.contains("想要") && t.contains("打开"))
+        guard titleHit else { return false }        // ⛔ 权限型/其他弹窗 ⇒ 不在这里出手
+
+        // ── ② 定位肯定项：SYS_BTN_BAND → BOX_SYSBTN → BOX_SYSBTN2（PC 顺序）──
+        //   ⛔ 每个候选词用**它自己的框中心**，⛔ 不并框。
+        let bands: [(String, CGRect)] = [
+            ("按钮带(det)", Self.sysBtnBand),
+            ("窄条", Self.boxSysBtn),
+            ("加宽条", Self.boxSysBtn2),
+        ]
+        var picked: (String, Double, Double, String)?
+        for (bandName, bb) in bands {
+            let ws = rec.ocrRegion(img, rect: bb,
+                                   minConfidence: cfg.settings?.ocr_min_confidence ?? 0.3)
+            for (txt, px, _c) in ws {
+                let s = txt.trimmingCharacters(in: .whitespaces)
+                for kw in Self.sysAllowKeys where s.contains(kw) {
+                    // ⭐ PC `words()` 返回的 `cx, cy` 就是这一个框的中心
+                    picked = (s, Double(px.midX), Double(px.midY),
+                              "\(kw) [\(bandName)]")
+                    break
+                }
+                if picked != nil { break }
+            }
+            if picked != nil { break }
+        }
+        guard let (evText, cx, cy, how) = picked else {
+            log("   .. !! 认出 App 跳转型弹窗（标题命中=True）但**没定位到肯定项**"
+                + " \(Self.sysAllowKeys.joined(separator: "/")) ⇒ ⛔ 不放枪（不改动，交回原点逻辑）")
+            return false
+        }
+
+        // ── ③ 登录红线（用户令：含「登录」的一律不点）──
+        let loginKeys = cfg.settings?.login_keys ?? []
+        if loginKeys.contains(where: { evText.contains($0) }) {
+            log("   .. ⛔ 肯定项「\(evText)」含登录词 ⇒ 不点（用户令：登录不点）")
+            return false
+        }
+
+        log("   .. ★★ App 跳转型弹窗 ⇒ 按用户令点**肯定项** \(how)"
+            + " @(\(Int(cx)),\(Int(cy))) ev=\(evText)（词表 \(Self.sysAllowKeys.joined(separator: "/"))）")
+
+        // ── ④ 点击 + 逐级升级复核（照 PC `:3231-3246`）──
+        //   PC 血案（`_1699_ext_accept3.log:49`）：单发 `P:+C:L` 对 iOS「想要打开」弹窗
+        //   **20 秒内纹丝不动** ⇒ 随后还**假报「已打开外部 App」**（腿的复核只看顶栏，
+        //   从没离开广告页 ⇒ 恒 true）—— 这是**假绿**，必须堵死。
+        //   ⇒ 四种点法逐级升级，每级抓帧复核弹窗是否消失，任一消失才算「打开」。
+        //   ⛔ 四种都没让弹窗消失 ⇒ 返回 false（如实报，⛔ 不伪造）。
+        //
+        // ⚠️ 帧来源：`Navigator` 自己**没有** `grab()`（真机确认：`grab` 只在
+        //   `FeatureEngine` 里）。所以帧必须由调用方通过 `frame` 闭包传入
+        //   —— 与本文件 `switchToApp(named:rec:ble:frame:)` 同一口径。
+        //
+        // ⚠️ 点击方式只有两种可用原语（`BLEController` 真机核实）：
+        //   · `moveAndClick`（`P:` 移动 + `D:` 长按 600ms，PC 的 `click_at`）
+        //   · `atomicClickCmd`（`Q:` 固件移+按+放一条 HID 序列，PC 的 `_ext_q`）
+        //   ⛔ 双击/长按 120ms **没有对应原语** ⇒ 不自造。PC 那两级是为绕过
+        //      「P:+C:L 无效」而加的，本实现先只上 PC 已验证的这两个主路径，
+        //      两个都不成 ⇒ 如实返回 false（照 PC `:3245` 的口径）。
+        let attempts: [(String, () -> Bool)] = [
+            ("①单击 P:+C:L", { self.tapPoint(cx, cy, why: "App跳转肯定项(单击)") }),
+            ("②原子 Q:x,y", { self.tapPoint(cx, cy, why: "App跳转肯定项(原子)", atomic: true) }),
+        ]
+        for (name, fire) in attempts {
+            _ = fire()
+            Thread.sleep(forTimeInterval: 1.3)
+            guard let im2 = frame() else { continue }
+            if !extPromptStill(im2) {
+                log("   .. ★弹窗已消失（\(name)）⇒ 已进入外部 App")
+                return true
+            }
+            log("   .. ⚠️ 弹窗仍在（\(name)）⇒ 换下一种点法")
+        }
+        log("   .. ⬜ 四种点法都**没让「想要打开」弹窗消失** ⇒ 如实报 ⬜，交回原点（点消极项）")
+        return false
+    }
+
+    /// ⭐⭐⭐⭐⭐ §3003 **系统弹窗兜底：点消极项**（照 PC `dismiss_sys_prompt` `:3342-3391`）
+    ///
+    /// ## PC 逐字（`_1377_ad_loop.py:3363-3385`）
+    /// ```python
+    /// _t  = txt(img, BOX_SYS).replace(" ", "").replace("\u3000", "")
+    /// _m  = txt(img, BOX_MID).replace(" ", "").replace("\u3000", "")
+    /// title_hit = ("想要打开" in _t) or (("想要" in _t) and ("打开" in _t))
+    /// shape_hit = ("不允许" in _m) and ("允许" in _m)
+    /// if not (title_hit or shape_hit):        # ⭐ **OR** —— 不是 AND！
+    ///     return False
+    /// order = (SYS_BTN_BAND, BOX_SYSBTN2, BOX_SYSBTN) if shape_hit \
+    ///         else (BOX_SYSBTN, BOX_SYSBTN2, SYS_BTN_BAND)
+    /// for bb in order:
+    ///     for tt, cx, cy in words(img, bb):    # ⛔ 逐框，用**这一枚**框的中心
+    ///         for kw in SYS_DENY:
+    ///             if kw in tt: click_at(plog(cx, cy)); return True
+    /// return False
+    /// ```
+    ///
+    /// ## ⛔⛔ 为什么原来是错的（本轮三层缺陷的第 3 层）
+    /// iOS 的配置把 PC 的 **OR**（`if not (title_hit or shape_hit)`）
+    /// 写成了 `require` **AND 前置闸** ⇒ 两条腿互相 `continue` 跳过 ⇒ 弹窗无人处理。
+    ///
+    /// ## ⛔ 点击用**单词框自己的坐标**（不是我这次才发现的，是 PC 本来就这样）
+    /// 真机实测（`_var/_3001_stuck/now2.jpg`）：元素表会把同词所有框**并起来**，
+    /// 而「取消/打开」和标题里的「想要打开」会撞词 ⇒ 并集框中心在两钮之间（偏 85px）。
+    /// PC 用 `for tt,cx,cy in words(...)` ⇒ **每一枚框用自己的中心**。
+    ///
+    /// - Returns: `true` = 已点某个消极项。
+    @discardableResult
+    func dismissSysPrompt(_ img: UIImage) -> Bool {
+        let t = sysText(img, Self.boxSysLoose)
+        let m = sysText(img, Self.boxSysMid)
+        let titleHit = t.contains("想要打开") || (t.contains("想要") && t.contains("打开"))
+        let shapeHit = m.contains("不允许") && m.contains("允许")
+        guard titleHit || shapeHit else { return false }        // ⭐ OR（照 PC `:3372`）
+
+        // PC `:3378-3381`：形态型 ⇒ 先宽后窄；文案型 ⇒ 先窄后宽
+        let order: [(String, CGRect)] = shapeHit
+            ? [("按钮带(det)", Self.sysBtnBand),
+               ("加宽条", Self.boxSysBtn2),
+               ("窄条", Self.boxSysBtn)]
+            : [("窄条", Self.boxSysBtn),
+               ("加宽条", Self.boxSysBtn2),
+               ("按钮带(det)", Self.sysBtnBand)]
+
+        for (bandName, bb) in order {
+            let ws = rec.ocrRegion(img, rect: bb,
+                                   minConfidence: cfg.settings?.ocr_min_confidence ?? 0.3)
+            for (txt, px, _c) in ws {
+                let s = txt.trimmingCharacters(in: .whitespaces)
+                for kw in Self.sysDenyKeys where s.contains(kw) {
+                    log("   .. ★系统弹窗 ⇒ 点**消极项**「\(s)」(\(kw) [\(bandName)])"
+                        + " @(\(Int(px.midX)),\(Int(px.midY)))"
+                        + "（title=\(titleHit) shape=\(shapeHit)）")
+                    return tapPoint(Double(px.midX), Double(px.midY),
+                                    why: "系统弹窗消极项「\(s)」")
+                }
+            }
+        }
+        log("   .. !! 系统弹窗形态命中（title=\(titleHit) shape=\(shapeHit)）"
+            + "但**没定位到消极项** \(Self.sysDenyKeys.joined(separator: "/")) ⇒ 不放枪")
+        return false
+    }
+
+    // MARK: - ⭐⭐⭐⭐⭐ §3003 外部 App 腿（照 PC `browse_external_app`）
+
+    /// PC 的 `EXT_BACK_KEYS` / `EXT_BACK_APP_KEYS`（`_1377_ad_loop.py:3102-3103` 逐字）。
+    ///
+    /// ```python
+    /// EXT_BACK_KEYS = ("返回", "关闭", "＜", "<")        # 通用返回文案（层 1）
+    /// EXT_BACK_APP_KEYS = ("快手",)                      # ★仅**同层加权**（⛔ 不当门槛）
+    /// ```
+    static let extBackKeys = ["返回", "关闭", "＜", "<"]
+    static let extBackAppKeys = ["快手"]
+
+    /// PC 的 `BOX_TL`（`_1377_ad_loop.py:3099` 逐字）—— 左上角返回控件带。
+    ///
+    /// ```python
+    /// BOX_TL = (0, 12, 240, 68)      # ★收窄：y1 68 ⇒ 天然**排除 y≈80 的 webview 标题**
+    ///                                #   y0 12 含时钟(y≈21) ⇒ 靠 _CLOCK_RE 形状排除
+    /// ```
+    static let boxTL = CGRect(x: 0, y: 12, width: 240, height: 56)
+
+    /// 状态栏时钟形状正则（PC `_1377:3101`）：`^\d{1,2}:\d{2}$`。
+    ///
+    /// ⛔ 时钟是必须在返回带内**主动排除**的唯一东西 —— 否则 `12:34` 会被当成返回文案。
+    private static let clockRegex = try! NSRegularExpression(pattern: "^\\d{1,2}:\\d{2}$")
+
+    private static func isClockText(_ s: String) -> Bool {
+        let r = NSRange(s.startIndex..., in: s)
+        return clockRegex.firstMatch(in: s, range: r) != nil
+    }
+
+    /// PC `pick_ext_back`（`_1377_ad_loop.py:3106-3126` 逐字）—— **纯判据**，零副作用。
+    ///
+    /// ```python
+    /// def pick_ext_back(ws):
+    ///     cands = []
+    ///     for t, cx, cy in ws:
+    ///         s = (t or "").strip()
+    ///         if not s or _CLOCK_RE.match(s): continue        # 时钟 ⇒ 排除
+    ///         tier = 1 if any(k in s for k in EXT_BACK_KEYS) else 0
+    ///         wgt  = 0 if any(k in s for k in EXT_BACK_APP_KEYS) else 1
+    ///         cands.append((tier, wgt, cy, s, cx, cy))
+    ///     if not cands: return None
+    ///     cands.sort(key=lambda c: (c[0], c[1], c[2]))        # tier → wgt → y 升序
+    ///     return (cands[0][3], cands[0][4], cands[0][5])
+    /// ```
+    ///
+    /// 层序（小者优先）：
+    /// ```
+    /// tier 0 = **状态栏面包屑** —— 带内**非时钟**文本（结构判据；⛔ 不认 App 名）
+    /// tier 1 = 通用返回文案（返回 / 关闭 / ＜ / <）
+    /// ```
+    /// 同层内：含「快手」的**加权优先**（⛔ 只是加权，不是门槛），再按 y 升序。
+    static func pickExtBack(_ ws: [(String, CGRect, Double)]) -> (String, Double, Double)? {
+        var cands: [(Int, Int, Double, String, Double, Double)] = []
+        for (t, px, _c) in ws {
+            let s = t.trimmingCharacters(in: .whitespaces)
+            if s.isEmpty { continue }
+            if isClockText(s) { continue }                  // ⛔ 时钟 ⇒ 排除
+            let tier = extBackKeys.contains(where: { s.contains($0) }) ? 1 : 0
+            let wgt = extBackAppKeys.contains(where: { s.contains($0) }) ? 0 : 1
+            cands.append((tier, wgt, Double(px.midY), s,
+                          Double(px.midX), Double(px.midY)))
+        }
+        guard !cands.isEmpty else { return nil }
+        cands.sort { a, b in
+            if a.0 != b.0 { return a.0 < b.0 }
+            if a.1 != b.1 { return a.1 < b.1 }
+            return a.2 < b.2
+        }
+        let c = cands[0]
+        return (c.3, c.4, c.5)
+    }
+
+    /// PC `_ext_back_ok`（`_1377_ad_loop.py:3249-3252` 逐字）—— **复核「已回到广告页」**。
+    ///
+    /// ```python
+    /// def _ext_back_ok(im):
+    ///     _t = txt(im, BOX_TOP)
+    ///     return ("可领取" in _t) or ("已成功领取" in _t)
+    /// ```
+    /// ⇒ 判据 = 顶栏重新读到**广告胶囊**（倒计时/已领取）。
+    func extBackOk(_ img: UIImage) -> Bool {
+        let t = sysText(img, PageKinds.bAppTop)
+        return t.contains("可领取") || t.contains("已成功领取")
+    }
+
+    /// PC `_ext_tap_back`（`_1377_ad_loop.py:3255-3270` 逐字）—— 点左上角返回。
+    ///
+    /// ⛔ 找不到**不放枪**（返回 false，由调用方走别的腿）。
+    @discardableResult
+    func extTapBack(_ img: UIImage) -> Bool {
+        let ws = rec.ocrRegion(img, rect: Self.boxTL,
+                               minConfidence: cfg.settings?.ocr_min_confidence ?? 0.3)
+        guard let (s, cx, cy) = Self.pickExtBack(ws) else {
+            log("   .. ⛔ 外部 App 左上角**没 OCR 到返回控件**（带 \(Self.boxTL)；"
+                + "需非时钟文本或 \(Self.extBackKeys.joined(separator: "/"))）⇒ 不放枪")
+            return false
+        }
+        log("   .. ★外部 App 返回：左上角命中 \(s.debugDescription) @(\(Int(cx)),\(Int(cy))) ⇒ 点它自己的坐标")
+        return tapPoint(cx, cy, why: "外部App左上角返回")
+    }
+
+    /// ⭐⭐⭐⭐⭐ §3003 **`browseExternalApp`——逐字移植 PC `_1377_ad_loop.py:3273-3325`**
+    ///
+    /// ## 用户令（PC `:3276-3277` 逐字，2026-10-06）
+    /// > 「打开外部程序授权不要取消 要打开然后做从下往上滑动5-8次，
+    /// >   间隔3-5秒，然后点击左上角返回按钮返回。」
+    ///
+    /// ## PC 原逻辑（四步）
+    /// ```python
+    /// _ns = random.randint(5, 8)                       # ① 上滑 5~8 次
+    /// wait(1.6); im0 = grab(...)
+    /// EXT_ENTERED[0] = not _ext_back_ok(im0)           # ② 复核外部 App 是否真的接管
+    /// for _i in range(_ns):
+    ///     cmd(SWIPE); wait(random.uniform(3.0, 5.0))   # ③ 每次间隔 3~5s
+    /// im = grab(...)
+    /// if _ext_back_ok(im): EXT_BACK_OK[0]=True; return True
+    /// # ④ 三级返回腿：
+    /// for _i, _name in enumerate(("①左上角返回键", "②右缘侧滑 SWIPE_EDGE", "③H:HOME+ensure_app 重进")):
+    ///     ...
+    /// ```
+    ///
+    /// ## ⛔ 为什么要复核「外部 App 是否真的接管」（PC `:3284-3291` 血案）
+    /// 「点『打开』后**顶栏仍是广告胶囊** ⇒ 外部 App 似未接管；仍按用户令上滑，但
+    ///   本次**不算已浏览外部 App**（⬜）」—— ⛔ 不假绿。
+    ///
+    /// ## ⛔ 三级返回的 iOS 对应（⛔ 不自造，逐条说明依据）
+    /// | PC | iOS 对应 | 依据 |
+    /// |---|---|---|
+    /// | ①左上角返回键 | `extTapBack`（`pickExtBack` 挑词） | PC `:3255` 逐字移植 |
+    /// | ②`SWIPE_EDGE` 右缘侧滑 | `backEdge()`（`B:` 固件返回手势） | `BLEController.backGestureCmd` 注释：固件 `B:` = **iOS 返回手势(左边缘右滑)**；PC 的 `SWIPE_EDGE` 也是右缘侧滑，同语义 |
+    /// | ③`H:HOME`+`ensure_app` | `switchToApp`（`H:HOME` + 上滑 ×2 + 点图标） | `Navigator.switchToApp` 已真机验证（§2364 命令表） |
+    ///
+    /// - Returns: `true` = 已复核「回到广告页」；`false` = 三级都没确认（⛔ 如实报，不伪造成功）。
+    @discardableResult
+    func browseExternalApp(_ img: UIImage,
+                           frame: () -> UIImage?,
+                           switchToApp: (() -> Bool)? = nil) -> Bool {
+        // PC `:3281` 逐字：`_ns = random.randint(5, 8)`
+        let n = Int.random(in: 5...8)
+        Thread.sleep(forTimeInterval: 1.6)                  // PC `:3285` wait(1.6)
+
+        // ── ② 复核外部 App 是否真的接管（PC `:3286-3291`）──
+        var entered = false
+        if let im0 = frame() {
+            entered = !extBackOk(im0)
+            if !entered {
+                log("   .. ⚠️ 点「打开」后**顶栏仍是广告胶囊** ⇒ 外部 App 似未接管；"
+                    + "仍按用户令上滑 \(n) 次，但本次**不算已浏览外部 App**（⬜）")
+            }
+        }
+
+        // ── ③ 上滑 n 次，每次间隔 random(3.0...5.0)（PC `:3292-3295`）──
+        log("   .. ★已打开外部 App ⇒ **上滑 \(n) 次**，每次间隔 3~5s（用户口径）")
+        let swipeCmd = BLEController.swipeNextVideo(speed: .fast,
+                                                    baseW: baseW, baseH: baseH, yFix: yFix)
+        for _ in 0..<n {
+            _ = ble.send(swipeCmd)
+            Thread.sleep(forTimeInterval: Double.random(in: 3.0...5.0))
+        }
+
+        if let im = frame(), extBackOk(im) {
+            log("   .. ★已打开外部 App 并上滑 \(n) 次 ⇒ 返回 ⇒ 回广告页（进入外部 App=\(entered)）")
+            return true
+        }
+
+        // ── ④ 三级返回腿（PC `:3301-3325`；每级动作后抓帧、用顶栏复核）──
+        let legs: [(String, () -> Bool)] = [
+            ("①左上角返回键", { self.extTapBack(frame() ?? img) }),
+            ("②右缘侧滑(backEdge)", { self.backEdge() }),
+            ("③H:HOME+回快手", { switchToApp?() ?? false }),
+        ]
+        for (name, fire) in legs {
+            _ = fire()
+            Thread.sleep(forTimeInterval: 3.2)              // PC `:3313` wait(3.2)
+            guard let im2 = frame() else { continue }
+            if extBackOk(im2) {
+                log("   .. ★已打开外部 App 并上滑 \(n) 次 ⇒ 返回 ⇒ 回广告页"
+                    + "（返回腿\(name) 生效，进入外部 App=\(entered)）")
+                return true
+            }
+            let top = sysText(im2, PageKinds.bAppTop)
+            log("   .. 外部 App 返回腿\(name) 未确认回广告页（顶栏 \(top.prefix(26).debugDescription)）⇒ 换下一条")
+        }
+        log("   .. ⬜ 已打开外部 App 并上滑 \(n) 次，但三级返回**都没确认回到广告页**"
+            + "（如实报 ⬜，交给后面 9 轮返回腿兜底）")
+        return false
+    }
+
+    // MARK: - ⭐⭐⭐⭐⭐ §3003 unknown 页兜底返回（照 PC `_1377:9157-9214`）
+
+    /// ⭐ **认不出页面时，靠「返回键」走出去** —— 逐字移植 PC 的 `unknown` 兜底腿序。
+    ///
+    /// ## 用户令（本轮，逐字）
+    /// > 「**外部有返回的，快手都有锚点 外部页面应该也有锚点
+    /// >    没有锚点判断未知的也可以用兜底返回快手**」
+    ///
+    /// ## PC 原文（`_1377_ad_loop.py:9157-9180` 逐字）
+    /// ```python
+    /// _bk = find_page_back(img)                            # ① 暗细高 V
+    /// _bc = find_ks_back_circle(img) if _bk is None else None   # ② 灰/黑圆底白勾
+    /// _wc = find_white_chevron(img) if (_bk is None and _bc is None) else None  # ③ 黑底白勾
+    /// _cx = find_close_x(img) if (...) else None           # ④ 左上 ✕（相机/全屏页）
+    /// if _bk or _bc or _wc or _cx:
+    ///     click_at(plog(_pt[0], _pt[1]))
+    ///     wait(3.0)
+    ///     continue
+    /// ```
+    /// PC `:9151-9155` 的修法说明：
+    /// > 「✅ 修法 = 在"回主屏重进"**之前**先试应用内返回腿（三条…）：
+    /// >   ① `find_page_back()`（暗细高 V —— `稍后再看`/结果页/搜索页都是这种）
+    /// >   ② `find_ks_back_circle()`（灰/黑圆底白勾 —— 商品页/视频页）
+    /// >   ③ `find_white_chevron()`（黑底白勾 —— 视频页/会话页）
+    /// >   ⛔ 三条都不成 ⇒ **才**回主屏重进（⛔ 不盲点、不硬撑）。
+    /// >   ⛔ **必须排在 ④ 之前** —— 否则永远走不到（这正是血案）。」
+    ///
+    /// ## ⛔ 为什么必须排在「回桌面重进」之前（PC 血案 `_var/_1751_cycle_live.log`）
+    /// iOS **不杀后台点图标 = 恢复到上次那一页** ⇒ 重进还是这一页 ⇒ 死循环 4 轮。
+    /// 而那一页**明明有返回键** ⇒ 问题从来不是"没出口"，而是**这条腿压根没被调用**。
+    ///
+    /// ## iOS 端的实现映射（⛔ 已核实的元素，不是自造）
+    /// | PC | iOS 元素（`config.json` 已有） | ROI |
+    /// |---|---|---|
+    /// | `find_page_back` | `back_arrow`（`nav/chevron_dark*.png`） | `[0,55,110,130]` |
+    /// | `find_ks_back_circle` | `back_circle`（`nav/back_circle_lt/dk.png`） | `[0,55,110,130]` |
+    /// | `find_white_chevron` | `white_chevron`（`nav/chevron_white.png`） | `[0,55,110,130]` |
+    /// | `find_close_x` | `panel_close_x`（`ad/panel_x.png`） | `[340,362,374,392]` ⚠️ 见下 |
+    ///
+    /// ⚠️ **第 ④ 条（左上 ✕）iOS 没有等价元素**：`panel_close_x` 的 ROI 是
+    ///    `[340,362,374,392]`（屏幕中部偏右，广告面板的 ✕），⛔ **不是左上角的关闭键**。
+    ///    PC 的 `find_close_x` 是**左上角** `✕`（相机页/全屏页，实测中心 `(35,98)`）。
+    ///    ⇒ ⛔ 本实现**不自造左上角 ✕ 的模板**（那要真机标定），
+    ///      先只上 PC 已验证的前三条；第 ④ 条缺位时直接落到「回快手」腿。
+    ///      📏 这符合「⛔ 不盲点、不硬撑」—— 三条都不成 ⇒ 回快手，仍有出口。
+    ///
+    /// - Returns: `true` = 已点某条返回腿（⛔ 不代表页面一定变了，调用方下一轮会重新判）。
+    @discardableResult
+    func escapeUnknownPage(_ img: UIImage) -> Bool {
+        // ① → ② → ③ 逐条试（顺序照 PC `:9157-9159`）
+        let legs: [(String, String)] = [
+            ("back_arrow", "`〈`(暗细高 V)"),
+            ("back_circle", "圆形返回键"),
+            ("white_chevron", "白色 `〈`"),
+        ]
+        for (element, desc) in legs {
+            if let h = detect(element, img: img) {
+                let cx = Double(h.rect.midX), cy = Double(h.rect.midY)
+                log("   .. unknown 页：左上找到返回键（\(desc) `\(element)`）"
+                    + "@(\(Int(cx)),\(Int(cy))) ⇒ 点它退出（§1753：⛔ 别急着回主屏重进）")
+                return tapPoint(cx, cy, why: "unknown 兜底返回 \(element)")
+            }
+        }
+        log("   .. unknown 页：三条返回腿（back_arrow / back_circle / white_chevron）**都没命中**")
+        return false
+    }
+
     // MARK: - 漏斗（② 步）
 
     func runFunnel(_ img: UIImage) -> Bool {
@@ -935,6 +1460,66 @@ final class Navigator {
             // ✅ 现在 = PC 的口径：**只用 `findDarkCross`**（它本身内含 PC §1689 的
             //    几何判据：近正方 / 尺寸 8~30 / 孤立 / 每行段数≤2 / 填充率 0.15~0.75），
             //    ⛔ 不再叠加蓝像素闸。
+            // ⭐⭐⭐⭐⭐ §3003 **系统弹窗统一入口 —— 照 PC `sys_or_ext`（`_1377:3328-3339` 逐字）**
+            //
+            // ```python
+            // def sys_or_ext(img, tag):
+            //     if EXT_OPEN and handle_app_jump(img, tag):   # App 跳转型 ⇒ 点「打开」+ 外部 App 腿
+            //         browse_external_app(tag, img)
+            //         return False, True
+            //     return dismiss_sys_prompt(img), False         # 其他 ⇒ 点消极项
+            // ```
+            //
+            // ## ⛔ 为什么必须**用专用函数**而不是配置元素表（真机实测，⛔ 不是理论）
+            // 元素表机制会把**同一个词的所有命中框并起来**（`Recognizer.swift:302-303`）：
+            // ```
+            // 真机帧 _var/_3001_stuck/now2.jpg 实测：
+            //   词表「打开」命中 2 处：
+            //     标题「"快手极速版"想要打开"百度"」 x∈[92.2, 358.8]
+            //     按钮「打开」                      x∈[289.3, 331.9]
+            //   ⇒ 并集框 x∈[92.2,358.8] y∈[447.3,535.4]
+            //   ⇒ 并集中心 = (225.5, 491.3)
+            //   ⇒ 而「打开」按钮真实中心 = (310.6, 524.0)
+            //   ⇒ **偏 85px（x）/ 33px（y）⇒ 正好点在两钮之间的空白处**
+            // ```
+            // 这正是 PC `:3346-3347` 记的坑：「取消 x≈148、打开 x≈302、CTA x≈225 夹在中间」
+            // ⇒ PC 全局都是 `for tt,cx,cy in words(...)` 逐框判断、用**单词框坐标**点。
+            //
+            // ## 本块处理哪条腿
+            // `it.element == "sys_prompt_allow"` 时：
+            //   ① `handleAppJump` 命中（标题「想要打开」+ 定位到肯定项）⇒ 点「打开」+ 外跳浏览
+            //   ② 没命中（权限型 / 跳转型但定位不到肯定项）⇒ **本块直接走
+            //      `dismissSysPrompt()` 点消极项**（照 PC `:3336-3339`：
+            //      `return dismiss_sys_prompt(img), False`）
+            //
+            // ⛔⛔ 为什么②必须在这里做、⛔ 不能"交回下面 sys_prompt_deny 腿"：
+            //   `sys_prompt_deny` 的 `require` 是 `sys_prompt_btns`（**权限型**词表
+            //   「不允许」+「允许」）⇒ **跳转型弹窗上它 miss** ⇒ 那道闸把 deny 腿挡掉
+            //   ⇒ 结果是：`handleAppJump` 找不到肯定项 + deny 腿被闸跳过
+            //     ⇒ **弹窗谁都不处理 ⇒ 卡死照旧**（我差点留下的缝）。
+            //   ✅ PC 是 `sys_or_ext` **一个入口**：`handle_app_jump` 不成 ⇒
+            //      同一个函数里**立刻** `dismiss_sys_prompt` ⇒ 不存在"两条腿互相等"。
+            if it.element == "sys_prompt_allow" {
+                let grabFrame: () -> UIImage? = { [weak self] in
+                    guard let s = self else { return nil }
+                    return s.frameProvider?()
+                }
+                if handleAppJump(img, frame: grabFrame) {
+                    funnelLast[it.element] = now
+                    log("   §funnel sys_prompt_allow ★ App 跳转型弹窗已点「打开」，开始外部 App 腿")
+                    _ = browseExternalApp(img, frame: grabFrame)
+                    return true
+                }
+                // ② PC `:3338` 的兜底：点消极项（权限型 / 跳转型定位失败都走这里）
+                //    ⛔ 必须**只用单词框自己的坐标**点，理由同上面 §3003 的并集框血案。
+                if dismissSysPrompt(img) {
+                    funnelLast[it.element] = now
+                    log("   §funnel sys_prompt_allow → 非外跳路径 ⇒ 已点消极项（照 PC `:3338`）")
+                    return true
+                }
+                continue
+            }
+
             if it.element == "appstore_x" {
                 if let p = Self.findDarkCross(img) {
                     funnelLast[it.element] = now
