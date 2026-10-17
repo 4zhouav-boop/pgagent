@@ -244,14 +244,36 @@ enum PageKinds {
     ///    不一致 ⇒ 拒绝出包。
     static let entries: [Entry] = [
         .init(kind: .home, order: 1) { s in
-            // PC `_pred_homescreen` → `is_homescreen`：桌面「搜索」胶囊
-            guard s.has("搜索", in: CGRect(x: 0, y: 900, width: 451, height: 77)) else { return nil }
-            let hasWall = s.has("天气", in: CGRect(x: 0, y: 200, width: 451, height: 200))
-                || s.has("日历", in: CGRect(x: 0, y: 200, width: 451, height: 200))
-            return hasWall ? "桌面(搜索胶囊)" : nil
+            // PC `_pred_homescreen` → `is_homescreen`（`_dev/_1377_ad_loop.py:7921`，**逐字**）：
+            // ```python
+            // def is_homescreen(img):
+            //     if "搜索" in txt(img, (150, 780, 320, 860)):
+            //         return True
+            //     return "资源库" in txt(img, (0, 60, 451, 140))
+            // ```
+            // 📏 PC 注释（§1642 真机定标）：桌面每页底部都有「搜索」胶囊 @scr(≈226,814)；
+            //    App 资源库页顶部是「App 资源库」搜索框。
+            //
+            // ⛔⛔ §2980 我第一版写错了（必须记下来）：
+            //    我把 ROI 自造成 `(0,900,451,77)`（搜索）+ `(0,200,451,200)`（天气/日历），
+            //    **那是我猜的，PC 里根本没有「天气」「日历」这两个词** ——
+            //    违反「与 PC 对照，⛔ 不自造」。已按 PC 逐字改回。
+            if s.has("搜索", in: CGRect(x: 150, y: 780, width: 170, height: 80)) {
+                return "桌面(搜索胶囊)"
+            }
+            return s.has("资源库", in: CGRect(x: 0, y: 60, width: 451, height: 80))
+                ? "桌面(App资源库)" : nil
         },
         .init(kind: .center, order: 2) { s in
-            // PC `_pred_on_center` → `on_center` / `CENTER_RX`
+            // PC `_pred_on_center` → `on_center` / `CENTER_RX`（`_dev/_1377_ad_loop.py:3424`，**逐字**）：
+            // ```python
+            // fc = txt(img, BOX_CENTER)          # BOX_CENTER = (0, 62, 451, 190)
+            // return CENTER_RX.search(fc) is not None
+            // ```
+            // ⚠️ §2980 换算提醒：PC 的 box 是 `(x0, y0, x1, y1)`，
+            //    ⛔ 不是 `(x, y, w, h)`。`BOX_CENTER = (0, 62, 451, 190)`
+            //    ⇒ `CGRect(x: 0, y: 62, width: 451, height: 190-62=128)`。
+            //    PC 注释 §1631：kslite 顶栏在 y≈77、第一条任务名在 y≈141 ⇒ 两行都要覆盖才判得出。
             let t = s.text(CGRect(x: 0, y: 62, width: 451, height: 128))
             guard let rx = centerRegex else { return nil }
             let ns = t as NSString
@@ -259,7 +281,15 @@ enum PageKinds {
             return hit ? "CENTER_RX(\(String(t.prefix(20))))" : nil
         },
         .init(kind: .mall, order: 3) { s in
-            // PC `_pred_mall` → `mall_row`：内容区图标行命中 ≥2 个（⛔ 不用顶栏「商城」）
+            // PC `_pred_mall` → `mall_row`（`_dev/_1377_ad_loop.py:8315`，**逐字**）：
+            // ```python
+            // _n = 0
+            // for _w, _x, _y in words(img, B_MALL_ROW):      # B_MALL_ROW = (0,150,451,260)
+            //     if _w.strip() in MALL_ROW_KEYS: _n += 1
+            // return (bool(_n >= 2), ...)
+            // ```
+            // ⛔ PC 为什么不用顶栏「商城」：feed 首页顶栏**也有**它
+            //    （`_1735_1768_pre.png` 顶栏 = `探索 生活 关注 同城 商城 发理 首饰盒 搜索`）。
             let t = s.text(bMallRow)
             let n = mallRowKeys.filter { t.contains($0) }.count
             return n >= 2 ? "商城图标行(\(n)/\(mallRowKeys.count))" : nil
@@ -365,46 +395,85 @@ enum PageKinds {
                 : nil
         },
         .init(kind: .adLive, order: 12) { s in
-            // PC `_pred_live_now` → `is_live_now`：直播间元素
+            // PC `_pred_live_now` → `is_live_now(img)`（`_dev/_1377_ad_loop.py:1077`）
             //
             // ⚠️ 与 order=8 的 `ad_live_bot` 是**两条独立证据链**（PC 原样保留，⛔ 不合并）。
-            // 这里用 PC 直播间的核心元素词（`live_marker` 的元素词表等价物）——
-            // 注意：本判据在 `feed`（order=5）之后，所以快手的骨架页已被 feed 抢走，
-            // 只有“不是 App 骨架、但有直播间元素”才会落到这里（正是 PC 的设计）。
-            let t = s.text(CGRect(x: 0, y: 300, width: 451, height: 500))
-            let liveKeys = ["关注", "在线观众", "说点什么", "小黄车", "讲解中", "来自推广"]
-            let hit = liveKeys.filter { t.contains($0) }
-            return hit.count >= 2 ? "直播间元素(\(hit.prefix(3).joined(separator: "/")))" : nil
+            // ⛔ §2980 我第一版把 ROI 自造成 `(0,300,451,800)` —— PC 里没有这个值。
+            //    PC 的 `_pred_live_now` 调 `is_live_now(ctx["img"])`，**不传 box**
+            //    ⇒ 用直播间自己的判据（`BOX_LIVE_*` 三条：头部 `(0,70,451,132)` /
+            //    中部 `(0,668,451,700)` / 底部 `(0,898,451,942)`）。
+            //    ⛔ 这里不该自造一个大框，应按 PC 的三条带子分别判。
+            let top = s.text(CGRect(x: 0, y: 70, width: 451, height: 62))      // BOX_LIVE_T
+            let mid = s.text(CGRect(x: 0, y: 668, width: 451, height: 32))     // BOX_LIVE_W
+            let bot = s.text(CGRect(x: 0, y: 898, width: 451, height: 44))     // BOX_LIVE_B
+            // PC `BOX_LIVE_W` 的注释：「直播间标记(下)：「讲解中」」
+            // PC `BOX_LIVE_B` 的注释：「评论输入框「说点什么」+「小黄车」—— 直播间独有」
+            var hits: [String] = []
+            if mid.contains("讲解中") { hits.append("讲解中") }
+            if bot.contains("说点什么") { hits.append("说点什么") }
+            if bot.contains("小黄车") { hits.append("小黄车") }
+            if top.contains("在线观众") { hits.append("在线观众") }
+            return hits.isEmpty ? nil
+                : "直播间元素(\(hits.prefix(3).joined(separator: "/")))"
         },
         .init(kind: .homeLibrary, order: 13) { s in
-            // PC `"资源库" in txt(roi)`（桌面族）
-            s.has("资源库", in: CGRect(x: 0, y: 0, width: 451, height: 977)) ? "资源库" : nil
+            // PC `"资源库" in txt(roi)` —— roi 来自 registry：`home_library`
+            // 归一化 `[0.0, 0.06141, 1.0, 0.1433]` ⇒ 像素 `(0, 60, 451, 140)`
+            // ⇒ `CGRect(x:0, y:60, width:451, height:80)`。
+            //
+            // ⛔ §2980 我第一版写成整屏 `(0,0,451,977)`（自造）⇒ 全屏命中 = 假阳机器。
+            s.has("资源库", in: CGRect(x: 0, y: 60, width: 451, height: 80))
+                ? "资源库" : nil
         },
         .init(kind: .homeToday, order: 14) { s in
-            // PC `_pred_desk_today`（`_dev/_1377_ad_loop.py:8292`，逐字）
+            // PC `_pred_desk_today`（`_dev/_1377_ad_loop.py:8292`，逐字）：
+            // ```python
+            // top_box = (0, 0, int(BASE_W), int(BASE_H * 0.35))     # = (0,0,451,342)
+            // _top = txt(img, top_box)
+            // _has_date = bool(_TODAY_RX.search(_top))
+            // box = entry.roi.to_px(int(BASE_W), int(BASE_H))       # home_today = (0,0,451,342)
+            // _no_search = "搜索" not in txt(img, box)
+            // hit = _has_date and _no_search
+            // ```
             //
             // ⛔ PC 血案：原判据是**负向**的（“读不到搜索 ⇒ 今日视图”）⇒ 291/300 帧命中，
-            //   是**假阳机器**（也是它把视频广告抢判成别的页型）。
-            // ✅ 正向：读得到左上角**日期大标题**（今日视图独有），再叠一道负向闸做冗余。
-            let topText = s.text(CGRect(x: 0, y: 0, width: 451, height: 342))
+            //   是**假阳机器**（也是它把视频广告抢判成别的页型）。✅ 正向日期才是主判据。
+            //
+            // ⛔ §2980 我第一版把负向闸的 ROI 写成 `(0,900,451,77)`（自造）——
+            //    PC 的负向闸用的是 **entry.roi 同一个 `(0,0,451,342)`**，即顶部那块。
+            let topBox = CGRect(x: 0, y: 0, width: 451, height: 342)
+            let topText = s.text(topBox)
             guard let rx = todayRegex else { return nil }
             let ns = topText as NSString
             let hasDate = rx.firstMatch(in: topText,
                                        range: NSRange(location: 0, length: ns.length)) != nil
             guard hasDate else { return nil }
-            let noSearch = !s.has("搜索", in: CGRect(x: 0, y: 900, width: 451, height: 77))
+            let noSearch = !s.has("搜索", in: topBox)
             return noSearch ? "今日视图(日期 \(String(topText.prefix(20))))" : nil
         },
         .init(kind: .homeMain, order: 15) { s in
-            // PC `_pred_desk_main`：桌面第 1 页 = 结构带「搜索」∧ 第 1 页自带「设置」
-            // （PC 注释：用户可把「设置」挪走 ⇒ 只判「读到没」）
-            let hasSearch = s.has("搜索", in: CGRect(x: 0, y: 900, width: 451, height: 77))
-            let hasSettings = s.has("设置", in: CGRect(x: 0, y: 60, width: 451, height: 917))
+            // PC `_pred_desk_main`（`_dev/_1377_ad_loop.py:8276`，逐字）：
+            // ```python
+            // box = entry.roi.to_px(int(BASE_W), int(BASE_H))       # home_main = (150,780,320,860)
+            // hit = ("搜索" in txt(img, box)) and ("设置" in txt(img, (0, 60, int(BASE_W), int(BASE_H))))
+            // ```
+            // PC 注释：桌面第 1 页自带「设置」（用户可挪走 ⇒ 只判「读到没」）。
+            //
+            // ⛔ §2980 我第一版把两个 ROI 都自造了（`(0,900,451,77)` + `(0,60,451,917)`）。
+            let searchBox = CGRect(x: 150, y: 780, width: 170, height: 80)   // reg home_main roi
+            let settingsBox = CGRect(x: 0, y: 60, width: 451, height: 917)   // PC (0,60,451,977)
+            let hasSearch = s.has("搜索", in: searchBox)
+            let hasSettings = s.has("设置", in: settingsBox)
             return (hasSearch && hasSettings) ? "桌面第1页(搜索+设置)" : nil
         },
         .init(kind: .homeSub, order: 16) { s in
-            // PC `"搜索" in txt(roi)`（桌面族副桌面）
-            s.has("搜索", in: CGRect(x: 0, y: 890, width: 451, height: 87)) ? "副桌面(搜索)" : nil
+            // PC `"搜索" in txt(roi)` —— roi 来自 registry：`home_sub`
+            // 归一化 `[0.33259, 0.79632, 0.70953, 0.88229]` ⇒ 像素 `(150, 778, 320, 862)`
+            // ⇒ `CGRect(x:150, y:778, width:170, height:84)`。
+            //
+            // ⛔ §2980 我第一版写成 `(0,890,451,87)`（自造）⇒ 差了 112px。
+            s.has("搜索", in: CGRect(x: 150, y: 778, width: 170, height: 84))
+                ? "副桌面(搜索)" : nil
         },
         .init(kind: .searchResult, order: 17) { s in
             // PC `_pred_search_result`（`_dev/_1377_ad_loop.py:8378`，逐字）
