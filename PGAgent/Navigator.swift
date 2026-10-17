@@ -191,12 +191,14 @@ final class Navigator {
                 for (i, ch) in text.enumerated() where crosses.contains(String(ch)) { lastIdx = i }
                 guard let li = lastIdx else { continue }
                 let frac = Double(li + 1) / Double(max(1, text.count))
-                let px = box.origin.x + box.width * frac
-                let py = box.origin.y + box.height / 2
+                // ⚠️ `CGRect` 的 origin/width 是 CGFloat ⇒ 必须**显式**转 Double，
+                //    否则元组类型推成 `(Double, CGFloat, String)` 与 `best` 不符（CI 报过错）
+                let px = Double(box.origin.x + box.width * CGFloat(frac))
+                let py = Double(box.origin.y + box.height / 2)
                 // ③ 坐标窗口闸（离线复算定的，⛔ 不能省）
                 if !(xr.0...xr.1).contains(px) || !(yr.0...yr.1).contains(py) { continue }
                 if best == nil || px > best!.x {
-                    best = (px, py, "ocr_tail_x『\(text)』→(\(Int(px)),\(Int(py)))")
+                    best = (x: px, y: py, ev: "ocr_tail_x『\(text)』→(\(Int(px)),\(Int(py)))")
                 }
             }
             guard let b2 = best else { return nil }
