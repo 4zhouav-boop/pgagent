@@ -420,10 +420,33 @@ final class APIRouter {
             }
             let rec = makeRecognizer()
             let nav = Navigator(cfg: c, rec: rec, ble: ble) { _ in }
+            // ⭐ §2980 桌面族页型的**运行时开关**（照 PC `AISJ_DESK_KINDS=1` 的语义）。
+            //
+            // ## ⛔ 血案：默认参数被编译器**常量折叠**，整支桌面判据从包里消失
+            // 0.33 出包后查二进制（十六进制逐字节）：
+            // ```
+            //   "资源库" (homeLibrary 的唯一输入词)  → MISSING（utf8/utf16/gbk 全 MISSING）
+            //   "天气" "日历" (home 的输入词)          → MISSING
+            //   "includeDesktop"                      → MISSING
+            //   "desktopKinds"                        → MISSING
+            // ```
+            // 而 `home_library` 页型名、`副桌面(搜索)` `今日视图(日期 ` `桌面第1页(搜索+设置)`
+            // 这些**证据串都在**（offset 903600-904288 的常量池）——
+            // ⇒ entries 表在、闭包却**没被编译**。
+            // 根因：`detect(..., includeDesktop: Bool = false)` 的两个调用点**都没传**这个参数
+            //   ⇒ Swift 跨函数常量传播判定它恒 false ⇒ `if !includeDesktop { continue }` 恒成立
+            //   ⇒ 桌面分支 = 死代码 ⇒ 连它的字符串字面量一起消除。
+            // ⚠️ 这不是"编译器优化无关紧要"：它让 `/page` **永远无法**验证桌面族判据，
+            //    而"判据必须能离线复算"是本项目的硬纪律。
+            // ✅ 修法：给一个**运行时**来源（查询参数），编译器就无法证明它恒 false。
+            let includeDesktop = ["1", "true", "yes"].contains(
+                (r.query["desktop"] ?? "").lowercased()
+            )
             // ⭐ §2979 两套结果**同时返回**，便于对拍（过渡期用，稳定后只留 unified）
             let here = nav.pageHere(img) ?? "unknown"
             let hereWithIslands = nav.pageHere(img, includeIslands: true) ?? "unknown"
-            let pk = PageKinds.detect(img, ocr: RecognizerOcr(rec: rec))
+            let pk = PageKinds.detect(img, ocr: RecognizerOcr(rec: rec),
+                                      includeDesktop: includeDesktop)
             return .json([
                 "ok": true,
                 "page": here,
@@ -431,6 +454,8 @@ final class APIRouter {
                 "unified": pk.kind.rawValue,
                 "evidence": pk.evidence,
                 "order": pk.order == Int.max ? -1 : pk.order,
+                // 本次是否启用桌面族判据（= 请求里的 ?desktop=1）
+                "includeDesktop": includeDesktop,
                 // 旧导航判据（含 island 跳过）—— 过渡期供对拍
                 "navLegacy": here,
                 // 导航判据但**让孤岛页参与**（§2979 的 includeIslands）
