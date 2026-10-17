@@ -997,7 +997,7 @@ final class Navigator {
         //      两个都不成 ⇒ 如实返回 false（照 PC `:3245` 的口径）。
         let attempts: [(String, () -> Bool)] = [
             ("①单击 P:+C:L", { self.tapPoint(cx, cy, why: "App跳转肯定项(单击)") }),
-            ("②原子 Q:x,y", { self.tapPoint(cx, cy, why: "App跳转肯定项(原子)", atomic: true) }),
+            ("②原子 Q:x,y", { self.tapPoint(cx, cy, atomic: true, why: "App跳转肯定项(原子)") }),
         ]
         for (name, fire) in attempts {
             _ = fire()
