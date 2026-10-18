@@ -26,7 +26,7 @@ targets:
         CFBundleDisplayName: PGAgent
         # ⭐ 版本号**唯一来源**（界面标题从 Info.plist 读，见 AppVersion）
         #    发版时只改这里 ⇒ 界面/接口/包 三处自动一致（§2239 的教训）
-        CFBundleShortVersionString: "0.74"
+        CFBundleShortVersionString: "0.75"
         CFBundleVersion: "1"
         UILaunchScreen: {}
         # ⭐ 关键 1：让 App 的 Documents 暴露给「文件」App
@@ -151,9 +151,9 @@ targets:
           - $(inherited)
           - -lc++
           - -force_load
-          - $(SRCROOT)/ncnn.xcframework/ios-arm64_arm64e_armv7/ncnn.framework/ncnn
+          - $(SRCROOT)/ncnn.framework/Versions/A/ncnn
           - -force_load
-          - $(SRCROOT)/openmp.xcframework/ios-arm64_arm64e_armv7/openmp.framework/openmp
+          - $(SRCROOT)/openmp.framework/Versions/A/openmp
     dependencies:
       - target: PGShot
       - sdk: ReplayKit.framework
@@ -168,7 +168,9 @@ targets:
       #   内含 Tencent/ncnn **20221128**，含真机(arm64/arm64e/armv7) + 模拟器两个 slice。
       #   ⛔ 只用 `ncnn.xcframework`：PC 的 `_x_detect` 只要 ncnn + numpy，
       #      不碰 OpenCV（letterbox 是自己算的，`cv2.resize` 用 `CGContext` 替）。
-      - framework: ncnn.xcframework
+      - framework: ncnn.framework
+        embed: false
+      - framework: openmp.framework
         embed: false
 
   # ⭐⭐⭐ 「眼」—— ReplayKit 广播扩展（荔枝/所有 RPA App 的真正做法）
@@ -183,7 +185,7 @@ targets:
       path: PGShot/Info.plist
       properties:
         CFBundleDisplayName: PGShot
-        CFBundleShortVersionString: "0.74"
+        CFBundleShortVersionString: "0.75"
         CFBundleVersion: "1"
         # ⭐ 扩展必须声明 NSExtension，否则 iOS 不认（xcodegen 会重写 Info.plist）
         NSExtension:
