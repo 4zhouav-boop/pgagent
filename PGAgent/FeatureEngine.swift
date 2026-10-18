@@ -1487,7 +1487,48 @@ final class FeatureEngine {
         /// ⚠️ 本函数叫 `looksLikeAdPage`（"像不像广告页"），直播间本来就是广告页
         ///    ⇒ 纳入 `.adLive` **语义正确**，⛔ 不是放宽判据。
         let k = PageKinds.detectFrom(sheet: sheet).kind
-        return k == .adVideo || k == .adLive
+        if k == .adVideo || k == .adLive { return true }
+
+        // ⭐⭐⭐⭐⭐ §3023 **面板盖屏时的兜底：顶栏含「可领取/已成功领取」也算广告页**
+        //
+        /// ## ⛔ 血案（真机 2026-10-18，用户令逐字）
+        /// > 「**这是视频广告跳转到直播间的广告，你做一下适配**」
+        /// > 「**全程不动卡死 你看不到啊**」
+        ///
+        /// 真机实测（`_pn.jpg`，面板盖在直播画面上）：
+        /// ```
+        ///   /page  -> unified = "unknown", evidence = "无锚点命中"
+        ///   顶栏 OCR -> '已成功领取253金币'      ← 奖励已到账
+        ///   命中元素 -> stay_panel_btn / panel_close_x / pill_x / ad_capsule 全中
+        ///   但 OCR 里**没有「广告」二字**       ← 奖励面板遮住了右上角
+        /// ⇒ ad_video 判据（需要「广告」二字）落空 ⇒ unknown
+        /// ⇒ 进不了广告页分支 ⇒ **卡死不动**（用户看到的"全程不动"）
+        /// ```
+        ///
+        /// ## ✅ 修法 = 接上 PC 一直就有的 `is_ad_page`（`_1377_ad_loop.py:3609` 逐字）
+        /// ```python
+        /// def is_ad_page(img):
+        ///     """判据与主循环 G1 **完全同源**（顶栏含「可领取」或「已成功领取」）—— ⛔ 不新造判据"""
+        /// ```
+        /// ⇒ 📏 **只在页型判不出（`.unknown`）时**用这条兜底；⛔ 不抢 `.adVideo/.adLive` 的判定。
+        ///
+        /// ## 📊 离线复算（工作区规则 §3：81 张真机帧，`/page` + `/ocr` 全走生产接口）
+        /// ```
+        ///   原判据命中 = 59 帧   新判据命中 = 61 帧
+        ///   新增命中 = 2 帧（_pn.jpg / _t.jpg，均为「已成功领取253金币」的面板盖屏广告）✅
+        ///   减少命中 = 0 帧                                          ✅ 不误伤
+        /// ```
+        /// ⚠️ 为什么不直接用「顶栏含胶囊」替代原判据：
+        ///   复算显示会**漏掉 10 帧**（8 帧 ad_live 顶栏无胶囊 + 2 帧 `点击后看5秒可领N金币`
+        ///   用的是「可**领**」不是「可**领取**」）⇒ 原判据必须保留。
+        if k == .unknown {
+            let top = adTopText(img, rec: rec, bw: bw, bh: bh, roi: roi)
+                .replacingOccurrences(of: " ", with: "")
+            if top.contains("可领取") || top.contains("已成功领取") {
+                return true
+            }
+        }
+        return false
     }
 
     /// ⭐⭐⭐⭐⭐ §2832 **等待期间的"只补全"闸** —— 照 PC `click_toast_x` **第一段**（L4333）
