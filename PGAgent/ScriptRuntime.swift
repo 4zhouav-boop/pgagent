@@ -621,7 +621,7 @@ private final class PGBridge {
             guard let cgAll = base.cgImage else { return self.fail("帧没有 cgImage") }
             let W = cgAll.width, H = cgAll.height
             let bx = max(0, Int(self.num(x, 0))), by = max(0, Int(self.num(y, 0)))
-            let bw = min(W - bx, Int(self.num(w, W))), bh = min(H - by, Int(self.num(h, H)))
+            let bw = min(W - bx, Int(self.num(w, Double(W)))), bh = min(H - by, Int(self.num(h, Double(H))))
             guard bx < W, by < H, bw > 0, bh > 0 else { return self.fail("pg.pix 区域越界") }
             guard let cg = cgAll.cropping(to: CGRect(x: CGFloat(bx), y: CGFloat(by), width: CGFloat(bw), height: CGFloat(bh)))
             else { return self.fail("pg.pix 裁剪失败") }
@@ -653,7 +653,7 @@ private final class PGBridge {
             guard let cgAll = base.cgImage else { return self.fail("帧没有 cgImage") }
             let W = cgAll.width, H = cgAll.height
             let bx = max(0, Int(self.num(x, 0))), by = max(0, Int(self.num(y, 0)))
-            let bw = min(W - bx, Int(self.num(w, W))), bh = min(H - by, Int(self.num(h, H)))
+            let bw = min(W - bx, Int(self.num(w, Double(W)))), bh = min(H - by, Int(self.num(h, Double(H))))
             guard bx < W, by < H, bw > 0, bh > 0 else { return self.fail("pg.gray 区域越界") }
             guard let cg = cgAll.cropping(to: CGRect(x: CGFloat(bx), y: CGFloat(by), width: CGFloat(bw), height: CGFloat(bh)))
             else { return self.fail("pg.gray 裁剪失败") }
@@ -705,7 +705,7 @@ private final class PGBridge {
             guard let cgAll = base.cgImage else { return self.fail("帧没有 cgImage") }
             let W = cgAll.width, H = cgAll.height
             let bx = max(0, Int(self.num(xV, 0))), by = max(0, Int(self.num(yV, 0)))
-            let bw = min(W - bx, Int(self.num(wV, W))), bh = min(H - by, Int(self.num(hV, H)))
+            let bw = min(W - bx, Int(self.num(wV, Double(W)))), bh = min(H - by, Int(self.num(hV, Double(H))))
             let thr = self.num(thrV, 0.80)
             let mask = maskV.isString ? maskV.toString()! : ""
             var scales: [Double] = [1.0]
