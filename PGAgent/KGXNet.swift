@@ -158,7 +158,8 @@ final class KGXNet {
         // 输入张量（3×640×640 float32）
         guard let ex = ncnn_extractor_create(net) else { return nil }
         defer { ncnn_extractor_destroy(ex) }
-        guard let inMat = ncnn_mat_create_3d(KGXNet.inputSize, KGXNet.inputSize, 3, nil) else { return nil }
+        guard let inMat = ncnn_mat_create_3d(Int32(KGXNet.inputSize), Int32(KGXNet.inputSize),
+                                             Int32(3), nil) else { return nil }
         defer { ncnn_mat_destroy(inMat) }
         // 把 chw 拷进 ncnn 的 Mat（PC 用 `ncnn.Mat(buf).clone()`，等价语义）
         // ⛔ PC 注释里的血案：`ncnn.Mat(numpy)` 只是**零拷贝包装**，必须 clone 进 ncnn 自己的内存，
