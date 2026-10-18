@@ -26,7 +26,7 @@ targets:
         CFBundleDisplayName: PGAgent
         # ⭐ 版本号**唯一来源**（界面标题从 Info.plist 读，见 AppVersion）
         #    发版时只改这里 ⇒ 界面/接口/包 三处自动一致（§2239 的教训）
-        CFBundleShortVersionString: "0.70"
+        CFBundleShortVersionString: "0.71"
         CFBundleVersion: "1"
         UILaunchScreen: {}
         # ⭐ 关键 1：让 App 的 Documents 暴露给「文件」App
@@ -131,11 +131,29 @@ targets:
         #   ⚠️ Swift target 默认**不会**自动链 libc++（它只链 libswiftCore 之类）；
         #      一旦 bridging header 里 `#include` 了 C++ 头（`c_api.h` 是纯 C，但它声明的实现是 C++），
         #      就必须显式声明。
+        #
+        # ⛔⛔⛔ §3135 **还要链 OpenMP**（同一个血案的**第二层**）
+        # 加了 `-lc++` 之后 `std::__1::*` 全部消失 ✅，但冒出**另一批** undefined：
+        # ```
+        # "___kmpc_for_static_fini", referenced from:
+        #     _.omp_outlined. in ncnn[arm64][26](absval.cpp.o)
+        #     _.omp_outlined. in ncnn[arm64][27](absval_arm.cpp.o)
+        #     ... (batchnorm / conv / pooling … 几乎每个 .o)
+        # ```
+        # 📏 判定（看符号名就知道）：`___kmpc_*` = **LLVM OpenMP runtime** 的入口函数。
+        #   ⇒ 这个 ncnn 构建**开了 OpenMP**（多线程卷积），所以必须一并链 `openmp.xcframework`
+        #     （同一个 repo 提供，1.8MB 真机 slice）。
+        #   ⛔ 不选"关掉 OpenMP 重新编 ncnn"——那要自己编 ncnn，成本远大于加一个链接项。
+        #
+        # ⚠️ **顺序**：静态库链接是**从左到右**解析的 ⇒ `openmp` 必须排在 `ncnn` **之后**
+        #   （ncnn 引用 openmp 的符号）。⛔ 反过来会报同样的 undefined。
         OTHER_LDFLAGS:
           - $(inherited)
           - -lc++
           - -force_load
           - $(SRCROOT)/ncnn.xcframework/ios-arm64_arm64e_armv7/ncnn.framework/ncnn
+          - -force_load
+          - $(SRCROOT)/openmp.xcframework/ios-arm64_arm64e_armv7/openmp.framework/openmp
     dependencies:
       - target: PGShot
       - sdk: ReplayKit.framework
@@ -165,7 +183,7 @@ targets:
       path: PGShot/Info.plist
       properties:
         CFBundleDisplayName: PGShot
-        CFBundleShortVersionString: "0.70"
+        CFBundleShortVersionString: "0.71"
         CFBundleVersion: "1"
         # ⭐ 扩展必须声明 NSExtension，否则 iOS 不认（xcodegen 会重写 Info.plist）
         NSExtension:
