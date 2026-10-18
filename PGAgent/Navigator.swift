@@ -141,13 +141,43 @@ final class Navigator {
             let words = e.words ?? []
             guard !words.isEmpty else { return nil }
             let minConf = e.min_conf ?? 0.25
-            if let h = rec.findWords(img, words: words, roi: r,
+            if var h = rec.findWords(img, words: words, roi: r,
                                      minHits: e.min_hits ?? 1,
                                      minConfidence: minConf) {
-                var hh = h
-                hh.name = name
-                hh.evidence = "ocr:" + hh.evidence
-                return hh
+                // ⭐⭐⭐⭐⭐ §3013 **方向符"取左端"修正**（真机血案 2026-10-18）
+                //
+                // ## ⛔ 血案（淘宝商品详情页，逐字实测）
+                // iOS Vision 把返回箭头和页面标题**合并成一个词元**：
+                // ```
+                //   '＜ 天猫双11官方立减商品，8.5折起'   x=21.3  w=272.3   y=66.7
+                // ```
+                // 而 `findWords` 返回的是**整词 bbox** ⇒ `center = midX = 157`
+                // ⇒ 日志 `§tap ★点「back_arrow」@(65,76)`（65 已是钳制后的值）
+                // ⇒ **点在「天猫双11」那几个字上，箭头没被点到** ⇒ 页型仍是 ext_landing
+                // ⇒ 下一轮箭头也找不到了（标题变了）⇒ 停手。
+                //
+                // ## ✅ 修法
+                // 只要命中的词**以方向符开头**，就把 rect 裁成**最左边那一格**：
+                // ```
+                //   箭头真实位置 x ∈ [21.3, 21.3+22]  ⇒ 取 width = 0.35*h 的方块
+                //   center 自然落在箭头正中（而不是标题中间）
+                // ```
+                // ⚠️ 只对本模式生效（`template_or_ocr`），⛔ 不碰 `ocr` 通用路径 ——
+                //   普通 OCR 元素的语义就是"点这个词的中间"。
+                // ⚠️ 判据用 `h.evidence` 里是否出现方向符，⛔ 不用字符数猜。
+                let dirChars: [Character] = ["<", "＜", "〈", "‹", "‹"]
+                let ev = h.evidence
+                if let first = ev.first, dirChars.contains(first) || dirChars.contains(where: { ev.hasPrefix(String($0)) }) {
+                    let side = max(12.0, h.rect.height * 0.9)
+                    let leftRect = CGRect(x: h.rect.minX, y: h.rect.minY,
+                                          width: min(side, h.rect.width), height: h.rect.height)
+                    h.rect = leftRect
+                    h.evidence = "ocr-left:" + ev
+                } else {
+                    h.evidence = "ocr:" + ev
+                }
+                h.name = name
+                return h
             }
             return nil
         // ⭐⭐⭐⭐⭐ §2621 **色彩判据元素**（`match: "color"`）——
