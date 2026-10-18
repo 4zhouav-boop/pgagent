@@ -1905,6 +1905,34 @@
         "x",
         "X"
       ]
+    },
+    "inpage_landing": {
+      "desc": "⭐⭐ §3024 广告内部落地页：左上『<』+ 右上『⚠』两个角标模板同时命中",
+      "match": "template",
+      "roi": [
+        0,
+        40,
+        451,
+        120
+      ],
+      "templates": [
+        "landing/inpage_back.png",
+        "landing/inpage_warn.png"
+      ],
+      "min_hits": 2,
+      "threshold": 0.8,
+      "_doc": [
+        "用户令（逐字）：",
+        "  「把这个页面做锚点识别，就右上角图标加左上角图标 这是广告内部落地页」",
+        "  「锚点可与截图做对比 不用死用OCR 你看看今天给你看的软件 别人是怎么做的」",
+        "模板来源：真机 _tmp3043.png 归一化 451x977 后裁出",
+        "  landing/inpage_back.png  20x28  (17,68)-(37,96)   左上 '<'",
+        "  landing/inpage_warn.png  29x28  (406,67)-(435,95) 右上 '⚠'（OCR 会读成 'A'）",
+        "离线复算（83 张真机帧，阈值 0.80）：",
+        "  两者都中 = 3 帧（_lp/_lp2/_now，全是知了爱学广告落地页）✅ 误中 0 帧",
+        "  反例：probe1.jpg back=0.832（单个能过）warn=0.221 => 组合不中 ✅ 有区分力",
+        "点击目标：本元素矩形取第一个模板（左上 '<'）=> 点它就是返回上一页"
+      ]
     }
   },
   "funnel": [
@@ -2600,6 +2628,14 @@
       "desc": "消息页（底栏 tab）",
       "go": "tab_home",
       "parent": "feed"
+    },
+    "inpage_landing": {
+      "check": [
+        "inpage_landing"
+      ],
+      "go": "inpage_landing",
+      "order": 9,
+      "desc": "广告内部落地页（H5，左上< + 右上⚠）⇒ 点左上< 返回广告页"
     }
   },
   "rois": {

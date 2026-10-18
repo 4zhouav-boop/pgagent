@@ -136,6 +136,45 @@ final class Navigator {
         case "template":
             let names = e.templates ?? []
             guard !names.isEmpty else { return nil }
+            // ⭐⭐⭐⭐⭐ §3024 **多模板"全部命中"闸**（真机 2026-10-18，用户令）
+            //
+            // ## 用户令（逐字）
+            // > 「**把这个页面做锚点识别，就右上角图标加左上角图标 这是广告内部落地页**」
+            // > 「**锚点可与截图做对比 不用死用OCR 你看看今天给你看的软件 别人是怎么做的**」
+            //
+            // ## 为什么需要"全部命中"
+            // `poolMatch` 的语义是**任一命中就返回**（返回 `used` = 命中的那个）。
+            // 而广告内部落地页的判据是**两个角标同时存在**：
+            /// ```
+            ///   左上 '<'   +   右上 '⚠'
+            /// ```
+            /// 离线复算（83 张真机帧，阈值 0.80）：
+            /// ```
+            ///   两者都中 = 3 帧（_lp/_lp2/_now，全是「知了爱学」广告落地页）✅
+            ///   误中     = 0 帧
+            ///   反例：probe1.jpg  back=0.832（单个能过）但 warn=0.221 ⇒ 组合不中 ✅
+            /// ```
+            /// ⇒ 📏 **单模板有假阳（0.832），组合式才有区分力**。
+            ///
+            /// ## 实现
+            /// `min_hits >= 2` ⇒ 逐个模板各自跑一次 `matchTemplate`，**全部 >= 阈值**才算命中；
+            /// 返回**第一个**模板的矩形（调用方只用它拿坐标，组合语义已保证正确性）。
+            /// ⚠️ 与 OCR 分支的 `min_hits` **语义一致**（"必须命中 N 个不同目标"）。
+            if let need = e.min_hits, need >= 2 {
+                var firstRect: CGRect?
+                var firstScore = 0.0
+                for t in names {
+                    guard let (rect, score, _) = rec.matchTemplate(img, tplName: t, roi: r,
+                                                                  threshold: e.threshold ?? tplThr,
+                                                                  mask: e.mask) else {
+                        return nil      // 缺一个 ⇒ 组合不成立
+                    }
+                    if firstRect == nil { firstRect = rect; firstScore = score }
+                }
+                guard let rect = firstRect else { return nil }
+                return Recognizer.Hit(name: name, rect: rect, score: firstScore,
+                                      evidence: "tpl-all:" + names.joined(separator: "+"))
+            }
             if let (rect, score, used) = rec.poolMatch(img, tplNames: names, roi: r,
                                                        threshold: e.threshold ?? tplThr,
                                                        mask: e.mask) {
