@@ -598,6 +598,257 @@ private final class PGBridge {
         let fBle: @convention(block) () -> String = { self.rt.ble.state }
         def("ble", unsafeBitCast(fBle, to: AnyObject.self))
 
+        // ── ⭐ §3100 像素原语（**只搬像素 / 只算 NCC**，⛔ 不含任何业务判据）──
+        //
+        // 为什么必须有（用户令 2026-10-18：「1比1 把 PG 控制台移植过来做执行大脑」）：
+        //   PC 蓝本 `_1377_ad_loop.py` 的判据**大量是像素级**的
+        //   （`find_coin_entry` 红块 / `widestPinkBand` 粉带 / `find_modal_x` 暖灰圆钮 /
+        //     `find_toast_x` 胶囊 ✕ / `find_live_x` / `_find_cross_x` / `find_appstore_x` 的 MAE 块比）。
+        //   原来的 `pg` 只有 OCR / 模板（走 config 元素表）/ 点击 ⇒ **这些腿在 JS 里没法 1:1 抄**。
+        //   ⇒ 补三个原语，让 JS 侧可以**逐行照抄 PC 的算法**（阈值、ROI、掩码全在 JS 里写）。
+        //
+        // ⛔ 三个原语都**先归一到基准 451×977**（与 `FrameNormalizer` / 全项目 ROI 同一坐标系），
+        //   返回的坐标也一律是**基准像素**。
+        // ⛔ 灰度用 **PC/PIL `.convert("L")` 的 ITU-R 601 口径**（0.299R+0.587G+0.114B），
+        //   ⛔ 不用 `Recognizer.gray` 的 linearGray —— 那样与 PC 的像素阈值不可比。
+        //
+        // `pg.pix(x,y,w,h)` ⇒ `{ok, x, y, w, h, data}`，`data` = base64(R,G,B,A 逐行，左上原点)
+        let fPix: @convention(block) (JSValue, JSValue, JSValue, JSValue) -> JSValue = {
+            x, y, w, h in
+            if self.stopped() { return JSValue(undefinedIn: JSContext.current()) }
+            guard let im = self.image() else { return self.fail("还没有帧") }
+            let base = FrameNormalizer.normalize(im)
+            guard let cgAll = base.cgImage else { return self.fail("帧没有 cgImage") }
+            let W = cgAll.width, H = cgAll.height
+            let bx = max(0, Int(self.num(x, 0))), by = max(0, Int(self.num(y, 0)))
+            let bw = min(W - bx, Int(self.num(w, W))), bh = min(H - by, Int(self.num(h, H)))
+            guard bx < W, by < H, bw > 0, bh > 0 else { return self.fail("pg.pix 区域越界") }
+            guard let cg = cgAll.cropping(to: CGRect(x: bx, y: by, width: bw, height: bh))
+            else { return self.fail("pg.pix 裁剪失败") }
+            var buf = [UInt8](repeating: 0, count: bw * bh * 4)
+            guard let ctx = CGContext(data: &buf, width: bw, height: bh,
+                                      bitsPerComponent: 8, bytesPerRow: bw * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return self.fail("pg.pix 建缓冲失败") }
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: bw, height: bh))
+            // ⚠️ CGContext 原点在左下 ⇒ 缓冲第 0 行是 ROI 的**底行**，翻成左上原点
+            var out = [UInt8](repeating: 0, count: bw * bh * 4)
+            for j in 0..<bh {
+                let src = (bh - 1 - j) * bw * 4
+                let dst = j * bw * 4
+                out.replaceSubrange(dst..<(dst + bw * 4), with: buf[src..<(src + bw * 4)])
+            }
+            return self.val(["ok": true, "x": bx, "y": by, "w": bw, "h": bh,
+                             "data": Data(out).base64EncodedString()])
+        }
+        def("pix", unsafeBitCast(fPix, to: AnyObject.self))
+
+        // `pg.gray(x,y,w,h)` ⇒ `{ok, x, y, w, h, data}`，`data` = base64(单字节灰度，左上原点)
+        let fGray: @convention(block) (JSValue, JSValue, JSValue, JSValue) -> JSValue = {
+            x, y, w, h in
+            if self.stopped() { return JSValue(undefinedIn: JSContext.current()) }
+            guard let im = self.image() else { return self.fail("还没有帧") }
+            let base = FrameNormalizer.normalize(im)
+            guard let cgAll = base.cgImage else { return self.fail("帧没有 cgImage") }
+            let W = cgAll.width, H = cgAll.height
+            let bx = max(0, Int(self.num(x, 0))), by = max(0, Int(self.num(y, 0)))
+            let bw = min(W - bx, Int(self.num(w, W))), bh = min(H - by, Int(self.num(h, H)))
+            guard bx < W, by < H, bw > 0, bh > 0 else { return self.fail("pg.gray 区域越界") }
+            guard let cg = cgAll.cropping(to: CGRect(x: bx, y: by, width: bw, height: bh))
+            else { return self.fail("pg.gray 裁剪失败") }
+            var buf = [UInt8](repeating: 0, count: bw * bh * 4)
+            guard let ctx = CGContext(data: &buf, width: bw, height: bh,
+                                      bitsPerComponent: 8, bytesPerRow: bw * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return self.fail("pg.gray 建缓冲失败") }
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: bw, height: bh))
+            var g = [UInt8](repeating: 0, count: bw * bh)
+            for j in 0..<bh {
+                let src = (bh - 1 - j) * bw * 4
+                let dst = j * bw
+                for i in 0..<bw {
+                    let o = src + i * 4
+                    let r = Int(buf[o]), gg = Int(buf[o + 1]), b = Int(buf[o + 2])
+                    // PIL `convert("L")`：L = round(0.299R + 0.587G + 0.114B)
+                    g[dst + i] = UInt8(max(0, min(255, (299 * r + 587 * gg + 114 * b + 500) / 1000)))
+                }
+            }
+            return self.val(["ok": true, "x": bx, "y": by, "w": bw, "h": bh,
+                             "data": Data(g).base64EncodedString()])
+        }
+        def("gray", unsafeBitCast(fGray, to: AnyObject.self))
+
+        // `pg.tpl(name, x,y,w,h, threshold, mask, scales)`
+        //   ⇒ `{ok, score, cx, cy, x, y, w, h, tpl, scale}` 或 `{ok:true, hit:false, score}`
+        //
+        // 语义**逐条照抄 PC**（`_ks_match` / `Recognizer.matchTemplate` / `_1765_match.py`）：
+        //   ① 灰度用上面同一条 ITU-R 601 口径（模板文件也一样）
+        //   ② **模板质量闸**：模板灰度标准差 < 6.0 ⇒ 拒用（OpenCV TM_CCOEFF_NORMED 对平坦模板
+        //      会整张填 1.0 ⇒ 确定性误报；`_1377:5270` 原文，本仓库最平模板 11.91）
+        //   ③ **ink 掩码**：`mask=='ink'` 时只让"墨迹 + pad 2 邻域"参与 NCC（照 MaaFW 语义）
+        //   ④ 多尺度（默认 1.0；PC 的 `X_TPL_SCALES=(0.85,1.00,1.15)` 由 JS 侧传入）
+        //   ⑤ 分数 = TM_CCOEFF_NORMED 等价式，`< threshold` ⇒ 不算命中
+        // `name` 是 `Documents/pgconfig/templates/` 下的相对路径（与 config.json 的 `templates` 同源）
+        let fTpl: @convention(block) (JSValue, JSValue, JSValue, JSValue, JSValue,
+                                      JSValue, JSValue, JSValue) -> JSValue = {
+            nameV, xV, yV, wV, hV, thrV, maskV, scalesV in
+            if self.stopped() { return JSValue(undefinedIn: JSContext.current()) }
+            guard nameV.isString else { return self.fail("pg.tpl(名字, x,y,w,h, thr?, mask?, scales?)") }
+            guard let im = self.image() else { return self.fail("还没有帧") }
+            let tplURL = ConfigStore.templatesDir().appendingPathComponent(nameV.toString()!)
+            guard let td = try? Data(contentsOf: tplURL), let timg = UIImage(data: td) else {
+                return self.fail("模板读不到：\(nameV.toString() ?? "?")")
+            }
+            let base = FrameNormalizer.normalize(im)
+            guard let cgAll = base.cgImage else { return self.fail("帧没有 cgImage") }
+            let W = cgAll.width, H = cgAll.height
+            let bx = max(0, Int(self.num(xV, 0))), by = max(0, Int(self.num(yV, 0)))
+            let bw = min(W - bx, Int(self.num(wV, W))), bh = min(H - by, Int(self.num(hV, H)))
+            let thr = self.num(thrV, 0.80)
+            let mask = maskV.isString ? maskV.toString()! : ""
+            var scales: [Double] = [1.0]
+            if scalesV.isArray, let a = scalesV.toArray() as? [NSNumber], !a.isEmpty {
+                scales = a.map { $0.doubleValue }
+            }
+            guard bx < W, by < H, bw > 2, bh > 2 else { return self.fail("pg.tpl 区域越界") }
+            guard let cg = cgAll.cropping(to: CGRect(x: bx, y: by, width: bw, height: bh))
+            else { return self.fail("pg.tpl 裁剪失败") }
+            // ROI 灰度（与 pg.gray 同一口径）
+            var buf = [UInt8](repeating: 0, count: bw * bh * 4)
+            guard let ctx = CGContext(data: &buf, width: bw, height: bh,
+                                      bitsPerComponent: 8, bytesPerRow: bw * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return self.fail("pg.tpl 建缓冲失败") }
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: bw, height: bh))
+            var s = [Double](repeating: 0, count: bw * bh)
+            for j in 0..<bh {
+                let src = (bh - 1 - j) * bw * 4
+                for i in 0..<bw {
+                    let o = src + i * 4
+                    let r = Double(buf[o]), g = Double(buf[o + 1]), b = Double(buf[o + 2])
+                    s[j * bw + i] = 0.299 * r + 0.587 * g + 0.114 * b
+                }
+            }
+            // 模板灰度（缩放到基准尺度，再用同一公式）
+            func grayOf(_ img: UIImage, scale: Double) -> (w: Int, h: Int, p: [Double])? {
+                let tw0 = Double(img.size.width * img.scale)
+                let th0 = Double(img.size.height * img.scale)
+                let tw = max(1, Int((tw0 * scale).rounded()))
+                let th = max(1, Int((th0 * scale).rounded()))
+                var tb = [UInt8](repeating: 0, count: tw * th * 4)
+                guard let tctx = CGContext(data: &tb, width: tw, height: th,
+                                           bitsPerComponent: 8, bytesPerRow: tw * 4,
+                                           space: CGColorSpaceCreateDeviceRGB(),
+                                           bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+                      let tcg = img.cgImage else { return nil }
+                tctx.draw(tcg, in: CGRect(x: 0, y: 0, width: tw, height: th))
+                var p = [Double](repeating: 0, count: tw * th)
+                for j in 0..<th {
+                    let src = (th - 1 - j) * tw * 4      // 翻成左上原点
+                    for i in 0..<tw {
+                        let o = src + i * 4
+                        p[j * tw + i] = 0.299 * Double(tb[o]) + 0.587 * Double(tb[o + 1])
+                                        + 0.114 * Double(tb[o + 2])
+                    }
+                }
+                return (tw, th, p)
+            }
+            var best: (score: Double, x: Int, y: Int, tw: Int, th: Int, scale: Double)?
+            for sc in scales {
+                guard let tg = grayOf(timg, scale: sc) else { continue }
+                let TW = tg.w, TH = tg.h
+                guard TW > 2, TH > 2, TW <= bw, TH <= bh else { continue }
+                // ② 模板质量闸（PC `MIN_TPL_STD = 6.0`）
+                var ms = 0.0, ms2 = 0.0
+                let nAll = Double(TW * TH)
+                for k in 0..<(TW * TH) { let v = tg.p[k]; ms += v; ms2 += v * v }
+                let mean0 = ms / nAll
+                let std0 = max(0, ms2 / nAll - mean0 * mean0).squareRoot()
+                if std0 < 6.0 { continue }
+                // ③ ink 掩码（墨迹 < 128，pad=2 膨胀；墨太少 ⇒ 不用掩码）
+                var maskIdx: [Int] = []
+                if mask == "ink" {
+                    let pad = 2
+                    var isInk = [Bool](repeating: false, count: TW * TH)
+                    for k in 0..<(TW * TH) where tg.p[k] < 128 { isInk[k] = true }
+                    var dil = isInk
+                    for j in 0..<TH {
+                        for i in 0..<TW where isInk[j * TW + i] {
+                            for dj in -pad...pad {
+                                let nj = j + dj
+                                guard nj >= 0, nj < TH else { continue }
+                                for di in -pad...pad {
+                                    let ni = i + di
+                                    guard ni >= 0, ni < TW else { continue }
+                                    dil[nj * TW + ni] = true
+                                }
+                            }
+                        }
+                    }
+                    for k in 0..<(TW * TH) where dil[k] { maskIdx.append(k) }
+                    if maskIdx.count < 30 { maskIdx = [] }
+                }
+                let useMask = !maskIdx.isEmpty
+                let n = Double(useMask ? maskIdx.count : TW * TH)
+                var tSum = 0.0, tSum2 = 0.0
+                if useMask {
+                    for k in maskIdx { let v = tg.p[k]; tSum += v; tSum2 += v * v }
+                } else {
+                    for k in 0..<(TW * TH) { let v = tg.p[k]; tSum += v; tSum2 += v * v }
+                }
+                let tMean = tSum / n
+                let tVar = max(1e-6, tSum2 / n - tMean * tMean)
+                let tStd = tVar.squareRoot()
+                let y1 = bh - TH, x1 = bw - TW
+                guard x1 >= 0, y1 >= 0 else { continue }
+                for yy in 0...y1 {
+                    for xx in 0...x1 {
+                        var sSum = 0.0, sSum2 = 0.0, cross = 0.0
+                        if useMask {
+                            for k in maskIdx {
+                                let sv = s[(yy + k / TW) * bw + (xx + k % TW)]
+                                let tv = tg.p[k]
+                                sSum += sv; sSum2 += sv * sv; cross += sv * tv
+                            }
+                        } else {
+                            for j in 0..<TH {
+                                let srow = (yy + j) * bw + xx
+                                let trow = j * TW
+                                for i in 0..<TW {
+                                    let sv = s[srow + i], tv = tg.p[trow + i]
+                                    sSum += sv; sSum2 += sv * sv; cross += sv * tv
+                                }
+                            }
+                        }
+                        let sMean = sSum / n
+                        let sVar = max(1e-6, sSum2 / n - sMean * sMean)
+                        let ncc = (cross / n - sMean * tMean) / (sVar.squareRoot() * tStd)
+                        if best == nil || ncc > best!.score {
+                            best = (ncc, xx, yy, TW, TH, sc)
+                        }
+                    }
+                }
+            }
+            guard let b = best else {
+                return self.val(["ok": true, "hit": false, "score": 0.0,
+                                 "why": "模板不可用（尺寸 > ROI 或过平）"])
+            }
+            if b.score < thr {
+                return self.val(["ok": true, "hit": false, "score": b.score,
+                                 "threshold": thr])
+            }
+            return self.val(["ok": true, "hit": true, "score": b.score,
+                             "threshold": thr, "scale": b.scale,
+                             "x": bx + b.x, "y": by + b.y, "w": b.tw, "h": b.th,
+                             "cx": Double(bx + b.x) + Double(b.tw) / 2.0,
+                             "cy": Double(by + b.y) + Double(b.th) / 2.0,
+                             "tpl": nameV.toString() ?? ""])
+        }
+        def("tpl", unsafeBitCast(fTpl, to: AnyObject.self))
+
         return pg
     }
 }
