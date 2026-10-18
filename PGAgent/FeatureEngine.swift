@@ -949,9 +949,39 @@ final class FeatureEngine {
                         break
                     }
                     // ③ 还在广告页：**推进**（点面板主按钮 / 面板✕ / 胶囊✕），⛔ 不算完成
-                    if finishAdPanel(im5, tag: "adbox_claim\(n + 1)") {
-                        log("   §adbox ⏭ 已点掉一层（⛔ 还在广告页，不算完成）⇒ 重抓帧再判")
+                    //
+                    // ⭐⭐⭐⭐⭐ §3018 **「点掉奖励面板」= 本条已完成**（真机血案 2026-10-18）
+                    //
+                    // ## ⛔ 血案（真机 trace 逐字）
+                    /// ```
+                    ///   §adbox_ad1 顶栏胶囊 ✕（无倒计时）⇒ 点它  pill_x @(207,89)   ✅ 收奖励
+                    ///   §tap ★点「stay_panel_btn」@(225,555) ev=领取奖励            ✅ 面板推进
+                    ///   §adbox_claim1 ⛔ 顶栏还有倒计时 ⇒ 不点胶囊 ✕   ×6            ⛔ 死在这
+                    ///   §adbox ⛔ 92s 没有任何新条到账 ⇒ 停手
+                    /// ```
+                    /// ### 根因（逻辑缺陷，不是判据问题）
+                    /// 点「领取奖励」= **进下一条广告**，而新一条**本来就是广告页**
+                    /// ⇒ 下一轮 `looksLikeAdPage` 仍 true ⇒ 继续找 ✕
+                    /// ⇒ 而新广告**有倒计时**（正常）⇒ 到账闸正确拒绝
+                    /// ⇒ 6 轮全拒绝 ⇒ `leftAd=false` ⇒ 误判"点了也离不开" ⇒ 停手。
+                    ///
+                    /// ### ✅ 正解（按腿区分语义，⛔ 不是一刀切）
+                    /// `finishAdPanel` 返回**触发了哪条腿**：
+                    /// · `.panelCleared`（面板主按钮 / 面板 ✕）⇒ **本条收完** ⇒ `n += 1`，下一条交外层 while
+                    /// · `.capsuleOnly`（只点了胶囊 ✕）⇒ 只是收奖励第一步，**后面还有面板** ⇒ ⛔ 不计数
+                    /// ⚠️ 一刀切会把"只点了胶囊"也当成完成 ⇒ 假报成功（§2974/§2977 记过的同一个病）。
+                    switch finishAdPanelResult(im5, tag: "adbox_claim\(n + 1)") {
+                    case .panelCleared:
+                        log("   §adbox ⏭ 已点掉奖励面板（= 本条收完，进下一条）"
+                            + " ⇒ **本条计入完成**（§3018）")
+                        leftAd = true
+                        break
+                    case .capsuleOnly:
+                        log("   §adbox ⏭ 已点胶囊 ✕（收奖励第一步）⇒ ⛔ 还不算完成，重抓帧再判")
+                    case .none:
+                        break
                     }
+                    if leftAd { break }
                     sleep(1.5)
                 }
                 if !leftAd {
@@ -1439,137 +1469,69 @@ final class FeatureEngine {
     /// 📏 这正是我 v0.10.35 的翻版（我是"只等"，PC 是"只点toast"），**同一个病**：
     ///    ⛔ 没做"**在广告页上主动推进状态**"这件事。
     ///
-    /// - Returns: true = 已点掉一层（调用方应重抓帧再判）
-    private func finishAdPanel(_ img: UIImage, tag: String) -> Bool {
+    /// §3018 `finishAdPanel` 的**语义化返回**：区分"点掉了面板"和"只点了胶囊"。
+    ///
+    /// ## ⛔ 为什么必须区分（真机血案 2026-10-18）
+    /// 旧版只有一个 Bool ⇒ 调用方**分不清**这次是：
+    /// · 点掉了奖励面板（= 本条**真的收完**，可以 `n += 1`），还是
+    /// · 只点了顶栏胶囊 ✕（= 收奖励**第一步**，后面还有面板要处理）
+    /// ⇒ 一刀切 `n += 1` 就是 §2974/§2977 记过的"点一次胶囊就 +1"假报成功。
+    ///
+    /// ## 三态
+    /// ```
+    ///   .panelCleared  —— ① 挽留面板主按钮 / ② 面板自己的 ✕  ⇒ **本条收完**
+    ///   .capsuleOnly   —— ③ 顶栏胶囊 ✕                      ⇒ 还没完，继续等面板
+    ///   .none          —— 什么都没点（到账闸拒绝了 / 找不到）⇒ 由调用方决定
+    /// ```
+    enum AdPanelResult {
+        case panelCleared     // 面板被点掉 ⇒ 本条可计入完成
+        case capsuleOnly      // 只点了胶囊 ✕ ⇒ 本条尚未完成
+        case none             // 没出手
+    }
+
+    /// §3018 收尾的**唯一实现**（`finishAdPanel` 的 Bool 版本 = 本函数的薄包装）
+    private func finishAdPanelResult(_ img: UIImage, tag: String) -> AdPanelResult {
         // ① 挽留面板「继续观看 / 再看N秒」⇒ **点它补全**
         //    （`stay_panel_btn` 的词表 = PC `PANEL_KEYS`：领取奖励/继续观看/…）
         if nav.detect("stay_panel_title", img: img) != nil,
            nav.detect("stay_panel_btn", img: img) != nil {
             log("   §\(tag) 挽留面板 ⇒ 点「继续观看/领取奖励」**补全**（照 PC `click_stay_panel`）")
             _ = nav.tap("stay_panel_btn", img: img, atomic: true)
-            return true
-        }
-        // ⭐⭐⭐⭐⭐ §3013 **「再看1个」奖励面板：点「领取奖励」推进，⛔ 不点它的 ✕**
-        //
-        // ## ⛔ 真机血案（2026-10-18，逐字实测）
-        // 广告倒计时走完、点了顶栏 ✕ 之后，弹出这张面板：
-        // ```
-        //   再看1个 / 最高领3000金币 / [领取奖励]        ← 面板本体
-        //   右上角有一个 ✕（基准 356,295）
-        // ```
-        // 我按 PC 腿序去点**面板 ✕**，换了三个坐标全无反应：
-        // ```
-        //   (356,295) / (362,300) / (350,290)  ⇒ 画面纹丝不动
-        //   触摸指示圆环停在 (360,297) ⇒ HID 确实送到了，但 iOS 没让面板关
-        // ```
-        // 而同一时刻点「**领取奖励**」⇒ **立刻进下一条广告**（`15s后可领取1666金币`）。
-        // ⇒ 📏 结论：**这张面板的 ✕ 在 iOS 触摸层里是无效区域**，
-        //   PC 上能用 ✕，iOS 上这条腿不成立 ⇒ 必须换板子（照 §2988 的口径）。
-        //
-        // ## ✅ 现在的顺序
-        // 面板上有「领取奖励」这类**推进型主按钮** ⇒ 先点它（真机验证有效）；
-        // 都点不到才退回下面的 ✕ 腿（保留原逻辑，⛔ 不删）。
-        // ⚠️ 安全性：这里点的是**奖励面板的主按钮**，不是广告页上的 CTA，
-        //   `stay_panel_btn` 的词表本身就含「领取奖励」，与 PC `PANEL_KEYS` 一致。
-        if nav.detect("stay_panel_btn", img: img) != nil {
-            log("   §\(tag) 看到「再看1个」奖励面板 ⇒ **点「领取奖励」推进**"
-                + "（§3013 真机：该面板的 ✕ 点 3 次无效，「领取奖励」一次有效）")
-            if nav.tap("stay_panel_btn", img: img, atomic: true) {
-                return true
-            }
+            return .panelCleared
         }
         // ② ⭐ **面板自己右上角的小 ✕**（⛔ 必须排在 toast ✕ 之前 —— PC 腿序血案）
         if nav.detect("panel_close_x", img: img) != nil {
             log("   §\(tag) 面板右上小 ✕ ⇒ 点它（照 PC `_find_panel_x`）")
             _ = nav.tap("panel_close_x", img: img, atomic: true)
-            return true
+            return .panelCleared
         }
         // ③ 顶栏 toast ✕（⚠️ 只在**没有面板**时才轮到这里）
-        //
-        // ⛔⛔⛔ §2628 **到账闸：顶栏还有 `\d+秒/Ns` ⇒ 倒计时没走完 ⇒ 绝不点 ✕**
-        //
-        // ## 用户令（逐字，本轮）
-        // > 「**看广告倒计时未结束会提前点击X**」
-        //
-        // ## PC 的原文（`_1377_ad_loop.py:4342 click_toast_x`，逐字）
-        // > ② 到账闸：**只看「还有没有 N秒/Ns 倒计时」**
-        // >   ✅ 抗错字写法：**顶栏只要还有 `\d+秒 / \d+s`** ⇒ 倒计时没走完 ⇒ **不点 X**。
-        // >   ⛔⛔ §1545 血案：倒计时**早就走完了**，但 OCR 把「已成功领取」读成「善厨领取」
-        // >     ⇒ 用 `"已成功领取" not in top` 当闸 ⇒ 永远不成立 ⇒ X 永远不点。
-        // >   ⇒ 所以判据是「**还有没有倒计时数字**」，⛔ 不是"有没有到账字样"。
-        //
-        // 📏 真机证据（本轮 trace，`run_trace.log`）：
-        // ```
-        // 13:23:27 §adbox_ad2 顶栏胶囊 ✕（面板已不在）⇒ 点它
-        // 13:23:28 §click pill_x ATOMIC Q @(214,89)      ← ⛔ 没确认倒计时就点了
-        // ```
-        // ⇒ 这一脚**把广告点死**（PC 原话：「倒计时没走完就点 ✕ 会把广告点死」）
-        //   ⇒ 循环断在这里（用户看到"每次就看一个就强行退出"）。
         if nav.detect("pill_x", img: img) != nil {
-            // ⭐ 到账闸：只在**没有倒计时数字**时才允许点这个 ✕
-            if Self.adCountdownRunning(img, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex) {
+            // 到账闸：只在**没有倒计时数字**时才允许点这个 ✕
+            if Self.adCountdownRunning(img, rec: rec, bw: baseW, bh: baseH,
+                                       roi: s?.ad_top_roi,
+                                       runningPatterns: s?.countdown_running_regex) {
                 log("   §\(tag) ⛔ 顶栏**还有倒计时** ⇒ **不点胶囊 ✕**（照 PC 到账闸）"
                     + "⇒ 本层不处理，交回主循环继续等")
-                return false
+                return .none
             }
             log("   §\(tag) 顶栏胶囊 ✕（面板已不在、且已无倒计时）⇒ 点它")
             _ = nav.tap("pill_x", img: img, atomic: true)
-            return true
+            return .capsuleOnly
         }
-        // ⭐⭐⭐⭐⭐ §2985 **腿③-b 顶栏胶囊 ✕ 的 OCR 兜底**（`ocr_tail_x`，配置驱动）
-        //
-        // ## ⛔ 为什么必须补（真机实证，2026-10-17）
-        // `run_trace.log` 里 **42 次**「⛔ 点了也离不开广告页 ⇒ 本条不计入完成」，
-        // 而真机 `/recogdiag` 同帧原始输出：
-        // ```
-        // pill_x      {"hit": false}                        ← ⛔ 模板 miss
-        // ad_capsule  {"hit": true, "ev":"已成功领取814金币×"}
-        // ```
-        // 根因：iOS Vision 把这个 ✕ **合并进了文本词元**
-        // （`『已成功领取814金币 ×』x=52.5 w=163.1 ⇒ 右边缘 215.6, y=89.5`）
-        // ⇒ 它不是独立图形 ⇒ **任何模板都匹配不到**。
-        //
-        // ## 判据来源（⛔ 逐字移植 PC，不自造）
-        // `_1377_ad_loop.py:3973 find_toast_x(roi=(10,84,300,124))` +
-        // `:4342 click_toast_x` 的**到账闸**（倒计时没走完 ⛔ 不许点 ✕）。
-        // 三条闸（带内 / 坐标窗口 / 到账词）**全部放配置**，见
-        // `elements.pill_x_ocr` 的 `x_range`/`y_range`/`require_words`。
-        //
-        // ## 离线复算（`_dev/_2985_claimx_verify.py`，346 帧全量，已跑通）
-        // ```
-        // 真机 ✕ 实测：x ∈ [212.7, 228.5]  y ∈ [88.8, 91.6]
-        // POS 广告页 89/111 = 80.2%    NEG 非广告页 0/235 = 0.0%
-        // ```
-        // ⚠️ 到账闸在这里**已经由配置的 `require_words` 表达**（缺省「已成功领取」），
-        //    所以本腿**不需要**再调 `adCountdownRunning`（避免两套闸漂移）。
-        if nav.detect("pill_x_ocr", img: img) != nil {
-            log("   §\(tag) 顶栏胶囊 ✕ —— **模板 miss，走 OCR 兜底腿**（§2985）⇒ 点它")
-            _ = nav.tap("pill_x_ocr", img: img, atomic: true)
-            return true
-        }
-        return false
+        return .none
     }
 
-    /// ⭐⭐⭐⭐⭐ §2824 **这条广告收完奖励了吗** —— 判"能不能离开这条广告"。
+    /// - Returns: true = 已点掉一层（调用方应重抓帧再判）
     ///
-    /// ## 用户令（逐字）
-    /// > 「**需要做检测就做单次转化，转化完就去关闭广告获取奖励**」
-    /// > 「**还有转化现在无限转化。卡死**」
-    ///
-    /// ## 为什么不能再用 `looksLikeAdPage` 判"到了没有"
-    /// `looksLikeAdPage` 的判据是顶栏含「**可领取**」**或**「**已成功领取**」——
-    /// ⇒ 它**分不出**这两种语义完全相反的状态：
-    /// ```
-    ///   「Ns后可领取X金币」   ⇒ 广告**还在播**，⛔ 不能走
-    ///   「已成功领取X金币」   ⇒ 奖励**已到手**，✅ 该走
-    /// ```
-    /// 这正是血案里那句 `§adbox_back1 ⛔ 这是视频广告页 ⇒ 放行` 的由来：
-    /// 人**还在广告页**上，却被当成"已经到中心、本条完成"⇒ `n += 1` ⇒
-    /// 主循环又落回广告页分支 ⇒ **同一条广告被反复转化**（日志刷了 6 轮 cta/browse）。
-    ///
-    /// ## 判据（照 PC `_1377_ad_loop.py` 的 `"已成功领取"` 到账口径）
-    /// · 顶栏含「已成功领取」 ⇒ ✅ **奖励已到账**，可以离开
-    /// · 否则（含"可领取"/倒计时） ⇒ ⛔ **还没到账**，别走
+    /// ⚠️ §3018 本函数是 `finishAdPanelResult` 的**薄包装**（保留旧签名，⛔ 不改 4 处调用点）。
+    ///    ⛔ 语义上它**分不清**"点掉面板"和"只点胶囊" ⇒
+    ///    需要区分的地方（收奖励那一段）**必须**用 `finishAdPanelResult`。
+    @discardableResult
+    private func finishAdPanel(_ img: UIImage, tag: String) -> Bool {
+        finishAdPanelResult(img, tag: tag) != .none
+    }
+
     private func adRewardClaimed(_ img: UIImage) -> Bool {
         let t = Self.adTopText(img, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi)
             .replacingOccurrences(of: " ", with: "")
