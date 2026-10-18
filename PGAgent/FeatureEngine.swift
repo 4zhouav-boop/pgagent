@@ -1556,7 +1556,37 @@ final class FeatureEngine {
             return .panelCleared
         }
         // ③ 顶栏 toast ✕（⚠️ 只在**没有面板**时才轮到这里）
-        if nav.detect("pill_x", img: img) != nil {
+        //
+        // ⭐⭐⭐⭐⭐ §3020 **模板腿 miss 时必须落到 OCR 兜底腿**（真机血案 2026-10-18）
+        //
+        /// ## ⛔ 血案（trace 逐字）
+        /// ```
+        ///   §adbox G3 正面看到「已成功领取」⇒ 倒计时确实走完
+        ///   §adbox G3 倒计时已结束 ⇒ **现在才点 ✕ 收奖励**
+        ///   §adbox ⛔ 点了也离不开广告页 ⇒ 本条不计入完成     ← ⛔ 一个动作都没发
+        ///   §adbox ⛔ 106s 没有任何新条到账 ⇒ 停手
+        /// ```
+        /// ### 根因
+        /// 同帧 `/recogdiag` 原始输出：
+        /// ```
+        ///   pill_x      ✗ miss                              ← 模板腿
+        ///   pill_x_ocr  ✅ @(203,77) ev=ocr_tail_x『已成功领取413金币X』→(215,89)
+        /// ```
+        /// 而本函数（`finishAdPanelResult`）**③ 只查 `pill_x`（模板）**，
+        /// 模板 miss ⇒ 直接 `return .none` ⇒ **OCR 兜底腿根本没机会出手**。
+        /// 📏 而 `pill_x_ocr` 在 config 里一直存在（`match:"ocr_tail_x"`），
+        ///    **漏斗**能用它（走 `detect()`），**唯独收奖励这条主路漏了**。
+        /// ⚠️ 这不是"新增判据"，是**把 PC 已有的 `find_toast_x` OCR 腿接上**
+        ///    （PC `_1377_ad_loop.py:3973`，`_note_2985` 已逐字移植过）。
+        let capsuleHit: Recognizer.Hit? = {
+            if let h = nav.detect("pill_x", img: img) { return h }
+            if let h = nav.detect("pill_x_ocr", img: img) {
+                log("   §\(tag) 顶栏胶囊模板 miss ⇒ **走 OCR 兜底腿**（§2985/§3020）@(\(Int(h.center.x)),\(Int(h.center.y)))")
+                return h
+            }
+            return nil
+        }()
+        if let h = capsuleHit {
             // 到账闸：只在**没有倒计时数字**时才允许点这个 ✕
             if Self.adCountdownRunning(img, rec: rec, bw: baseW, bh: baseH,
                                        roi: s?.ad_top_roi,
@@ -1565,8 +1595,9 @@ final class FeatureEngine {
                     + "⇒ 本层不处理，交回主循环继续等")
                 return .none
             }
-            log("   §\(tag) 顶栏胶囊 ✕（面板已不在、且已无倒计时）⇒ 点它")
-            _ = nav.tap("pill_x", img: img, atomic: true)
+            log("   §\(tag) 顶栏胶囊 ✕（面板已不在、且已无倒计时）⇒ 点它 @(\(Int(h.center.x)),\(Int(h.center.y)))")
+            _ = nav.tapPoint(Double(h.center.x), Double(h.center.y), atomic: true,
+                             why: "收奖励胶囊 ✕")
             return .capsuleOnly
         }
         return .none
