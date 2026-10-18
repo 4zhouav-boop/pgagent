@@ -178,22 +178,46 @@ final class KGXNet {
         for (name, stride) in KGXNet.heads {
             var outMat: ncnn_mat_t?
             if ncnn_extractor_extract(ex, name, &outMat) != 0 || outMat == nil { continue }
-            defer { ncnn_mat_destroy(outMat) }
-            guard let md = ncnn_mat_get_data(outMat!) else { continue }
-            let n = (KGXNet.inputSize / stride) * (KGXNet.inputSize / stride)
-            let want = n * (4 * KGXNet.regMax + KGXNet.nc)
-            let total = Int(ncnn_mat_get_w(outMat!)) * Int(ncnn_mat_get_h(outMat!))
-                         * max(1, Int(ncnn_mat_get_c(outMat!)))
+            let side = KGXNet.inputSize / stride
+            let nCh = 4 * KGXNet.regMax + KGXNet.nc      // 66
+            let wOut = Int(ncnn_mat_get_w(outMat!))
+            let hOut = Int(ncnn_mat_get_h(outMat!))
+            let cOut = Int(ncnn_mat_get_c(outMat!))
+            let cstep = Int(ncnn_mat_get_cstep(outMat!))
+            let total = wOut * hOut * max(1, cOut)
+            let want = side * side * nCh
+            // ⛔⛔⛔ §3148 **先把数据**整块**拷出来，再销毁 Mat**（真机血案）
+            //
+            // 旧写法：`defer { ncnn_mat_destroy(outMat) }` + 直接读 `outMat` 的裸指针
+            //   ⇒ `defer` 是**函数作用域**的，三个头依次 extract 时**不会被及时销毁**，
+            //     而 `ncnn_extractor` 下次 extract 会**复用内部缓冲**
+            //   ⇒ 读到的是"上一块内存 + 本块头部描述"的混合 ⇒ 数据整体错位
+            //   📏 真机症状（0.71，同帧 PC 对照 `_dev/_3132_kgx_ref.py`）：
+            //     · 手机：**34 个假阳**、conf 0.9998、`cx` 出现 **-253**、`cy` 全挤在 6~72
+            //     · PC 同帧：**0 个命中**（`score` 最大只有 0.796，且 >=0.45 的 5 个格子全落在合法区）
+            //   ✅ 正解：`guard let md ...` 之后**立刻**把 `total` 个 Float 拷进 Swift 数组，
+            //      然后 `ncnn_mat_destroy(outMat)`，后面只用 Swift 数组。
+            guard let md = ncnn_mat_get_data(outMat!) else {
+                ncnn_mat_destroy(outMat); continue
+            }
             guard total == want else {
-                NSLog("PGAgent §3130 kgx：%@ 尺寸 %d ≠ %d", name, total, want)
+                NSLog("PGAgent §3130 kgx：%@ 尺寸 %d ≠ %d（w=%d h=%d c=%d cstep=%d）",
+                      name, total, want, wOut, hOut, cOut, cstep)
+                ncnn_mat_destroy(outMat)
                 continue
             }
-            let fp = md.assumingMemoryBound(to: Float.self)
-            let side = KGXNet.inputSize / stride
+            var raw = [Float](repeating: 0, count: total)
+            let fpSrc = md.assumingMemoryBound(to: Float.self)
+            raw.withUnsafeMutableBufferPointer { dst in
+                for i in 0..<total { dst[i] = fpSrc[i] }
+            }
+            ncnn_mat_destroy(outMat)          // ✅ 数据已拷出，立刻销毁
+            let fp = raw                       // 后续只用 Swift 数组
+            // 布局（PC 实测）：w=66(通道) h=side(格x) c=side(格y) cstep=w*h
+            // ⇒ 格子 (gy,gx) 的 66 个通道 = raw[(gy*side+gx)*66 ... +65]
             for gy in 0..<side {
                 for gx in 0..<side {
-                    let k = gy * side + gx
-                    let base = k * (4 * KGXNet.regMax + KGXNet.nc)
+                    let base = (gy * side + gx) * nCh
                     // score = max(cls)（PC `nc[:, 4*reg_max:].max(1)`）
                     var score: Float = -1
                     for c in 0..<KGXNet.nc {
