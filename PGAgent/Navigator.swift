@@ -84,11 +84,50 @@ final class Navigator {
                                   minHits: e.min_hits ?? 1,
                                   minConfidence: minConf)
             // ⭐ §2307 **否定词闸**（见 `Element.not_words`）
+            //
+            // ⭐⭐⭐⭐⭐ §3021 **否定词要在「同一 ROI 内」找，⛔ 不是在 evidence 里找**
+            //
+            // ## ⛔ 血案（真机 2026-10-18，淘宝误判成快手消息页）
+            /// ```
+            ///   人在淘宝，底栏 OCR：'视频' '消息' '购物车' '我的淘宝'
+            ///   tab_msg(words:["消息"]) 命中 @(212,919) ⇒ 页型判 msg
+            ///   ⇒ §nav 在 msg 想要 tab_home/back_arrow ⇒ 淘宝里根本没有 ⇒ 停手
+            /// ```
+            /// 我给 `tab_msg` 加了 `not_words:["我的淘宝","购物车","淘"]`，
+            /// **但没生效** —— 因为旧实现是：
+            /// ```swift
+            /// if bad.contains(where: { ev.contains($0) }) { return nil }
+            /// //                      ↑ ev 只是「消息」这个词的 evidence
+            /// ```
+            /// ⇒ 否定词**永远不可能**出现在 evidence 里（evidence 只含命中词本身）
+            /// ⇒ 这道闸对"同页有别的特征"这种用法**恒不成立**。
+            ///
+            /// ## ✅ 修法
+            /// 否定词用**同一个 ROI**再跑一次 OCR：只要 ROI 内出现任一否定词 ⇒ 不成立。
+            /// ⚠️ 与原实现**并存**（原判据对"命中词自身含否定子串"仍然有效），
+            ///    只是多补一条"同 ROI 内的否定词"。
             if var hh = h {
                 let ev = hh.evidence
-                if let bad = e.not_words, !bad.isEmpty,
-                   bad.contains(where: { ev.contains($0) }) {
-                    return nil
+                if let bad = e.not_words, !bad.isEmpty {
+                    // ① 原判据：命中词本身含否定词
+                    if bad.contains(where: { ev.contains($0) }) { return nil }
+                    // ② §3021 新增：**同一 ROI 内**出现否定词 ⇒ 说明这不是目标页
+                    if let rr = r {
+                        let ws = rec.ocrRegion(img, rect: rr, minConfidence: minConf)
+                        let joined = ws.map(\.0).joined()
+                        if let hit = bad.first(where: { joined.contains($0) }) {
+                            log("   §neg \(name) 在 ROI 内出现否定词「\(hit)」⇒ 不算命中")
+                            return nil
+                        }
+                    } else {
+                        // 无 ROI ⇒ 退回全帧找（保守：宁可少命中）
+                        let ws = rec.ocrRegion(img, rect: nil, minConfidence: minConf)
+                        let joined = ws.map(\.0).joined()
+                        if let hit = bad.first(where: { joined.contains($0) }) {
+                            log("   §neg \(name) 全帧出现否定词「\(hit)」⇒ 不算命中")
+                            return nil
+                        }
+                    }
                 }
                 hh.name = name
                 return hh
