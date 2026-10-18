@@ -61,6 +61,10 @@ final class KGXNet {
     var available: Bool { loaded }
     var error: String { loadError }
 
+    /// ⭐ §3162 最近一次推理的**几何量 + 采样点**（诊断用，⛔ 不参与推理）
+    ///   用途：与 PC `_3132_kgx_ref.py` 逐点对拍，定位"输入数据不一致"还是"输出读法不一致"
+    static var lastDebug: [String] = []
+
     // MARK: - 加载
 
     /// 懒加载：从 App bundle 读 `kgx.param` + `kgx.bin`
@@ -154,6 +158,18 @@ final class KGXNet {
                 chw[2 * plane + idx] = R
             }
         }
+        // ⭐ §3162 诊断：把 letterbox 的**几何量 + 若干采样点**存下来，
+        //   供 JS 侧 `pg.kgxDbg()` 取回，与 PC 的 `_3132_kgx_ref.py` 逐点对拍。
+        //   ⛔ 这是诊断，不参与推理；只保留最后一次调用。
+        KGXNet.lastDebug = [
+            "r=\(r) nw=\(nw) nh=\(nh) dx=\(dx) dy=\(dy) w0=\(w0) h0=\(h0)",
+            String(format: "chw[0][0][0]=%.6f", chw[0 * plane + 0]),
+            String(format: "chw[0][0][200]=%.6f", chw[0 * plane + 200]),
+            String(format: "chw[0][300][320]=%.6f", chw[0 * plane + 300 * 640 + 320]),
+            String(format: "chw[0][639][320]=%.6f", chw[0 * plane + 639 * 640 + 320]),
+            String(format: "chw[1][320][320]=%.6f", chw[1 * plane + 320 * 640 + 320]),
+            String(format: "chw[2][320][320]=%.6f", chw[2 * plane + 320 * 640 + 320]),
+        ]
 
         // 输入张量（3×640×640 float32）
         guard let ex = ncnn_extractor_create(net) else { return nil }

@@ -934,6 +934,14 @@ private final class PGBridge {
         }
         def("kgxReady", unsafeBitCast(fKgxReady, to: AnyObject.self))
 
+        // ⭐ §3162 诊断：最近一次 kgx 推理的**几何量 + 采样点**
+        //   与 PC `_dev/_3132_kgx_ref.py` 的打印逐项对拍 ⇒ 一次就能分清
+        //   "输入数据不一致" 还是 "输出读法不一致"
+        let fKgxDbg: @convention(block) () -> JSValue = {
+            self.val(["ok": true, "lines": KGXNet.lastDebug])
+        }
+        def("kgxDbg", unsafeBitCast(fKgxDbg, to: AnyObject.self))
+
         return pg
     }
 }
