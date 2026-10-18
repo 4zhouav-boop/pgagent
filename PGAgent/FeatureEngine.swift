@@ -497,50 +497,38 @@ final class FeatureEngine {
                 let dwelledSoFar = Date().timeIntervalSince(adEnteredAt)
                 let dwellLeft = adDwellTarget - dwelledSoFar
 
-                // ── ② ⭐⭐⭐ 转化：点 CTA → 浏览落地页（**每条只做一次**）──
+                // ── ② 转化（G2）⭐⭐⭐⭐⭐ §3027 **1:1 移植 PC `_1377_ad_loop.py:9645-9760`** ──
                 //
-                // ⛔⛔ §2824 用户令：「**需要做检测就做单次转化，转化完就去关闭广告获取奖励**」
-                //    旧版没有 `convertedThisAd` 闸 ⇒ 主循环每绕回来一次就**再转化一次**
-                //    （真机日志：cta1/browse1 → cta2/browse2 → … → cta6/browse6，同一条广告）。
+                // ## 📏 本轮用户令（逐字）
+                // > 「**直接把PG控制器的代码移植1比1到手机**」
                 //
-                // ⭐⭐⭐⭐⭐ §3022 **直播间广告：不点 CTA**（PC L8491 逐字）
-                /// ```python
-                /// "ad_live": "不点 CTA、不操作（用户令「直播间就不操作了」）；等倒计时 → 点 ✕ 收奖励"
-                /// ```
-                /// 📏 用户令：「**直播间就不操作了**」⇒ 只等停留 + 等倒计时 + 点 ✕ 收奖励，
-                ///    ⛔ 绝不在直播间里点 CTA（会点进"小黄车/进店"，把广告搞死）。
-                let isLiveAd = (PageKinds.detectFrom(sheet: PageKinds.OcrSheet(img: img,
-                                        ocr: RecognizerOcr(rec: rec))).kind == .adLive)
-                if isLiveAd {
-                    log("   §adbox 📺 **直播间广告** ⇒ 照 PC `ad_live` 口径：⛔ 不点 CTA、⛔ 不操作，"
-                        + "只等停留(\(Int(adDwellTarget))s) + 等倒计时 + 点 ✕ 收奖励")
-                    convertedThisAd = true      // 标记"不再转化"，与本条一致
-                } else if !convertedThisAd, Self.adConvertStopped(img, rec: rec, nav: nav,
-                                                                  bw: baseW, bh: baseH,
-                                                                  roi: s?.ad_top_roi,
-                                                                  runningPatterns: s?.countdown_running_regex,
-                                                                  log: log, tag: "adbox_g2\(n + 1)") {
-                    // ⛔ 本条**已到账/已定格** ⇒ 不做转化（PC `no_conv` 三闸，见函数文档）
-                    convertedThisAd = true
-                } else if !convertedThisAd, !isCancelled(), let cur4 = grab() {
-                    convertedThisAd = true
-                    if let how = clickCTA(cur4, tag: "adbox_cta\(n + 1)") {
-                        log("§adbox CTA 已点（\(how)）⇒ 等落地页")
-                        sleep(3.2)
-                        if let land = grab(),
-                           !Self.looksLikeAdPage(land, rec: rec, nav: nav, bw: baseW, bh: baseH,
-                                                 roi: s?.ad_top_roi) {
-                            log("§adbox ✅ 已进落地页（顶栏「\(Self.adTopText(land, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi).prefix(18))」）⇒ 浏览")
-                            clickInstall(land, tag: "adbox_inst\(n + 1)")   // 先点安装（照 PC 顺序）
-                            browseLanding(tag: "adbox_browse\(n + 1)")      // 再浏览
-                        } else {
-                            log("§adbox ⚠️ CTA 没点进落地页 ⇒ **不浏览**（照 PC：都没进去，滑什么）")
-                        }
-                    } else {
-                        log("§adbox ⚠️ 没找到可点的 CTA（过闸后）⇒ 本条不做转化，直接收奖励")
+                // ## ⛔ 我之前三个错（对照 PC 原文逐个纠正）
+                // ```
+                //   PC 分支                     我的旧实现                    错在哪
+                //   ① 直播间 ⇒ 不转化            ✅ 有                        一致
+                //   ② 购物型 ⇒ **也转化**        ⛔ 没有这条                 漏
+                //   ③ 已到账 ⇒ **仍要点 CTA**    ⛔ 我跳过了（理解反了）      语义颠倒
+                //   ④ 其他   ⇒ 转化              ✅ 有                        一致
+                //   补点 CTA（最多 2 次）        ⛔ 没有                     漏
+                //   §1716 倒计时继续等（4 轮）   ⛔ 没有                     漏
+                //   **补点 3 次无效 ⇒ break**    ⛔ 没有                     ← 无限转化的真根因
+                // ```
+                // 📏 关键认知：PC 的 `no_conv` **不是靠"返回失败就锁死"**，
+                //   而是靠 **"CTA 补点 3 次仍无效 ⇒ break 停手"** + **"到账 ⇒ no_conv"** 两条。
+                //
+                // ⚠️ 结构对齐（PC L9645-9760 逐行对应，行号见注释）
+                if !convertedThisAd && !isCancelled() {
+                    convertedThisAd = true          // 本条只走一次 G2（PC 也是每条一次）
+                    // ★★★ PC L9744 的 `break`：CTA 连点 3 次仍无效 ⇒ **本条彻底停手**
+                    //   ⛔ 不计数（奖励没拿到）、⛔ 不回头转化
+                    //   ⚠️ 这里用 `continue` 跳出本条，等价于 PC 的 `break` + 主循环重判
+                    if self.adG2Convert(n: n, img: img) {
+                        log("   §adbox ⛔ 本条按 PC `break` 语义停手（CTA 三次无效）"
+                            + "⇒ 不计入完成，回中心待重判")
+                        dwelledThisAd = false
+                        _ = ensureInCenter(tag: "adbox_g2stop\(n)")
+                        continue
                     }
-                } else if convertedThisAd {
-                    log("   §adbox ⏭ 本条广告**已转化过**（单次转化，用户令）⇒ ⛔ 不再转化")
                 }
 
                 // ── ②b ⭐⭐⭐⭐⭐ §2640 **回广告页**（PC L9769~L9801，⛔ 我原来整段漏了）──
@@ -1412,67 +1400,211 @@ final class FeatureEngine {
         return n > 0
     }
 
+    /// PC `is_shop_ad`（`_1377_ad_loop.py:1181`）—— 购物/电商型广告判定
+    ///
+    /// ## PC 原文（逐字）
+    /// ```python
+    /// BOX_SHOPBAR = (0, 875, 451, 977)          # L455
+    /// SHOP_AD_KEYS = ("秒杀", "购物车", "进店", "客服", "立即购买", "加购", "去购买", ...)
+    /// def is_shop_ad(img):
+    ///     bar = txt(img, BOX_SHOPBAR)
+    ///     hit = [k for k in SHOP_AD_KEYS if k in bar]
+    ///     return (len(hit) > 0), bar, hit
+    /// ```
+    ///
+    /// ## ⚠️ 语义（PC 两处注释合起来才是完整口径）
+    /// · `is_shop_ad` 的 docstring（L1182-1189）：「购物广告一轮不转化」「可以浏览，不要做支付」
+    /// · 但主循环 L9648-9654（§1564 用户纠正）：「**我说不支付 不是说不浏览**」
+    ///   ⇒ **购物型也要做转化**（点 CTA → 先安装 → 后浏览），
+    ///   ⛔ 红线只有一条 = **不支付/不购买**，由 `FORBID_KEYS` 硬闸守着。
+    /// ⇒ 📏 本函数只负责**判定**；"不许支付"由 `clickCTA` 内部的 `forbidden()` 拦（已有）。
+    /// ⚠️ 这里的 `adRewardClaimed` 用 static 版（PC `_already` 在 `page_kind` 同级算）
+    static func isShopAdFrame(_ img: UIImage, rec: Recognizer) -> Bool {
+        // PC `BOX_SHOPBAR = (0, 875, 451, 977)`（x0,y0,x1,y1）
+        let r = CGRect(x: 0, y: 875, width: 451, height: 977 - 875)
+        let bar = rec.ocrRegion(img, rect: r, minConfidence: 0.3)
+            .map(\.0).joined().replacingOccurrences(of: " ", with: "")
+        // PC `SHOP_AD_KEYS`（L456 起；这里取项目配置里已有的 shop 词表口径）
+        let keys = ["秒杀", "购物车", "进店", "客服", "立即购买", "加购", "去购买",
+                    "立即秒杀", "抢购", "购买"]
+        return keys.contains(where: { bar.contains($0) })
+    }
+
+    /// PC `_already` 的 static 版（顶栏含「已成功领取」= 奖励已到账）
+    static func adRewardClaimed(_ img: UIImage, rec: Recognizer,
+                                bw: Double, bh: Double, roi: [Double]?) -> Bool {
+        let t = adTopText(img, rec: rec, bw: bw, bh: bh, roi: roi)
+            .replacingOccurrences(of: " ", with: "")
+        return t.contains("已成功领取") || t.contains("已领取")
+    }
+
     // MARK: - ⭐⭐⭐ 广告页拦阻（照 PC `is_ad_page`，⛔ 独立于页型表）
 
-    /// ⭐⭐⭐⭐⭐ §3026 **这一条广告"该不该再转化"** —— 照抄 PC `no_conv` 的**三闸**
+    /// ⭐⭐⭐⭐⭐ §3027 **G2 转化段 —— 1:1 移植 PC `_1377_ad_loop.py:9645-9760`**
     ///
-    /// ## ⛔ 血案（用户令逐字）
-    /// > 「**而且你这无限转化的毛病还是没有治疗好啊，没有上下文么。
-    /// >   转化后面就是关闭啊，怎么他妈的无限回来转化。**」
-    /// > 「**无限转化也要修，但是修法你可以学习PG控制器。**」
+    /// ## 📏 用户令（逐字）
+    /// > 「**直接把PG控制器的代码移植1比1到手机**」
     ///
-    /// ## ✅ PC 的机制（`_1377_ad_loop.py:9698-9736` 逐字）
-    /// `no_conv` 是**局部变量、每条广告开头重建**（L9644），一旦置 `true` ⇒ 本条**永不回头转化**。
-    /// 置 `true` 的三个条件**全是"奖励已经到账"的正面证据**：
+    /// ## PC 原文的四分支（L9645-9665，逐字对应）
     /// ```python
-    /// # ① L9698  顶栏已变「已成功领取」⇒ 奖励已到账（N10 修复）
-    /// if (not sys_hit) and (not ext_opened) and ("已成功领取" in top2):
-    ///     no_conv = True
-    /// # ② L9705  画面静止（广告已定格）⇒ 跳过 CTA 补点、直接收奖励（§1717）
-    /// if ("可领取" in top2) and ("已成功领取" not in top2) and (not sys_hit) \
-    ///         and (not ext_opened) and (not no_conv):
-    ///     if _STILL[0]:
-    ///         no_conv = True
-    /// # ③ L9731  倒计时走完 ⇒ 停补点、直接收奖励（§1716）
-    /// if ("已成功领取" in top2) or ("可领取" not in top2):
-    ///     no_conv = True
+    /// if is_live_ad:            # ① 直播间 ⇒ 不点 CTA
+    ///     print("★本条是「直播间形态」广告 ⇒ 不点 CTA，直接等倒计时 → 点 ✕ 收奖励")
+    /// elif is_shop_ad_flag:     # ② 购物/电商型 ⇒ **照做转化**（用户：不支付≠不转化）
+    ///     CONV[0] = convert_and_browse(...)
+    /// elif _already:            # ③ 已到账 ⇒ **仍要点 CTA 做互动**（用户口径，不许跳过）
+    ///     CONV[0] = convert_and_browse(...)
+    /// else:                     # ④ 其他 ⇒ 转化
+    ///     CONV[0] = convert_and_browse(...)
     /// ```
-    /// 📏 **共同点：都是"奖励已经到手 / 广告已经播完"** —— 这时候再点 CTA 就是**白白浪费**
-    ///   （广告已结算，CTA 点进去只是再逛一次落地页），而且正是"无限转化"的来源。
     ///
-    /// ## ⚠️ 与"返回腿失败就锁死"的区别（这一点我一开始搞错了，用户指出）
-    /// > 「**返回失败就找失败的问题解决 而不是不让转化**」
-    /// ⇒ 本函数**只管"该不该转化"**（奖励到账了就别转）；
-    ///   而"返回失败"由 `returnToAd` 的锚点腿（§3026 `inpage_landing`）去修。
-    ///   ⛔ 两者不许混为一谈。
+    /// ## PC 原文的补点循环（L9683-9704，逐字对应）
+    /// ```python
+    /// while (not sys_hit) and (not ext_opened) and (not no_conv) and ("可领取" in top2) \
+    ///         and ("已成功领取" not in top2) and tries < 2:
+    ///     tries += 1
+    ///     click_cta(...); wait(3.2)
+    /// if (not sys_hit) and (not ext_opened) and ("已成功领取" in top2):
+    ///     no_conv = True                    # ← N10 短路：到账 ⇒ 停止补点
+    /// ```
     ///
-    /// - Returns: true = **本条不要再转化**（直接去等倒计时/点 ✕ 收奖励）
-    static func adConvertStopped(_ img: UIImage, rec: Recognizer, nav: Navigator,
-                                 bw: Double, bh: Double, roi: [Double]?,
-                                 runningPatterns: [String]?,
-                                 log: (String) -> Void, tag: String) -> Bool {
-        let top = adTopText(img, rec: rec, bw: bw, bh: bh, roi: roi)
-            .replacingOccurrences(of: " ", with: "")
-        // 闸① 奖励已到账（PC L9698 逐字）
-        if top.contains("已成功领取") {
-            log("   §\(tag) ⛔ 转化闸①：顶栏「已成功领取」= **奖励已到账** ⇒ ⛔ 不再转化"
-                + "（照 PC `no_conv` L9698）⇒ 直接去等倒计时/点 ✕ 收奖励")
+    /// ## PC 原文的 §1716 倒计时闸（L9705-9736，逐字对应）
+    /// ```python
+    /// if ("可领取" in top2) and ("已成功领取" not in top2) and ... and (not no_conv):
+    ///     if _STILL[0]:   no_conv = True    # §1717 画面静止 ⇒ 直接收奖励
+    ///     _CD_RX = re.search(r"(\d+)\s*s\s*后", top2) or re.search(r"(\d+)\s*秒后", top2)
+    ///     if _CD_RX and _CDWAIT[0] < 4 and _CDWAIT[1] == n:
+    ///         _CDWAIT[0] += 1
+    ///         wait(min(12.0, max(4.0, float(_CD_RX.group(1)) + 2.0)))
+    ///         top2 = txt(...)
+    ///         if ("已成功领取" in top2) or ("可领取" not in top2):
+    ///             no_conv = True
+    ///         else:
+    ///             click_cta(...); wait(3.2)  # 再补点一次（此时可能已解锁）
+    ///     if ("可领取" in top2) and ("已成功领取" not in top2) and (not no_conv):
+    ///         print("!! CTA 连点 3 次都没打开互动页 ⇒ 已停手")
+    ///         break                          # ★★★ 这就是 PG 治无限转化的真机制
+    /// ```
+    ///
+    /// ⚠️ **最后那行 `break` 是关键**：补点 3 次仍不成立 ⇒ **本条彻底停手**，
+    ///   ⛔ 不再回头转化（PC 直接跳出整个广告循环）。我之前漏了它 ⇒ 无限转化。
+    ///
+    /// - Returns: 是否**应该停手**（true = 本条放弃，调用方需跳出）
+    @discardableResult
+    private func adG2Convert(n: Int, img: UIImage) -> Bool {
+        let tag = "adbox_g2\(n + 1)"
+        func topText(_ im: UIImage) -> String {
+            Self.adTopText(im, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi)
+                .replacingOccurrences(of: " ", with: "")
+        }
+        // ── 分支判定（PC L9645-9665）──
+        let kind = PageKinds.detectFrom(sheet: PageKinds.OcrSheet(img: img,
+                                    ocr: RecognizerOcr(rec: rec))).kind
+        let isLiveAd = (kind == .adLive)
+        let isShopAd = Self.isShopAdFrame(img, rec: rec)
+        let already = Self.adRewardClaimed(img, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi)
+        var noConv = false
+        var noConvReason = ""
+
+        if isLiveAd {
+            noConv = true
+            noConvReason = "直播间形态（用户令：不操作、别死定）"
+            log("   §\(tag) 📺 本条是「直播间形态」广告 ⇒ ⛔ 不点 CTA，直接等倒计时 → 点 ✕ 收奖励"
+                + "（PC L9646）")
+        } else if isShopAd {
+            // PC L9648：购物/电商型**照做转化**（用户口径：不支付≠不转化）
+            log("   §\(tag) 🛒 购物/电商型广告 ⇒ **照做转化**（PC L9648；⛔ 支付由 FORBID 闸拦）")
+            _ = convertAndBrowse(n: n, img: img, tag: tag)
+        } else if already {
+            // PC L9656：已到账 ⇒ **仍要点 CTA 做互动**（用户口径，不许跳过）
+            log("   §\(tag) 胶囊已「已成功领取」（奖励已到账）⇒ **仍要点 CTA 做互动**"
+                + "（PC L9656：用户口径，不许跳过）")
+            _ = convertAndBrowse(n: n, img: img, tag: tag)
+        } else {
+            _ = convertAndBrowse(n: n, img: img, tag: tag)
+        }
+
+        // ── 点后顶栏 + 补点循环（PC L9670-9704）──
+        var top2 = grab().map { topText($0) } ?? ""
+        log("   §\(tag) G2 点后顶栏: 「\(top2.prefix(30))」")
+        var tries = 0
+        while !noConv && tries < 2
+                && top2.contains("可领取") && !top2.contains("已成功领取") {
+            tries += 1
+            log("   §\(tag) CTA 没中，重新定位再补点（第 \(tries) 次）")
+            if let im = grab() { _ = clickCTA(im, tag: "\(tag)_find\(tries)") }
+            sleep(3.2)
+            top2 = grab().map { topText($0) } ?? ""
+            log("   §\(tag) G2 补点后顶栏(第\(tries)次): 「\(top2.prefix(30))」")
+        }
+        // PC L9698（N10 短路）：到账 ⇒ 停止补点
+        if top2.contains("已成功领取") {
+            if !noConv {
+                log("   §\(tag) ✅ 顶栏已变「已成功领取」= **奖励已到账**（N10 短路）"
+                    + "⇒ 停止补点 CTA，直接进 G3/G4 收奖励")
+            }
+            noConv = true
+            if noConvReason.isEmpty { noConvReason = "奖励已到账（N10 短路）" }
+        }
+
+        // ── §1716 倒计时闸 + §1717 静止帧闸（PC L9705-9736）──
+        if !noConv && top2.contains("可领取") && !top2.contains("已成功领取") {
+            // §1716：顶栏仍含倒计时锚（`Ns后` / `N秒后`）⇒ CTA 被锁 ⇒ 继续等
+            let secs = Self.adCountdownSeconds(img, rec: rec, bw: baseW, bh: baseH,
+                                               roi: s?.ad_top_roi,
+                                               secondsPatterns: s?.countdown_seconds_regex,
+                                               fallbackPatterns: s?.countdown_running_regex)
+            if let sec = secs {
+                var rounds = 0
+                while rounds < 4 && !noConv {
+                    rounds += 1
+                    let waitS = min(12.0, max(4.0, Double(sec) + 2.0))
+                    log("   §\(tag) §1716 顶栏仍在倒计时（\(sec)s）⇒ CTA 被锁，**继续等**"
+                        + "（第 \(rounds)/4 轮，等 \(Int(waitS))s）")
+                    sleep(waitS)
+                    top2 = grab().map { topText($0) } ?? ""
+                    log("   §\(tag) §1716 等后顶栏: 「\(top2.prefix(30))」")
+                    if top2.contains("已成功领取") || !top2.contains("可领取") {
+                        noConv = true
+                        if noConvReason.isEmpty { noConvReason = "倒计时走完（§1716 等待后）" }
+                        log("   §\(tag) ✅ 倒计时走完 ⇒ 停补点、直接收奖励")
+                    } else {
+                        // 仍未走完 ⇒ 再补点一次 CTA（此时可能已解锁）
+                        if let im = grab() { _ = clickCTA(im, tag: "\(tag)_cdw\(rounds)") }
+                        sleep(3.2)
+                        top2 = grab().map { topText($0) } ?? ""
+                        log("   §\(tag) §1716 补点后顶栏: 「\(top2.prefix(30))」")
+                    }
+                }
+            }
+            // ★★★ PC L9743-9747：**补点 3 次仍无效 ⇒ 停手**（治无限转化的真机制）
+            if !noConv && top2.contains("可领取") && !top2.contains("已成功领取") {
+                log("   §\(tag) ⛔ **CTA 连点 3 次都没打开互动页（倒计时已走完仍无效）⇒ 本条停手**"
+                    + "（PC L9744 逐字：`CTA 连点 3 次都没打开互动页 —— 已停手`）")
+                return true
+            }
+        }
+        _ = noConvReason      // 只用于日志可读性（PC 用它让"未转化"的原因不误导）
+        return false
+    }
+
+    /// PC `convert_and_browse`（`_1377_ad_loop.py:8783`）—— 点 CTA → 确认进落地页 → 先装后浏览
+    @discardableResult
+    private func convertAndBrowse(n: Int, img: UIImage, tag: String) -> Bool {
+        guard let how = clickCTA(img, tag: tag) else {
+            log("   §\(tag) ⚠️ 没找到可点的 CTA（过闸后）⇒ 本条不做转化，直接收奖励")
+            return false
+        }
+        log("   §\(tag) CTA 已点（\(how)）⇒ 等落地页")
+        sleep(3.2)
+        guard let land = grab() else { return false }
+        if !Self.looksLikeAdPage(land, rec: rec, nav: nav, bw: baseW, bh: baseH,
+                                 roi: s?.ad_top_roi) {
+            log("   §\(tag) ✅ 已进落地页（顶栏「\(Self.adTopText(land, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi).prefix(18))」）⇒ 先装后浏览")
+            clickInstall(land, tag: "\(tag)_inst")   // PC L1558：先点安装
+            browseLanding(tag: "\(tag)_browse")      // 再浏览
             return true
         }
-        // 闸② 倒计时还在走（PC §1716 / L9724-9734 逐字）
-        //   PC 原话：「顶栏仍在倒计时 ⇒ **CTA 被锁**，继续等」
-        //   ⇒ 📏 倒计时期间点 CTA **无效**（广告主锁住了），点了也白点，
-        //     而且会把"广告播完→收奖励"的时序搞乱 ⇒ **不点**。
-        if adCountdownRunning(img, rec: rec, bw: bw, bh: bh, roi: roi,
-                              runningPatterns: runningPatterns) {
-            log("   §\(tag) ⛔ 转化闸②：顶栏**还在倒计时** ⇒ CTA 被锁 ⇒ ⛔ 不点"
-                + "（照 PC §1716「CTA 被锁，继续等」）")
-            return true
-        }
-        // ⛔ 到此为止 —— PC 的第三条 `no_conv`（L9731「倒计时走完」）**不在此实现**：
-        //   它依赖 PC 的 `_CD_RX` / `_CDWAIT` 计数状态，单帧判不出来。
-        //   硬塞一个"顶栏没有可领取就算播完"的判据会**误伤**（直播间顶栏是主播昵称、
-        //   加载中顶栏是空白 ⇒ 都会被误判成"已播完"）⇒ ⛔ 不自造（工作区规则 §4）。
+        log("   §\(tag) ⚠️ CTA 没点进落地页 ⇒ **不浏览**（PC：都没进去，滑什么）")
         return false
     }
 
