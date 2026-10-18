@@ -164,9 +164,9 @@ final class Navigator {
                 var firstRect: CGRect?
                 var firstScore = 0.0
                 for t in names {
-                    guard let (rect, score, _) = rec.matchTemplate(img, tplName: t, roi: r,
-                                                                  threshold: e.threshold ?? tplThr,
-                                                                  mask: e.mask) else {
+                    guard let (rect, score) = rec.matchTemplate(img, tplName: t, roi: r,
+                                                               threshold: e.threshold ?? tplThr,
+                                                               mask: e.mask) else {
                         return nil      // 缺一个 ⇒ 组合不成立
                     }
                     if firstRect == nil { firstRect = rect; firstScore = score }
