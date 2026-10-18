@@ -1414,7 +1414,30 @@ final class Navigator {
     func runFunnel(_ img: UIImage) -> Bool {
         guard let items = cfg.funnel else { return false }
         let now = Date()
+
+        // ⭐⭐⭐⭐⭐ §3012 **同一坐标重复点击闸**（真机实测，2026-10-18）
+        //
+        // ## ⛔ 血案（真机 trace 逐字）
+        /// 签到弹窗盖屏时，`modal_x` 在**同一个坐标** (419,371) 反复命中并点击：
+        /// ```
+        ///   §funnel modal_x（通用暖灰圆钮 ✕）@(419,371)     ← 同一点
+        ///   §tapPoint ★点坐标 @(419,371) ⇒ P:30490,12581
+        ///   §ble → P:30490,12581                              ← 命令确实发出去了
+        ///   §adbox ⭐ 漏斗处理了一层                          ← 又回循环头
+        /// ```
+        /// 实测 **连点 40 次画面纹丝不动** ⇒ 白烧约 80 秒。
+        ///
+        /// ## 判据为什么用「同一条腿 + 同一个点」而不是「画面变没变」
+        /// · 画面判据要**多抓一帧**（+0.5~2s/次），而这条闸本来就是为了省时间；
+        /// · 弹窗点击本来就可能"点两下才关"（动画/首次被吞），所以**允许前 3 次**；
+        /// · 第 3 次还落在**同一坐标**（±`funnelSameXY` 像素）⇒ 判定这条腿对它无效
+        ///   ⇒ **记死这条腿**（让它让位给后面的腿），⛔ 不是整轮停手
+        ///   （停手由 `FeatureEngine.stallLimit` 负责，两者分工不同）。
+        ///
+        /// 📏 与 PC 的关系：PC 有 YOLO 主路 + `find_gray_x` 兜底，这类"同点空转"很少发生；
+        ///   手机端像素判据是**唯一主路** ⇒ 必须自己防这一层（§2992 记过的同一类问题）。
         for it in items {
+
             if let last = funnelLast[it.element],
                now.timeIntervalSince(last) < (it.interval ?? 1.0) { continue }
             // ⭐⭐ **前置闸**（§2247）：必须**同时命中** `require` 才允许点 `element`
@@ -1436,6 +1459,8 @@ final class Navigator {
             // 所以**不能**走 `detect()`（那查的是 `elements` 表）。
             if it.element == "coin_ball" {
                 if let c = ColorBlob.findCoinBall(img) {
+                    // §3012 同点重复点击闸（与 modal_x 同一道，理由见 runFunnel 顶部）
+                    guard funnelAllowTap("coin_ball", Double(c.x), Double(c.y)) else { continue }
                     funnelLast[it.element] = now
                     log("   §funnel coin_ball（\(it.desc ?? "")）@(\(Int(c.x)),\(Int(c.y)))")
                     tapPoint(Double(c.x), Double(c.y), why: "漏斗 coin_ball")
@@ -1460,6 +1485,8 @@ final class Navigator {
             //   所以不会在普通页面上乱点 ✕；且仍然只认“暖灰圆钮”这一个形态。
             if it.element == "modal_x" {
                 if let c = ModalX.find(img) {
+                    // ⭐ §3012 同点重复点击闸（真机血案：同一点连点 40 次画面不动）
+                    guard funnelAllowTap("modal_x", Double(c.x), Double(c.y)) else { continue }
                     funnelLast[it.element] = now
                     log("   §funnel modal_x（通用暖灰圆钮 ✕）@(\(Int(c.x)),\(Int(c.y)))")
                     tapPoint(Double(c.x), Double(c.y), why: "漏斗 modal_x 暖灰圆钮")
@@ -1483,6 +1510,7 @@ final class Navigator {
             // ⛔ 铁律④：**只点消极项**，⛔ 不点右侧主按钮（词表故意只收消极项）。
             if it.element == "bottom_popup" {
                 if let hit = Self.findBottomPopup(img, rec: rec, bw: baseW) {
+                    guard funnelAllowTap("bottom_popup", Double(hit.x), Double(hit.y)) else { continue }
                     funnelLast[it.element] = now
                     log("   §funnel bottom_popup（底部弹窗 “\(hit.tag)”）@(\(Int(hit.x)),\(Int(hit.y)))")
                     tapPoint(Double(hit.x), Double(hit.y), why: "漏斗 bottom_popup 消极项「\(hit.tag)」")
@@ -1607,6 +1635,7 @@ final class Navigator {
 
             if it.element == "appstore_x" {
                 if let p = Self.findDarkCross(img) {
+                    guard funnelAllowTap("appstore_x", Double(p.x), Double(p.y)) else { continue }
                     funnelLast[it.element] = now
                     log("   §funnel appstore_x（App Store 页左上暗色 ✕）@(\(Int(p.x)),\(Int(p.y)))")
                     tapPoint(Double(p.x), Double(p.y), why: "漏斗 appstore_x 暗色 ✕")
@@ -1617,6 +1646,7 @@ final class Navigator {
             // ⭐ 券弹窗 ✕（PC `find_coupon_x`，ROI 在屏幕中下）—— 同一个判据换 ROI
             if it.element == "coupon_x" {
                 if let c = ModalX.findCoupon(img) {
+                    guard funnelAllowTap("coupon_x", Double(c.x), Double(c.y)) else { continue }
                     funnelLast[it.element] = now
                     log("   §funnel coupon_x（券弹窗 ✕）@(\(Int(c.x)),\(Int(c.y)))")
                     tapPoint(Double(c.x), Double(c.y), why: "漏斗 coupon_x 券弹窗 ✕")
@@ -1790,6 +1820,35 @@ final class Navigator {
     ///   ① 比的是**「点前 vs 点后」**（ROI 只看上半屏，避开视频区）
     ///   ② 记死的是 **(页型, 出路)** 组合 ⇒ 换一页还能用同一条腿
     private var dead: Set<String> = []
+
+    // ⭐⭐⭐⭐⭐ §3012 **漏斗"同点重复点击"记账**（真机血案，见 `runFunnel` 顶部注释）
+    //
+    // key   = 漏斗腿的元素名（如 `modal_x`）
+    // value = (上一次点的坐标, 已连续点了同一坐标几次)
+    // ⛔ 只记**坐标**不记画面：本闸的目的是"别在同一个死点烧时间"，
+    //    画面判据另有 `screenChanged` 负责（`step()` 里在用）。
+    private var funnelSameHits: [String: (x: Double, y: Double, n: Int)] = [:]
+    /// 同一坐标允许连续点的次数上限（第 3 次还同点 ⇒ 记死）
+    private static let funnelSameLimit = 3
+    /// 判定"同一个点"的像素容差（基准 451×977 尺度）
+    private static let funnelSameXY = 12.0
+
+    /// 记一次"要点这个点"，返回 **true = 允许点**，false = 已记死、本腿跳过。
+    private func funnelAllowTap(_ key: String, _ x: Double, _ y: Double) -> Bool {
+        if let h = funnelSameHits[key],
+           abs(h.x - x) <= Self.funnelSameXY, abs(h.y - y) <= Self.funnelSameXY {
+            let n = h.n + 1
+            if n > Self.funnelSameLimit {
+                log("   §funnel ⛔ \(key) 在同一坐标 (\(Int(x)),\(Int(y))) 已连点 \(h.n) 次"
+                    + " ⇒ **记死这条腿**（⛔ 不再烧时间，让位给后面的腿）")
+                return false
+            }
+            funnelSameHits[key] = (x, y, n)
+            return true
+        }
+        funnelSameHits[key] = (x, y, 1)
+        return true
+    }
 
     /// 记死一条腿（key = "页型|出路"）
     private func markDead(_ page: String, _ go: String) {
