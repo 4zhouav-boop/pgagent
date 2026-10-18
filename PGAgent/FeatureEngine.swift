@@ -571,12 +571,81 @@ final class FeatureEngine {
         return nil
     }
 
-    /// 关遮蔽层（PC `dismiss_overlay`）—— 券弹窗 / 盖屏层
+    /// ⭐⭐⭐⭐⭐ §3029 **关遮蔽层 —— 逐字照 PC `dismiss_overlay`**（`_1377_ad_loop.py:8806-8861`）
+    ///
+    /// ## ⛔⛔ 血案（真机 2026-10-18，0.59 首跑，trace 逐字）
+    /// 旧版这里写的是 `["panel_close_x", "pill_x", "pill_x_ocr"]` —— **三样 PC 一样都不用**：
+    /// ```python
+    /// # PC `dismiss_overlay` 的腿序（逐字）
+    /// dismiss_sys_prompt  →  find_coupon_x  →  find_float_close_x
+    ///                     →  dismiss_modal  →  find_bottom_popup
+    /// ```
+    /// 而 **胶囊 ✕（`pill_x`）在 PC 里根本不属于这一层** —— 它属于**漏斗**
+    /// （`_1765_nav.FUNNEL`），只在"按页型推进"时才有资格点。
+    ///
+    /// ⇒ 后果（本机 trace 可证）：第 2 条一进广告页，`①j 遮蔽层闸` 立刻把胶囊 ✕ 点掉 ——
+    /// ```
+    ///   G1 顶栏: 「14s后可领取307金币X广告」
+    ///   §tap ★点「pill_x」@(215,89) ⇒ Q:15620,3119          ← 倒计时才走到 14s 就点了
+    ///   .. §1555 遮蔽层（pill_x）⇒ 已关掉
+    /// ```
+    /// 于是这一条**永远走不到** ③a G1 停留 30~60s → ③b G2 转化 → ③d G3 等倒计时 → ③e G4 收奖励
+    /// ⇒ 一条广告被烧掉、`doneAds` 不涨 ⇒ 最后按"无进展"停手。
+    ///
+    /// ## ✅ 现在的腿序（每一步都对应 PC 的同名函数）
+    /// ```
+    /// ① sys_prompt_title  → sys_prompt_deny        （PC dismiss_sys_prompt）
+    /// ② coupon_x                                   （PC find_coupon_x，同一判据换 ROI）
+    /// ③ float_x                                    （PC find_float_close_x）
+    /// ④ modal_x                                    （PC dismiss_modal → find_gray_x）
+    /// ⑤ bottom_popup                               （PC find_bottom_popup，亮度闸+消极项）
+    /// ```
+    /// ⛔ `pill_x` / `pill_x_ocr` / `panel_close_x` **一律移出本层**：
+    ///  - 胶囊 ✕ 只在 G4「已无倒计时」时由 `finishAdPanelResult` ③ 点（里面有到账闸）；
+    ///  - 面板小 ✕ 也只在 `finishAdPanelResult` ② 点（PC `_find_panel_x` 的正确位置）。
+    /// 放在"每轮无条件过"的盖屏闸里，等于**绕过所有闸门**。
     private func dismissOverlay(_ img: UIImage, tag: String) -> String? {
-        for el in ["panel_close_x", "pill_x", "pill_x_ocr"] {
-            if nav.detect(el, img: img) != nil, nav.tap(el, img: img, atomic: true) {
-                return el
-            }
+        // ① 系统弹窗（PC `dismiss_sys_prompt`）—— 只点消极项
+        if nav.detect("sys_prompt_title", img: img) != nil,
+           nav.tap("sys_prompt_deny", img: img, atomic: true) {
+            log("   §\(tag) overlay：系统弹窗 ⇒ 已点消极项（⛔ 不点允许）")
+            return "sys_prompt_deny"
+        }
+        // ② 券弹窗 ✕（PC `find_coupon_x`）—— 同一判据换 ROI（`ModalX.findCoupon`）
+        //   ⚠️ 这里**直接调 ModalX**（⛔ 不走 `detect("coupon_x")`）：元素表里没有 `coupon_x`，
+        //      它是漏斗专属元素（`Navigator.runFunnel` 里有专门的 `it.element == "coupon_x"` 分支），
+        //      和 `modal_x` / `bottom_popup` 一样是**判据代码**而不是 config 元素。
+        if let c = ModalX.findCoupon(img) {
+            log("   §\(tag) overlay：券弹窗 ✕ @(\(Int(c.x)),\(Int(c.y))) ⇒ 点它（PC find_coupon_x）")
+            _ = nav.tapPoint(Double(c.x), Double(c.y), atomic: true, why: "overlay 券弹窗 ✕")
+            return "coupon_x"
+        }
+        // ③ 悬浮广告 ✕（PC `find_float_close_x`）
+        if nav.detect("float_x", img: img) != nil,
+           nav.tap("float_x", img: img, atomic: true) {
+            log("   §\(tag) overlay：悬浮广告 ✕ ⇒ 已点（PC find_float_close_x）")
+            return "float_x"
+        }
+        // ④ 通用模态 ✕（PC `dismiss_modal` → `find_gray_x`）
+        //
+        // ⛔ **不能写 `nav.detect("modal_x")`** —— `modal_x` **不在 config.elements 里**，
+        //   它是**漏斗专属伪元素**：`Navigator.runFunnel` 在通用路径**之前**
+        //   专门 `if it.element == "modal_x" { ModalX.find(img) ... }`。
+        //   而 `Navigator.detect()` 开头就是 `guard let e = cfg.elements[name] else { return nil }`
+        //   ⇒ 对 `modal_x` **恒 nil** ⇒ 写 detect 就是一条**死腿**（本项目最常犯的坑）。
+        //   ⇒ ✅ 直接调它背后的判据 `ModalX.find`（与漏斗**同一份**代码）。
+        if let c = ModalX.find(img) {
+            log("   §\(tag) overlay：通用模态 ✕ @(\(Int(c.x)),\(Int(c.y))) ⇒ 点它（PC dismiss_modal）")
+            _ = nav.tapPoint(Double(c.x), Double(c.y), atomic: true, why: "overlay 通用模态 ✕")
+            return "modal_x"
+        }
+        // ⑤ 底部白色弹窗（PC `find_bottom_popup`，亮度闸 + 消极项 OCR）
+        //   ⛔ 同上：`bottom_popup` 也不是元素 ⇒ 直接调判据函数（与漏斗同一份）。
+        if let hit = Self.findBottomPopup(img, rec: rec, bw: baseW) {
+            log("   §\(tag) overlay：底部白色弹窗「\(hit.tag)」@(\(Int(hit.x)),\(Int(hit.y)))"
+                + " ⇒ 点消极项（PC find_bottom_popup）")
+            _ = nav.tapPoint(hit.x, hit.y, atomic: true, why: "overlay 底部弹窗消极项「\(hit.tag)」")
+            return "bottom_popup"
         }
         return nil
     }
