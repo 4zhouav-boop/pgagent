@@ -645,12 +645,23 @@ private final class PGBridge {
             ctx.draw(cg, in: CGRect(x: 0, y: 0, width: CGFloat(bw), height: CGFloat(bh)))
             guard let src = ctx.data else { return self.fail("pg.pix 取不到缓冲") }
             let srcPtr = src.assumingMemoryBound(to: UInt8.self)
-            // ⚠️ CGContext 原点在左下 ⇒ 缓冲第 0 行是 ROI 的**底行**，翻成左上原点
+            // ⛔⛔⛔ §3111 **不要再翻行**（真机血案，2026-10-18：我在这里多翻了一次）
+            //
+            // 📏 决定性取证（同一帧，PC(PIL 归一化) vs 手机 `pg.pix`）：
+            //   · PC `(100,470)` = RGB(0,136,254) 蓝色 ／ JS `(100,470)` = (243,242,248) 白
+            //   · JS `(100, 976-470)` = **RGB(0,137,253)** 蓝色  ← 与 PC 吻合
+            //   · PC `(50,140)` = RGB(25,25,25) 深灰 ／ JS `(50, 976-140)` = **(3,3,3)** ✅
+            //   ⇒ **画面被上下翻转了**。根因：`CGContext.draw` 之后 `ctx.data` 的**第 0 行就是
+            //      ROI 的顶行**（CoreGraphics 在 bitmap 上下文里按"左上原点"落盘，
+            //      与 `UIImage`/`UIGraphicsImageRenderer` 的约定一致），**不需要翻**。
+            //   ⚠️ 我原来按"CGContext 原点在左下"的老经验翻了一次 ⇒ 每个点都取到了对称行。
+            //      （同族错误在 `ColorBlob.findCoinBall` 里也翻过一次 —— 但那边用的是
+            //        `CGContext(data: &buf)` + `cropping`，行为不同，不能外推。）
+            // ⇒ 正解：**原样拷贝**，不做任何行重排。
             var out = [UInt8](repeating: 0, count: bw * bh * 4)
-            for j in 0..<bh {
-                let s = (bh - 1 - j) * bw * 4
-                let d = j * bw * 4
-                for k in 0..<(bw * 4) { out[d + k] = srcPtr[s + k] }
+            out.withUnsafeMutableBytes { dstRaw in
+                guard let dst = dstRaw.baseAddress else { return }
+                dst.copyMemory(from: src, byteCount: bw * bh * 4)
             }
             return self.val(["ok": true, "x": bx, "y": by, "w": bw, "h": bh,
                              "data": Data(out).base64EncodedString()])
@@ -679,9 +690,10 @@ private final class PGBridge {
             ctx.draw(cg, in: CGRect(x: 0, y: 0, width: CGFloat(bw), height: CGFloat(bh)))
             guard let srcB = ctx.data else { return self.fail("pg.gray 取不到缓冲") }
             let srcPtr = srcB.assumingMemoryBound(to: UInt8.self)
+            // ⛔ §3111 不翻行（见 `pg.pix` 的取证注释：`ctx.data` 第 0 行**就是** ROI 顶行）
             var g = [UInt8](repeating: 0, count: bw * bh)
             for j in 0..<bh {
-                let s = (bh - 1 - j) * bw * 4
+                let s = j * bw * 4
                 let d = j * bw
                 for i in 0..<bw {
                     let o = s + i * 4
@@ -741,7 +753,8 @@ private final class PGBridge {
             let srcPtr = srcB.assumingMemoryBound(to: UInt8.self)
             var s = [Double](repeating: 0, count: bw * bh)
             for j in 0..<bh {
-                let src = (bh - 1 - j) * bw * 4
+                // ⛔ §3111 不翻行（同 `pg.pix`）
+                let src = j * bw * 4
                 for i in 0..<bw {
                     let o = src + i * 4
                     let r = Double(srcPtr[o]), g = Double(srcPtr[o + 1]), b = Double(srcPtr[o + 2])
@@ -764,7 +777,8 @@ private final class PGBridge {
                 let tb = tbB.assumingMemoryBound(to: UInt8.self)
                 var p = [Double](repeating: 0, count: tw * th)
                 for j in 0..<th {
-                    let src = (th - 1 - j) * tw * 4      // 翻成左上原点
+                    // ⛔ §3111 不翻行（同 `pg.pix`；模板与 ROI 用**同一套**行序才可比）
+                    let src = j * tw * 4
                     for i in 0..<tw {
                         let o = src + i * 4
                         p[j * tw + i] = 0.299 * Double(tb[o]) + 0.587 * Double(tb[o + 1])
