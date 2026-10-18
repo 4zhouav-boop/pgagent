@@ -715,13 +715,29 @@ final class FeatureEngine {
     /// ## PC 腿序（L2188 逐字）
     /// > §1699e 腿序改为：**按行腿 → AD 角标腿 → 字面 key 腿 → 宝箱腿**
     ///
-    /// ## iOS 现状
-    /// · 按行腿 = `findAdRowButton(_:)`（已有，本项目实测最准）
-    /// · AD 角标腿/字面 key 腿/宝箱腿 = 由 `ad_task_btn` 元素（config 里配了词表）覆盖
-    /// ⇒ 本函数只做"按行腿 → 元素腿"两级，⛔ 不自造新腿。
+    /// ## ⛔⛔ §3031 血案（真机 2026-10-18 · 0.62，trace 逐字）
+    /// ```
+    ///   .. ★当前已在金币中心 ⇒ 点「重新进链」按钮（PC L10046 `click_reenter`）
+    ///   §adbox_row ⚠️ 本屏没有「看广告得金币」这道任务行 ⇒ 本腿放弃
+    ///   §adbox_center1 ⚠️ 两种腿都没找到「重新进链」按钮 ⇒ ⛔ 不盲点
+    /// ```
+    /// ⇒ 于是**第 1 条就原地空转到停手**（一条广告都没进）。
+    /// 📏 根因：真金币中心那一屏**任务行被上面四张游戏卡挤下去了**，
+    ///   而 **PC 的第三/第四条腿（宝箱）我根本没移植** —— 这一栏「点击领66」宝箱
+    ///   正好在屏幕上（真机帧 `_var/_3074_now.png` 右下角），它就是 PC 的兜底入口。
+    ///   （用户口径 §1471：「**宝箱就是广告入口**」）
+    ///
+    /// ## ✅ 现在的腿序（照 PC L2188，四条）
+    /// ```
+    /// ① 按行腿      findAdRowButton            （最准，只在目标行 ±26px 取按钮）
+    /// ② 元素腿      ad_task_btn                （= PC 的 AD 角标腿 / 字面 key 腿）
+    /// ③ 宝箱浮件腿  chest_float                （PC click_chest_entry 第一步）
+    /// ④ 宝箱 CTA 腿 chest_cta                  （PC click_chest_entry 第二步）
+    /// ```
+    /// ⛔ ③④ 都要"先找到再点"；两步任一步找不到 ⇒ **什么都不做**（铁律②）。
     @discardableResult
     private func clickReenter(tag: String) -> Bool {
-        guard let img = grab() else { return false }
+        guard var img = grab() else { return false }
         // ① 按行腿（PC §1699e 第一腿）
         if let hit = findAdRowButton(img) {
             let p = hit.point
@@ -734,7 +750,32 @@ final class FeatureEngine {
             log("   §\(tag) 元素腿命中 ad_task_btn ⇒ 已点（重新进链）")
             return true
         }
-        log("   §\(tag) ⚠️ 两种腿都没找到「重新进链」按钮 ⇒ ⛔ 不盲点（交给主循环重判）")
+        // ③ 宝箱浮件腿（PC `click_chest_entry` 第一步：点浮件开面板）
+        //
+        // 📏 用户口径（§1471，逐字）：「**宝箱就是广告入口**，宝箱是关闭后到账收益的。」
+        // 真机帧 `_var/_3074_now.png`：右下角 `点击领66 / 喂饲料` 就在 chest_float 的 ROI 里。
+        if let fl = nav.detect("chest_float", img: img) {
+            log("   §\(tag) ★宝箱浮件腿 ⇒ 点浮件开面板 @(\(Int(fl.center.x)),\(Int(fl.center.y)))"
+                + "（PC click_chest_entry 第一步，§1471 用户口径「宝箱就是广告入口」）")
+            _ = nav.tapPoint(Double(fl.center.x), Double(fl.center.y), atomic: true,
+                             why: "宝箱浮件（chest_float）")
+            sleep(3.0)                                  // PC: wait(3.0) 后重新抓帧
+            guard let img2 = grab() else { return true }
+            img = img2
+            // ④ 宝箱 CTA 腿（PC `click_chest_entry` 第二步：点面板 CTA 进广告链）
+            if let cta = nav.detect("chest_cta", img: img) {
+                log("   §\(tag) ★宝箱面板 CTA ⇒ 点它进广告链 @(\(Int(cta.center.x)),\(Int(cta.center.y)))"
+                    + "（PC click_chest_entry 第二步）")
+                _ = nav.tapPoint(Double(cta.center.x), Double(cta.center.y), atomic: true,
+                                 why: "宝箱面板 CTA（chest_cta）")
+                return true
+            }
+            log("   §\(tag) ⚠️ 点了宝箱浮件但面板上没找到 CTA ⇒ 停手（照 PC `click_chest_entry`"
+                + " 末尾那句「点了浮件，但面板上没找到 BOX_CTA_KEYS ⇒ 停手」）")
+            return true                                 // 浮件**确实点过**了
+        }
+        log("   §\(tag) ⚠️ 四条腿（按行 / 元素 / 宝箱浮件 / 宝箱 CTA）都没找到"
+            + "「重新进链」按钮 ⇒ ⛔ 不盲点（交给主循环重判）")
         return false
     }
 
