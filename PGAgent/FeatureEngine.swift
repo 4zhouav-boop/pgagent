@@ -853,10 +853,26 @@ final class FeatureEngine {
 
                 // ── ③ G4：**倒计时结束后才点 ✕** + 处理面板（PC `_ad_finish`）──
                 //    ⭐ 面板/胶囊 ✕ 都归这里处理；⛔ 上一版我在**倒计时中**就调它 ⇒ 点死广告。
+                //
+                // ⭐ §3018 **点掉奖励面板 ⇒ 立刻退出本循环**（⛔ 不再重复点 6 次）
+                /// 旧写法 `if !finishAdPanel(im4,…) { break }` 在"点掉面板"后返回 true ⇒
+                /// **继续循环** ⇒ 下一轮帧上已经是**新一条广告** ⇒ 会对新广告再点一次 ✕
+                /// ⇒ 把新广告点死（正是 §2628 记的那个病）。
+                /// ✅ 现在：`.panelCleared` ⇒ 本条收完，直接退出；`.capsuleOnly` ⇒ 继续等面板。
+                var g4Cleared = false
                 for _ in 0..<6 {
                     if isCancelled() { break }
                     guard let im4 = grab() else { break }
-                    if !finishAdPanel(im4, tag: "adbox_ad\(n + 1)") { break }
+                    switch finishAdPanelResult(im4, tag: "adbox_ad\(n + 1)") {
+                    case .panelCleared:
+                        g4Cleared = true
+                        log("   §adbox ✅ G4 点掉奖励面板 ⇒ **本条收完**（§3018）")
+                    case .capsuleOnly:
+                        log("   §adbox ⏭ G4 已点胶囊 ✕（收奖励第一步）⇒ 继续等面板")
+                    case .none:
+                        g4Cleared = true     // 面板/✕ 都不在 ⇒ 没有可点的了，交给下面判归宿
+                    }
+                    if g4Cleared { break }
                     sleep(1.5)
                 }
 
@@ -1151,9 +1167,34 @@ final class FeatureEngine {
                 //
                 // ✅ 正解 = 照 PC `_ad_finish` **主动推进状态**：
                 //    先点面板按钮（补全）→ 面板没了才点胶囊 ✕
-                if finishAdPanel(img, tag: "adbox_ad\(n + 1)") {
+                //
+                // ⭐⭐⭐⭐⭐ §3018 **点掉奖励面板 ⇒ 本条收完**（真机血案 2026-10-18）
+                //
+                /// ## ⛔ 血案（真机 trace 逐字，修前）
+                /// ```
+                ///   §tap ★点「stay_panel_btn」@(225,565) ev=领取奖励   ← 面板被点掉（= 本条收完了）
+                ///   §adbox_claim1 ⛔ 顶栏还有倒计时 ⇒ 不点胶囊 ✕ ×6     ← 还在按"没完成"继续找
+                ///   §adbox ⛔ 145s 没有任何新条到账 ⇒ 停手
+                /// ```
+                /// 根因：本分支点掉面板后只 `continue`，**⛔ 不计数** ⇒
+                ///   而"领取奖励"的语义是**进下一条广告** ⇒ 新一条**本来就是广告页**
+                ///   ⇒ 回流后**永远走不到**计数点 ⇒ `n` 不涨 ⇒ 时间闸判死。
+                ///
+                /// ✅ 现在按腿区分（`.panelCleared` ⇒ 本条收完；`.capsuleOnly` ⇒ 只点了胶囊，继续）：
+                switch finishAdPanelResult(img, tag: "adbox_ad\(n + 1)") {
+                case .panelCleared:
+                    n += 1
+                    scrollTries = 0
+                    convertedThisAd = false
+                    dwelledThisAd = false
+                    log("   §adbox ✅ 点掉奖励面板 ⇒ **本条计入完成**（第 \(n)/\(count) 条，§3018）")
+                    _ = ensureInCenter(tag: "adbox_afterpanel\(n)")
+                    continue
+                case .capsuleOnly:
                     sleep(1.5)
-                    continue        // ⭐ 处理了一层 ⇒ 重抓帧再判（⛔ 不在这儿 sleep 30s）
+                    continue        // 只点了胶囊 ⇒ 面板可能还在 ⇒ 重抓帧再判
+                case .none:
+                    break           // 什么都没点 ⇒ 落到下面"纯播放中 ⇒ 等时间"
                 }
                 // 面板与 ✕ 都没有 ⇒ 这才是"纯广告播放中" ⇒ **等时间**（⛔ 不点 ✕）
                 //
@@ -1207,9 +1248,18 @@ final class FeatureEngine {
                         leftAd2 = true
                         break
                     }
-                    if finishAdPanel(im6, tag: "adbox_claimw\(n + 1)") {
-                        log("   §adbox ⏭ 已点掉一层（⛔ 还在广告页，不算完成）⇒ 重抓帧再判")
+                    // ⭐ §3018 与「广告页」分支同一套语义（面板点掉=本条收完）
+                    switch finishAdPanelResult(im6, tag: "adbox_claimw\(n + 1)") {
+                    case .panelCleared:
+                        log("   §adbox ✅ 点掉奖励面板 ⇒ **本条收完**（§3018）")
+                        leftAd2 = true
+                        break
+                    case .capsuleOnly:
+                        log("   §adbox ⏭ 已点胶囊 ✕（收奖励第一步）⇒ ⛔ 还不算完成")
+                    case .none:
+                        break
                     }
+                    if leftAd2 { break }
                     sleep(1.5)
                 }
                 if !leftAd2 {
@@ -1520,16 +1570,6 @@ final class FeatureEngine {
             return .capsuleOnly
         }
         return .none
-    }
-
-    /// - Returns: true = 已点掉一层（调用方应重抓帧再判）
-    ///
-    /// ⚠️ §3018 本函数是 `finishAdPanelResult` 的**薄包装**（保留旧签名，⛔ 不改 4 处调用点）。
-    ///    ⛔ 语义上它**分不清**"点掉面板"和"只点胶囊" ⇒
-    ///    需要区分的地方（收奖励那一段）**必须**用 `finishAdPanelResult`。
-    @discardableResult
-    private func finishAdPanel(_ img: UIImage, tag: String) -> Bool {
-        finishAdPanelResult(img, tag: tag) != .none
     }
 
     private func adRewardClaimed(_ img: UIImage) -> Bool {
