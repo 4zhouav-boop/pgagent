@@ -502,7 +502,20 @@ final class FeatureEngine {
                 // ⛔⛔ §2824 用户令：「**需要做检测就做单次转化，转化完就去关闭广告获取奖励**」
                 //    旧版没有 `convertedThisAd` 闸 ⇒ 主循环每绕回来一次就**再转化一次**
                 //    （真机日志：cta1/browse1 → cta2/browse2 → … → cta6/browse6，同一条广告）。
-                if !convertedThisAd, !isCancelled(), let cur4 = grab() {
+                //
+                // ⭐⭐⭐⭐⭐ §3022 **直播间广告：不点 CTA**（PC L8491 逐字）
+                /// ```python
+                /// "ad_live": "不点 CTA、不操作（用户令「直播间就不操作了」）；等倒计时 → 点 ✕ 收奖励"
+                /// ```
+                /// 📏 用户令：「**直播间就不操作了**」⇒ 只等停留 + 等倒计时 + 点 ✕ 收奖励，
+                ///    ⛔ 绝不在直播间里点 CTA（会点进"小黄车/进店"，把广告搞死）。
+                let isLiveAd = (PageKinds.detectFrom(sheet: PageKinds.OcrSheet(img: img,
+                                        ocr: RecognizerOcr(rec: rec))).kind == .adLive)
+                if isLiveAd {
+                    log("   §adbox 📺 **直播间广告** ⇒ 照 PC `ad_live` 口径：⛔ 不点 CTA、⛔ 不操作，"
+                        + "只等停留(\(Int(adDwellTarget))s) + 等倒计时 + 点 ✕ 收奖励")
+                    convertedThisAd = true      // 标记"不再转化"，与本条一致
+                } else if !convertedThisAd, !isCancelled(), let cur4 = grab() {
                     convertedThisAd = true
                     if let how = clickCTA(cur4, tag: "adbox_cta\(n + 1)") {
                         log("§adbox CTA 已点（\(how)）⇒ 等落地页")
@@ -1451,7 +1464,30 @@ final class FeatureEngine {
         _ = (roi, bw, bh)
         let sheet = PageKinds.OcrSheet(img: img, ocr: RecognizerOcr(rec: rec))
         // ⭐ 桌面子判据不参与（照 PC 默认 `_DESKTOP_KINDS` 不启用）
-        return PageKinds.detectFrom(sheet: sheet).kind == .adVideo
+        // ⭐⭐⭐⭐⭐ §3022 **直播广告必须和视频广告走同一条腿**（真机血案 2026-10-18）
+        //
+        /// ## ⛔ 血案（用户令，逐字）
+        /// > 「**直播间广告没有等待30-45秒 直接点X了。改一下 先等待后执行**」
+        ///
+        /// ## 根因
+        /// 本函数旧写法只认 `kind == .adVideo`：
+        /// ```swift
+        /// return PageKinds.detectFrom(sheet: sheet).kind == .adVideo   // ⛔ 漏了 .adLive
+        /// ```
+        /// ⇒ 直播间形态的广告被当成**"不是广告页"** ⇒
+        ///   ① 进不了广告页分支（那条分支才做"等 30~60s 停留 + 等倒计时"）
+        ///   ② 掉进**返回腿** ⇒ 立刻点 ✕ 把它关掉 ⇒ **白丢一条已到账的广告**
+        ///
+        /// ## ✅ PC 的权威依据（`_1377_ad_loop.py` 逐字）
+        /// ```
+        /// L344:  1386  `AD_VIDEO_PAGE || AD_LIVE_PAGE` ⇒ **视频广告与直播广告走同一条腿**
+        /// L8491: "ad_live": "不点 CTA、不操作（用户令「直播间就不操作了」）；等倒计时 → 点 ✕ 收奖励"
+        /// ```
+        /// ⇒ 📏 直播间广告 = **一条要等完、收奖励的广告**，⛔ 不是"要退出的陌生页面"。
+        /// ⚠️ 本函数叫 `looksLikeAdPage`（"像不像广告页"），直播间本来就是广告页
+        ///    ⇒ 纳入 `.adLive` **语义正确**，⛔ 不是放宽判据。
+        let k = PageKinds.detectFrom(sheet: sheet).kind
+        return k == .adVideo || k == .adLive
     }
 
     /// ⭐⭐⭐⭐⭐ §2832 **等待期间的"只补全"闸** —— 照 PC `click_toast_x` **第一段**（L4333）
