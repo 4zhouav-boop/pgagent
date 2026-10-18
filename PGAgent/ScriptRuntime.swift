@@ -880,6 +880,60 @@ private final class PGBridge {
         }
         def("tpl", unsafeBitCast(fTpl, to: AnyObject.self))
 
+        // ⭐⭐⭐ §3130 **`pg.kgx(box?)` —— 「找 ✕」的 YOLO（PC `find_x_all` 的等价物）**
+        //
+        // PC 依据（`_1377_ad_loop.py`）：
+        // ```python
+        // def find_x_all(img, box=None, conf2=None, tag=""):
+        //     d = _x_raw(img)                       # 整帧推理一次（同帧缓存）
+        //     hit = [x for x in d if x[0] >= conf2] # conf2 = 0.49
+        //     if box is not None:                   # box 是**结果过滤窗**，不是裁剪
+        //         hit = [x for x in hit if bx0<=x[1]<=bx1 and by0<=x[2]<=by1]
+        //     return [(x[1], x[2], x[0], x[3], x[4]) for x in hit]   # (cx,cy,conf,w,h)
+        // ```
+        // ⇒ 这里**语义一一对应**：
+        //   `pg.kgx()`            → 全帧，conf2=0.49
+        //   `pg.kgx([x0,y0,x1,y1])` → 按结果中心过滤
+        //   返回 `{ok, n, hits:[{cx,cy,conf,w,h}], ms}`；模型不可用 ⇒ `{ok:false, why}`
+        // ⛔ `ok:false` 必须让 JS 侧**如实回退**（⛔ 不能当成"没找到 ✕"—— 那是两回事）
+        let fKgx: @convention(block) (JSValue) -> JSValue = { boxV in
+            if self.stopped() { return JSValue(undefinedIn: JSContext.current()) }
+            guard let im = self.image() else { return self.fail("还没有帧") }
+            let net = KGXNet.shared
+            if !net.available {
+                net.loadIfNeeded()
+                if !net.available {
+                    return self.val(["ok": false, "why": "kgx 不可用：" + net.error,
+                                     "n": 0, "hits": []])
+                }
+            }
+            var box: CGRect? = nil
+            if let r = self.rect(boxV) { box = r }
+            let t0 = Date()
+            let hits = net.findAll(im, box: box)
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            var arr: [[String: Any]] = []
+            for h in hits {
+                arr.append(["cx": h.cx, "cy": h.cy, "conf": h.conf, "w": h.w, "h": h.h])
+            }
+            if !arr.isEmpty {
+                let top = hits.prefix(5).map {
+                    String(format: "(%.0f,%.0f)%.2f", $0.cx, $0.cy, $0.conf)
+                }.joined(separator: " ")
+                NSLog("PGAgent §3130 ✕ 命中 %d 个：%@", arr.count, top)
+            }
+            return self.val(["ok": true, "n": arr.count, "hits": arr, "ms": ms])
+        }
+        def("kgx", unsafeBitCast(fKgx, to: AnyObject.self))
+
+        // 诊断：模型是否加载好了（省得每次都跑一遍才知道）
+        let fKgxReady: @convention(block) () -> JSValue = {
+            let net = KGXNet.shared
+            net.loadIfNeeded()
+            return self.val(["ok": net.available, "why": net.error])
+        }
+        def("kgxReady", unsafeBitCast(fKgxReady, to: AnyObject.self))
+
         return pg
     }
 }

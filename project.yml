@@ -11,13 +11,22 @@ targets:
     platform: iOS
     sources:
       - path: PGAgent
+        excludes:
+          # ⛔ bridging header 只能被 `SWIFT_OBJC_BRIDGING_HEADER` 引用，
+          #    ⛔ 不能被当成源文件参与编译（否则报 "duplicate interface" / 链接错误）
+          - "PGAgent-Bridging-Header.h"
+      # ⭐⭐⭐ §3130 **kgx 模型（YOLOv11n，ncnn 格式）打进 App bundle**
+      #   PC 从 `ks_mobile/tools/leishen/project/mxwj/` 读；手机端改为 bundle 资源
+      #   ⇒ `Bundle.main.path(forResource:"kgx", ofType:"param")` 能取到（见 KGXNet.swift）
+      - path: PGAgent/Models
+        buildPhase: resources
     info:
       path: PGAgent/Info.plist
       properties:
         CFBundleDisplayName: PGAgent
         # ⭐ 版本号**唯一来源**（界面标题从 Info.plist 读，见 AppVersion）
         #    发版时只改这里 ⇒ 界面/接口/包 三处自动一致（§2239 的教训）
-        CFBundleShortVersionString: "0.66"
+        CFBundleShortVersionString: "0.67"
         CFBundleVersion: "1"
         UILaunchScreen: {}
         # ⭐ 关键 1：让 App 的 Documents 暴露给「文件」App
@@ -93,6 +102,10 @@ targets:
         CODE_SIGNING_REQUIRED: "NO"
         CODE_SIGNING_ALLOWED: "NO"
         DEVELOPMENT_TEAM: ""
+        # ⭐⭐⭐ §3130 **ncnn 的 C 接口桥**（见 `PGAgent/PGAgent-Bridging-Header.h`）
+        #   `ncnn.xcframework` 没有 modulemap ⇒ Swift 只能经 bridging header 拿到 `c_api.h`。
+        #   ⛔ 不要改成 `import ncnn`：那个 framework 里没有 Swift module。
+        SWIFT_OBJC_BRIDGING_HEADER: PGAgent/PGAgent-Bridging-Header.h
     dependencies:
       - target: PGShot
       - sdk: ReplayKit.framework
@@ -102,6 +115,13 @@ targets:
       - sdk: CoreMedia.framework
       - sdk: CoreVideo.framework
       - sdk: JavaScriptCore.framework
+      # ⭐⭐⭐ §3130 **ncnn（「找 ✕」的 YOLO 运行时）**
+      #   来源 https://github.com/xiaoshanlin000/NcnnXCFramework（**MIT**）
+      #   内含 Tencent/ncnn **20221128**，含真机(arm64/arm64e/armv7) + 模拟器两个 slice。
+      #   ⛔ 只用 `ncnn.xcframework`：PC 的 `_x_detect` 只要 ncnn + numpy，
+      #      不碰 OpenCV（letterbox 是自己算的，`cv2.resize` 用 `CGContext` 替）。
+      - framework: ncnn.xcframework
+        embed: false
 
   # ⭐⭐⭐ 「眼」—— ReplayKit 广播扩展（荔枝/所有 RPA App 的真正做法）
   #   主 App 用 RPSystemBroadcastPickerView().triggerPicker() **程序化启动**它，
@@ -115,7 +135,7 @@ targets:
       path: PGShot/Info.plist
       properties:
         CFBundleDisplayName: PGShot
-        CFBundleShortVersionString: "0.66"
+        CFBundleShortVersionString: "0.67"
         CFBundleVersion: "1"
         # ⭐ 扩展必须声明 NSExtension，否则 iOS 不认（xcodegen 会重写 Info.plist）
         NSExtension:
