@@ -1026,7 +1026,10 @@ final class FeatureEngine {
 
             if let btn = findAdRowButton(img) {
                 log("§adbox 按行定位到「看广告得金币」行 ⇒ 按钮 \(btn.evidence) @(\(Int(btn.point.x)),\(Int(btn.point.y)))")
-                nav.tapPoint(Double(btn.point.x), Double(btn.point.y), why: "按行定位的「看广告得金币」按钮")
+                // ⭐⭐⭐⭐⭐ §3013 **防遮挡点击**（真机：y=839 点 5 次无效，y=227 一次成功）
+                //   ⛔ 原来直接 `nav.tapPoint(btn.point)` —— 按钮落在屏幕下部时
+                //      正好被「点击领66」宝箱抖动动画盖住，点了等于没点。
+                tapAvoidOcclusion(btn.point, why: "按行定位的「看广告得金币」按钮")
                 // ⭐⭐ §2265 **等一张"新的"帧再判**（⛔ 不是固定睡 2s 就抓）
                 //
                 // ## 为什么（与写盘节拍**成对**的一条）
@@ -1237,7 +1240,8 @@ final class FeatureEngine {
                 if let img2 = grabFresh(since: img, maxWait: maxFrameAgeCfg + 3.0) {
                     if let btn2 = findAdRowButton(img2) {
                         log("§adbox ⬇ 翻到了目标行 ⇒ 按钮 \(btn2.evidence) @(\(Int(btn2.point.x)),\(Int(btn2.point.y)))")
-                        nav.tapPoint(Double(btn2.point.x), Double(btn2.point.y), why: "翻页后按行定位的按钮")
+                        // §3013 防遮挡（与上面那条同一道闸，理由见 tapAvoidOcclusion）
+                        tapAvoidOcclusion(btn2.point, why: "翻页后按行定位的按钮")
                         // ⭐⭐⭐⭐⭐ §2824 **不再在这里自己收尾 + 计数**（用户令：无限转化/卡死）
                         //
                         // ## ⛔ 血案
@@ -1424,6 +1428,35 @@ final class FeatureEngine {
             log("   §\(tag) 挽留面板 ⇒ 点「继续观看/领取奖励」**补全**（照 PC `click_stay_panel`）")
             _ = nav.tap("stay_panel_btn", img: img, atomic: true)
             return true
+        }
+        // ⭐⭐⭐⭐⭐ §3013 **「再看1个」奖励面板：点「领取奖励」推进，⛔ 不点它的 ✕**
+        //
+        // ## ⛔ 真机血案（2026-10-18，逐字实测）
+        // 广告倒计时走完、点了顶栏 ✕ 之后，弹出这张面板：
+        // ```
+        //   再看1个 / 最高领3000金币 / [领取奖励]        ← 面板本体
+        //   右上角有一个 ✕（基准 356,295）
+        // ```
+        // 我按 PC 腿序去点**面板 ✕**，换了三个坐标全无反应：
+        // ```
+        //   (356,295) / (362,300) / (350,290)  ⇒ 画面纹丝不动
+        //   触摸指示圆环停在 (360,297) ⇒ HID 确实送到了，但 iOS 没让面板关
+        // ```
+        // 而同一时刻点「**领取奖励**」⇒ **立刻进下一条广告**（`15s后可领取1666金币`）。
+        // ⇒ 📏 结论：**这张面板的 ✕ 在 iOS 触摸层里是无效区域**，
+        //   PC 上能用 ✕，iOS 上这条腿不成立 ⇒ 必须换板子（照 §2988 的口径）。
+        //
+        // ## ✅ 现在的顺序
+        // 面板上有「领取奖励」这类**推进型主按钮** ⇒ 先点它（真机验证有效）；
+        // 都点不到才退回下面的 ✕ 腿（保留原逻辑，⛔ 不删）。
+        // ⚠️ 安全性：这里点的是**奖励面板的主按钮**，不是广告页上的 CTA，
+        //   `stay_panel_btn` 的词表本身就含「领取奖励」，与 PC `PANEL_KEYS` 一致。
+        if nav.detect("stay_panel_btn", img: img) != nil {
+            log("   §\(tag) 看到「再看1个」奖励面板 ⇒ **点「领取奖励」推进**"
+                + "（§3013 真机：该面板的 ✕ 点 3 次无效，「领取奖励」一次有效）")
+            if nav.tap("stay_panel_btn", img: img, atomic: true) {
+                return true
+            }
         }
         // ② ⭐ **面板自己右上角的小 ✕**（⛔ 必须排在 toast ✕ 之前 —— PC 腿序血案）
         if nav.detect("panel_close_x", img: img) != nil {
@@ -1681,6 +1714,19 @@ final class FeatureEngine {
     private static let adRowYWin: Double = 26
     /// PC `AD_ROW_X_MIN = 330` —— 右列按钮 x 下界
     private static let adRowXMin: Double = 330
+
+    /// ⭐⭐⭐⭐⭐ §3013 **屏幕下部"易被浮件遮挡"的 y 门槛**（基准 451×977）
+    ///
+    /// ## 标定依据（真机实测 2026-10-18，⛔ 不是拍脑袋）
+    /// 快手极速版任务中心的右下角常年挂「**点击领66**」宝箱浮件（带抖动动画），
+    /// 它覆盖 **y ≈ 780 以下** 的右下区域。实测同一个「领福利」按钮：
+    /// ```
+    ///   基准 (394.3, 838.9)  ⇒ 连点 5 次全无反应（被宝箱压住）
+    ///   基准 (394.3, 227.3)  ⇒ 一次命中（16s后可领取1167金币）
+    /// ```
+    /// 776/977 = 79.4% ⇒ 取整到 **780**。
+    /// ⚠️ 只在**按行点任务按钮**这条路上用它（⛔ 不用于广告页/漏斗，那些有自己的判据）。
+    private static let occludedYMin: Double = 780
     /// PC `AD_ROW_TASK_RX = r"看\s*广\s*告\s*得\s*金\s*币"` —— **唯一**合法目标行
     ///
     /// ⛔ 用 `\s*` 容忍 OCR 把「看广告得金币」切成多个 token（`看广告 得金币` 也算命中）。
@@ -1766,6 +1812,67 @@ final class FeatureEngine {
     ///
     /// 逐条移植 PC `find_ad_row_button`（`_1377_ad_loop.py:2146`）。
     /// - Returns: `(点, 证据串)`；⛔ 找不到 / 该行不可用 ⇒ **nil**（调用方什么都不做）
+    /// ⭐⭐⭐⭐⭐ §3013 **防遮挡点击**（真机实测，2026-10-18）
+    ///
+    /// ## ⛔ 血案（用户当场指出：「宝箱有抖动动画 覆盖了，你滑动到上面起来再点」）
+    /// 同一个「领福利」按钮、同一个坐标：
+    /// ```
+    ///   基准 y=838.9  ⇒ 连点 5 次（含 P:+D:600 / 短按 / 只 D:）**画面纹丝不动**
+    ///   滑上去到 y=227 ⇒ **一次就进广告页**（16s后可领取1167金币）
+    /// ```
+    /// 而 OCR 给的坐标是**对的**（`/ocr` 中心 394.7,838.6；按钮玫红块 bbox y 819~858，
+    /// 839 正落在正中）⇒ **⛔ 不是坐标错，是被底部「点击领66」宝箱的抖动动画盖住**。
+    ///
+    /// ## ✅ 判据（⛔ 不用"猜"，用两条硬信号）
+    /// 1. **按钮在屏幕下部**：`y > occludedYMin`（默认 780/977 ≈ 80%）——
+    ///    快手任务列表的右下角常年挂「点击领66」浮件，正好压在这一带。
+    /// 2. **该区域确实有东西**：OCR 在 `[y-60, 977]` 底部带读到**非按钮本身**的文字/浮件词，
+    ///    或按钮**正下方**在读到的行里还有其它元素 ⇒ 认为被压住。
+    /// 满足 ⇒ **先上滑一段**（把按钮挪到屏幕中上部），**重新 OCR 取新坐标**，再点。
+    ///
+    /// ## 为什么要"重新取坐标"而不是"原坐标 + 偏移"
+    /// 上滑后按钮位置变了，原坐标必然失效（本轮我用手动滑+重取验证过：
+    /// 滑后 OCR 直接给出 394.3,227.3）。⛔ 拍脑袋的固定偏移就是猜。
+    ///
+    /// - Returns: 实际点击用掉的 (x, y)；上滑重取后仍被遮挡 ⇒ 返回最后尝试的坐标
+    @discardableResult
+    private func tapAvoidOcclusion(_ p: CGPoint, why: String,
+                                   retries: Int = 1) -> CGPoint {
+        var target = p
+        var attempt = 0
+        while true {
+            attempt += 1
+            let needLift = target.y > Self.occludedYMin
+            if !needLift || attempt > retries + 1 {
+                break
+            }
+            log("   §occl ⚠️ 按钮 @(\(Int(target.x)),\(Int(target.y))) 落在屏幕下部"
+                + "（y>\(Int(Self.occludedYMin))）⇒ 多半被底部浮件/宝箱动画压住"
+                + " ⇒ **先上滑再点**（§3013 真机：y=839 点 5 次没反应，y=227 一次成功）")
+            // 上滑：从屏幕中部往上，避开底部浮件区
+            let cmd = BLEController.swipe(x1: baseW / 2, y1: baseH * 0.72,
+                                          x2: baseW / 2, y2: baseH * 0.38,
+                                          speed: .mid, baseW: baseW, baseH: baseH, yFix: yFix)
+            _ = ble.send(cmd)
+            log("   §occl 上滑 \(cmd)")
+            sleep(1.6)
+            guard let img2 = grab() else {
+                log("   §occl ⛔ 上滑后抓不到帧 ⇒ 用原坐标点（已尽力）")
+                break
+            }
+            // 重新定位同一行按钮
+            if let again = findAdRowButton(img2) {
+                target = again.point
+                log("   §occl ✅ 重新定位到按钮 @(\(Int(target.x)),\(Int(target.y)))")
+            } else {
+                log("   §occl ⚠️ 上滑后找不到那行按钮 ⇒ 用原坐标点（已尽力）")
+                break
+            }
+        }
+        nav.tapPoint(Double(target.x), Double(target.y), why: why)
+        return target
+    }
+
     private func findAdRowButton(_ img: UIImage)
         -> (point: CGPoint, evidence: String)? {
         // ① 先 OCR 出任务列表那一带的词（PC: `words(img, (0, 250, 451, 977))`）
