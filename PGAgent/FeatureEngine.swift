@@ -641,7 +641,10 @@ final class FeatureEngine {
         }
         // ⑤ 底部白色弹窗（PC `find_bottom_popup`，亮度闸 + 消极项 OCR）
         //   ⛔ 同上：`bottom_popup` 也不是元素 ⇒ 直接调判据函数（与漏斗同一份）。
-        if let hit = Self.findBottomPopup(img, rec: rec, bw: baseW) {
+        //   ⚠️ 它定义在 `Navigator` 上（`Navigator.swift:1905`），**不是** `FeatureEngine` 的成员 ——
+        //      ⛔ 写 `Self.findBottomPopup` 编译报
+        //      `error: type 'Self' has no member 'findBottomPopup'`（CI run 39122761172 原文）。
+        if let hit = Navigator.findBottomPopup(img, rec: rec, bw: baseW) {
             log("   §\(tag) overlay：底部白色弹窗「\(hit.tag)」@(\(Int(hit.x)),\(Int(hit.y)))"
                 + " ⇒ 点消极项（PC find_bottom_popup）")
             _ = nav.tapPoint(hit.x, hit.y, atomic: true, why: "overlay 底部弹窗消极项「\(hit.tag)」")
