@@ -515,6 +515,13 @@ final class FeatureEngine {
                     log("   §adbox 📺 **直播间广告** ⇒ 照 PC `ad_live` 口径：⛔ 不点 CTA、⛔ 不操作，"
                         + "只等停留(\(Int(adDwellTarget))s) + 等倒计时 + 点 ✕ 收奖励")
                     convertedThisAd = true      // 标记"不再转化"，与本条一致
+                } else if !convertedThisAd, Self.adConvertStopped(img, rec: rec, nav: nav,
+                                                                  bw: baseW, bh: baseH,
+                                                                  roi: s?.ad_top_roi,
+                                                                  runningPatterns: s?.countdown_running_regex,
+                                                                  log: log, tag: "adbox_g2\(n + 1)") {
+                    // ⛔ 本条**已到账/已定格** ⇒ 不做转化（PC `no_conv` 三闸，见函数文档）
+                    convertedThisAd = true
                 } else if !convertedThisAd, !isCancelled(), let cur4 = grab() {
                     convertedThisAd = true
                     if let how = clickCTA(cur4, tag: "adbox_cta\(n + 1)") {
@@ -690,43 +697,6 @@ final class FeatureEngine {
                     dwelledThisAd = false
                     continue
                 }
-
-                // ⭐⭐⭐⭐⭐ §3025 **返回腿全败 ⇒ ⛔ 绝不许回头再转化**（真机血案 2026-10-18）
-                //
-                /// ## ⛔ 血案（用户令逐字）
-                /// > 「**而且你这无限转化的毛病还是没有治疗好啊，没有上下文么。
-                /// >   转化后面就是关闭啊，怎么他妈的无限回来转化。**」
-                ///
-                /// ## 根因（真机 trace 逐字）
-                /// ```
-                ///   §adbox ↩ 还在落地页（第 3/9 次）⇒ 执行返回
-                ///   ... 9 条返回腿全试完 ...
-                ///   §adbox CTA 已点（文案兜底）⇒ 等落地页        ← ⛔ 又去转化了！
-                ///   §adbox ↩ 还在落地页（第 1/9 次）⇒ 执行返回    ← 再一轮
-                /// ```
-                /// 旧代码：`for k in 0..<returnToAdRounds` **跑完就直接落到 ②c 停留 → ②d 转化**，
-                /// 而 `convertedThisAd` 此时仍是 `false`（没 `n += 1` ⇒ 没清 ⇒ 也**没置 true**）
-                /// ⇒ 每一轮都重新点 CTA ⇒ **无限转化**。
-                ///
-                /// ## ✅ PC 的权威做法（`_1377_ad_loop.py:9802-9810` 逐字）
-                /// ```python
-                /// if at_center:
-                ///     done_ads += 1
-                ///     continue                      # ← 只有"真回中心"才 continue
-                /// # 否则**直接往下走 G3/G4**（等倒计时 → 点 ✕ 收奖励）
-                /// ```
-                /// ⇒ 📏 **PC 从不在"没回到广告页"的情况下去重新转化** —— 它直接进收尾；
-                ///   而"不再转化"由**单向锁** `no_conv` 保证（置 true 后永不回头）。
-                ///
-                /// ## 修法（照抄）
-                /// 返回腿全败 ⇒ **把 `convertedThisAd` 钉成 `true`**（= PC 的 `no_conv` 单向锁），
-                /// 然后 `continue` 回循环头 —— 这一轮只会做"停留 + 等倒计时 + 点 ✕ 收奖励"，
-                /// ⛔ 再也不会去点 CTA。下一轮若还在广告页，同样不会转化（锁已在）。
-                log("   §adbox ⛔ 返回腿全败（还在落地页）⇒ **锁死转化**（⛔ 绝不回头再点 CTA，"
-                    + "照 PC `no_conv` 单向锁）⇒ 交回主循环走「等倒计时 → 点 ✕ 收奖励」")
-                convertedThisAd = true
-                dwelledThisAd = false
-                continue
 
                 // ── ②c ⭐⭐⭐⭐⭐ §2824 **停留（用户令：30~45 随机）** ──────────────
                 //
@@ -1443,6 +1413,68 @@ final class FeatureEngine {
     }
 
     // MARK: - ⭐⭐⭐ 广告页拦阻（照 PC `is_ad_page`，⛔ 独立于页型表）
+
+    /// ⭐⭐⭐⭐⭐ §3026 **这一条广告"该不该再转化"** —— 照抄 PC `no_conv` 的**三闸**
+    ///
+    /// ## ⛔ 血案（用户令逐字）
+    /// > 「**而且你这无限转化的毛病还是没有治疗好啊，没有上下文么。
+    /// >   转化后面就是关闭啊，怎么他妈的无限回来转化。**」
+    /// > 「**无限转化也要修，但是修法你可以学习PG控制器。**」
+    ///
+    /// ## ✅ PC 的机制（`_1377_ad_loop.py:9698-9736` 逐字）
+    /// `no_conv` 是**局部变量、每条广告开头重建**（L9644），一旦置 `true` ⇒ 本条**永不回头转化**。
+    /// 置 `true` 的三个条件**全是"奖励已经到账"的正面证据**：
+    /// ```python
+    /// # ① L9698  顶栏已变「已成功领取」⇒ 奖励已到账（N10 修复）
+    /// if (not sys_hit) and (not ext_opened) and ("已成功领取" in top2):
+    ///     no_conv = True
+    /// # ② L9705  画面静止（广告已定格）⇒ 跳过 CTA 补点、直接收奖励（§1717）
+    /// if ("可领取" in top2) and ("已成功领取" not in top2) and (not sys_hit) \
+    ///         and (not ext_opened) and (not no_conv):
+    ///     if _STILL[0]:
+    ///         no_conv = True
+    /// # ③ L9731  倒计时走完 ⇒ 停补点、直接收奖励（§1716）
+    /// if ("已成功领取" in top2) or ("可领取" not in top2):
+    ///     no_conv = True
+    /// ```
+    /// 📏 **共同点：都是"奖励已经到手 / 广告已经播完"** —— 这时候再点 CTA 就是**白白浪费**
+    ///   （广告已结算，CTA 点进去只是再逛一次落地页），而且正是"无限转化"的来源。
+    ///
+    /// ## ⚠️ 与"返回腿失败就锁死"的区别（这一点我一开始搞错了，用户指出）
+    /// > 「**返回失败就找失败的问题解决 而不是不让转化**」
+    /// ⇒ 本函数**只管"该不该转化"**（奖励到账了就别转）；
+    ///   而"返回失败"由 `returnToAd` 的锚点腿（§3026 `inpage_landing`）去修。
+    ///   ⛔ 两者不许混为一谈。
+    ///
+    /// - Returns: true = **本条不要再转化**（直接去等倒计时/点 ✕ 收奖励）
+    static func adConvertStopped(_ img: UIImage, rec: Recognizer, nav: Navigator,
+                                 bw: Double, bh: Double, roi: [Double]?,
+                                 runningPatterns: [String]?,
+                                 log: (String) -> Void, tag: String) -> Bool {
+        let top = adTopText(img, rec: rec, bw: bw, bh: bh, roi: roi)
+            .replacingOccurrences(of: " ", with: "")
+        // 闸① 奖励已到账（PC L9698 逐字）
+        if top.contains("已成功领取") {
+            log("   §\(tag) ⛔ 转化闸①：顶栏「已成功领取」= **奖励已到账** ⇒ ⛔ 不再转化"
+                + "（照 PC `no_conv` L9698）⇒ 直接去等倒计时/点 ✕ 收奖励")
+            return true
+        }
+        // 闸② 倒计时还在走（PC §1716 / L9724-9734 逐字）
+        //   PC 原话：「顶栏仍在倒计时 ⇒ **CTA 被锁**，继续等」
+        //   ⇒ 📏 倒计时期间点 CTA **无效**（广告主锁住了），点了也白点，
+        //     而且会把"广告播完→收奖励"的时序搞乱 ⇒ **不点**。
+        if adCountdownRunning(img, rec: rec, bw: bw, bh: bh, roi: roi,
+                              runningPatterns: runningPatterns) {
+            log("   §\(tag) ⛔ 转化闸②：顶栏**还在倒计时** ⇒ CTA 被锁 ⇒ ⛔ 不点"
+                + "（照 PC §1716「CTA 被锁，继续等」）")
+            return true
+        }
+        // ⛔ 到此为止 —— PC 的第三条 `no_conv`（L9731「倒计时走完」）**不在此实现**：
+        //   它依赖 PC 的 `_CD_RX` / `_CDWAIT` 计数状态，单帧判不出来。
+        //   硬塞一个"顶栏没有可领取就算播完"的判据会**误伤**（直播间顶栏是主播昵称、
+        //   加载中顶栏是空白 ⇒ 都会被误判成"已播完"）⇒ ⛔ 不自造（工作区规则 §4）。
+        return false
+    }
 
 
     /// ⭐⭐⭐ 是不是**视频广告页** —— 照 PC `is_ad_page`（`_1377_ad_loop.py:3609`）**逐字**。
@@ -4008,6 +4040,45 @@ final class FeatureEngine {
                     + "（照 PC `if \"完成\" in txt(BOX_DONE)`；⛔ 原来 detect(\"appstore_done\") 恒 false）")
                 nav.tapPoint(Double(done.center.x), Double(done.center.y),
                              why: "返回腿 k=0 应用内商店页完成/打开")
+                return true
+            }
+            // ⭐⭐⭐⭐⭐ §3026 **广告内部落地页锚点腿**（真机血案 2026-10-18，用户令）
+            //
+            /// ## ⛔ 血案（用户令逐字）
+            /// > 「**返回失败就找失败的问题解决 而不是不让转化**」
+            /// > 「**把这个页面做锚点识别，就右上角图标加左上角图标 这是广告内部落地页**」
+            /// > 「**锚点可与截图做对比 不用死用OCR**」
+            ///
+            /// 真机 trace（「知了爱学」广告内部落地页上，返回腿全败）：
+            /// ```
+            ///   §tap ★点「back_arrow」@(27,79) score=0.918 ev=tpl:nav/chevron_dark2.png
+            ///   §nav 在 deeppage ⇒ back_arrow **有效**（画面已变）
+            ///   ... 但下一帧还在同一页 ⇒ 9 条腿跑完仍在原地
+            /// ```
+            /// ### 根因
+            /// `back_arrow` 用的模板是 `nav/chevron_dark2.png`（**通用**返回箭头，
+            /// 从别的页面裁的），在这页上 `score=0.918` 够过阈值，但**位置和形状都不精确**
+            /// ⇒ 点下去 H5 不认（或点到了箭头边缘外）⇒ 页面不动。
+            ///
+            /// ### ✅ 正解 = 用这一页**自己的**角标做锚点（截图比对，⛔ 不靠 OCR）
+            /// 模板从真机帧裁出（`templates/landing/inpage_back.png` / `inpage_warn.png`）：
+            /// ```
+            ///   左上 '<'  NCC 0.996 @(17,68)      右上 '⚠'  NCC 0.996 @(406,67)
+            /// ```
+            /// 离线复算（83 张真机帧，阈值 0.80）：
+            /// ```
+            ///   两个角标同时命中 = 3 帧（全是广告内部落地页）✅
+            ///   误中 = 0 帧
+            ///   反例 probe1.jpg：back=0.832（单模板能过）但 warn=0.221 ⇒ 组合不中 ✅
+            /// ```
+            /// ⇒ 📏 **组合式双角标** 比单靠通用 `chevron_dark2` 精确得多（0.996 vs 0.918），
+            ///   而且"两个角标同时在"是这一页独有的结构（⛔ 别的页面没有）。
+            if let hit = nav.detect("inpage_landing", img: img) {
+                log("   §\(tag) 返回腿 k=0：⭐ **广告内部落地页锚点命中**"
+                    + "（左上<' + 右上⚠ 双模板 NCC，§3026）@(\(Int(hit.center.x)),\(Int(hit.center.y)))"
+                    + " ⇒ 点左上返回")
+                _ = nav.tapPoint(Double(hit.center.x), Double(hit.center.y), atomic: true,
+                                 why: "广告内部落地页 左上返回锚点")
                 return true
             }
             log("   §\(tag) 返回腿 k=0：应用内「〈」⇒ 点它（照 PC `click_page_back`）")
