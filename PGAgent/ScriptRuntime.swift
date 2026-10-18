@@ -623,7 +623,7 @@ private final class PGBridge {
             let bx = max(0, Int(self.num(x, 0))), by = max(0, Int(self.num(y, 0)))
             let bw = min(W - bx, Int(self.num(w, W))), bh = min(H - by, Int(self.num(h, H)))
             guard bx < W, by < H, bw > 0, bh > 0 else { return self.fail("pg.pix 区域越界") }
-            guard let cg = cgAll.cropping(to: CGRect(x: bx, y: by, width: bw, height: bh))
+            guard let cg = cgAll.cropping(to: CGRect(x: CGFloat(bx), y: CGFloat(by), width: CGFloat(bw), height: CGFloat(bh)))
             else { return self.fail("pg.pix 裁剪失败") }
             var buf = [UInt8](repeating: 0, count: bw * bh * 4)
             guard let ctx = CGContext(data: &buf, width: bw, height: bh,
@@ -631,7 +631,7 @@ private final class PGBridge {
                                       space: CGColorSpaceCreateDeviceRGB(),
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
             else { return self.fail("pg.pix 建缓冲失败") }
-            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: bw, height: bh))
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: CGFloat(bw), height: CGFloat(bh)))
             // ⚠️ CGContext 原点在左下 ⇒ 缓冲第 0 行是 ROI 的**底行**，翻成左上原点
             var out = [UInt8](repeating: 0, count: bw * bh * 4)
             for j in 0..<bh {
@@ -655,7 +655,7 @@ private final class PGBridge {
             let bx = max(0, Int(self.num(x, 0))), by = max(0, Int(self.num(y, 0)))
             let bw = min(W - bx, Int(self.num(w, W))), bh = min(H - by, Int(self.num(h, H)))
             guard bx < W, by < H, bw > 0, bh > 0 else { return self.fail("pg.gray 区域越界") }
-            guard let cg = cgAll.cropping(to: CGRect(x: bx, y: by, width: bw, height: bh))
+            guard let cg = cgAll.cropping(to: CGRect(x: CGFloat(bx), y: CGFloat(by), width: CGFloat(bw), height: CGFloat(bh)))
             else { return self.fail("pg.gray 裁剪失败") }
             var buf = [UInt8](repeating: 0, count: bw * bh * 4)
             guard let ctx = CGContext(data: &buf, width: bw, height: bh,
@@ -663,7 +663,7 @@ private final class PGBridge {
                                       space: CGColorSpaceCreateDeviceRGB(),
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
             else { return self.fail("pg.gray 建缓冲失败") }
-            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: bw, height: bh))
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: CGFloat(bw), height: CGFloat(bh)))
             var g = [UInt8](repeating: 0, count: bw * bh)
             for j in 0..<bh {
                 let src = (bh - 1 - j) * bw * 4
@@ -713,7 +713,7 @@ private final class PGBridge {
                 scales = a.map { $0.doubleValue }
             }
             guard bx < W, by < H, bw > 2, bh > 2 else { return self.fail("pg.tpl 区域越界") }
-            guard let cg = cgAll.cropping(to: CGRect(x: bx, y: by, width: bw, height: bh))
+            guard let cg = cgAll.cropping(to: CGRect(x: CGFloat(bx), y: CGFloat(by), width: CGFloat(bw), height: CGFloat(bh)))
             else { return self.fail("pg.tpl 裁剪失败") }
             // ROI 灰度（与 pg.gray 同一口径）
             var buf = [UInt8](repeating: 0, count: bw * bh * 4)
@@ -722,7 +722,7 @@ private final class PGBridge {
                                       space: CGColorSpaceCreateDeviceRGB(),
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
             else { return self.fail("pg.tpl 建缓冲失败") }
-            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: bw, height: bh))
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: CGFloat(bw), height: CGFloat(bh)))
             var s = [Double](repeating: 0, count: bw * bh)
             for j in 0..<bh {
                 let src = (bh - 1 - j) * bw * 4
@@ -744,7 +744,7 @@ private final class PGBridge {
                                            space: CGColorSpaceCreateDeviceRGB(),
                                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
                       let tcg = img.cgImage else { return nil }
-                tctx.draw(tcg, in: CGRect(x: 0, y: 0, width: tw, height: th))
+                tctx.draw(tcg, in: CGRect(x: 0, y: 0, width: CGFloat(tw), height: CGFloat(th)))
                 var p = [Double](repeating: 0, count: tw * th)
                 for j in 0..<th {
                     let src = (th - 1 - j) * tw * 4      // 翻成左上原点
