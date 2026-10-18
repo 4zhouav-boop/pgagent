@@ -625,19 +625,32 @@ private final class PGBridge {
             guard bx < W, by < H, bw > 0, bh > 0 else { return self.fail("pg.pix 区域越界") }
             guard let cg = cgAll.cropping(to: CGRect(x: CGFloat(bx), y: CGFloat(by), width: CGFloat(bw), height: CGFloat(bh)))
             else { return self.fail("pg.pix 裁剪失败") }
-            var buf = [UInt8](repeating: 0, count: bw * bh * 4)
-            guard let ctx = CGContext(data: &buf, width: bw, height: bh,
+            // ⛔⛔⛔ §3106 **必须用 `data: nil` + `ctx.data` 取指针**（真机血案，2026-10-18）
+            //
+            // 原来的写法 `CGContext(data: &buf, ...)` 把 Swift 数组的**临时指针**交给 CGContext：
+            //   那个指针只在**初始化表达式的那一次调用期间**保证有效，CGContext **不持有它**。
+            //   之后 `ctx.draw()` 再往里写 ⇒ **写到一个已经失效的地址** ⇒ 读回来的像素全是错的。
+            // 📏 真机取证（同一帧、同一点）：
+            //   PC（PIL 归一化 451×977）(50,140) = **RGB(249,95,75)**（红包球的红）
+            //   手机端 `pg.pix`          (50,140) = **255,255,255,255**（读成纯白）
+            //   ⇒ ROI 内红像素：PC **946** ／ 手机端 **3** ⇒ 判据全部落空。
+            // ⛔ 这不是"判据不对"，是**板子（取像素的方式）不对** ⇒ 换板子，不贴胶布。
+            // ✅ 正解：让 CGContext **自己分配**缓冲（`data: nil`），再用 `ctx.data` 取它的指针；
+            //   生命周期由 CGContext 管，`draw` 写的一定是同一块内存。
+            guard let ctx = CGContext(data: nil, width: bw, height: bh,
                                       bitsPerComponent: 8, bytesPerRow: bw * 4,
                                       space: CGColorSpaceCreateDeviceRGB(),
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
             else { return self.fail("pg.pix 建缓冲失败") }
             ctx.draw(cg, in: CGRect(x: 0, y: 0, width: CGFloat(bw), height: CGFloat(bh)))
+            guard let src = ctx.data else { return self.fail("pg.pix 取不到缓冲") }
+            let srcPtr = src.assumingMemoryBound(to: UInt8.self)
             // ⚠️ CGContext 原点在左下 ⇒ 缓冲第 0 行是 ROI 的**底行**，翻成左上原点
             var out = [UInt8](repeating: 0, count: bw * bh * 4)
             for j in 0..<bh {
-                let src = (bh - 1 - j) * bw * 4
-                let dst = j * bw * 4
-                out.replaceSubrange(dst..<(dst + bw * 4), with: buf[src..<(src + bw * 4)])
+                let s = (bh - 1 - j) * bw * 4
+                let d = j * bw * 4
+                for k in 0..<(bw * 4) { out[d + k] = srcPtr[s + k] }
             }
             return self.val(["ok": true, "x": bx, "y": by, "w": bw, "h": bh,
                              "data": Data(out).base64EncodedString()])
@@ -657,22 +670,24 @@ private final class PGBridge {
             guard bx < W, by < H, bw > 0, bh > 0 else { return self.fail("pg.gray 区域越界") }
             guard let cg = cgAll.cropping(to: CGRect(x: CGFloat(bx), y: CGFloat(by), width: CGFloat(bw), height: CGFloat(bh)))
             else { return self.fail("pg.gray 裁剪失败") }
-            var buf = [UInt8](repeating: 0, count: bw * bh * 4)
-            guard let ctx = CGContext(data: &buf, width: bw, height: bh,
+            // ⛔ §3106 同 `pg.pix`：`data: nil` + `ctx.data`（`&buf` 的临时指针会在初始化后失效）
+            guard let ctx = CGContext(data: nil, width: bw, height: bh,
                                       bitsPerComponent: 8, bytesPerRow: bw * 4,
                                       space: CGColorSpaceCreateDeviceRGB(),
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
             else { return self.fail("pg.gray 建缓冲失败") }
             ctx.draw(cg, in: CGRect(x: 0, y: 0, width: CGFloat(bw), height: CGFloat(bh)))
+            guard let srcB = ctx.data else { return self.fail("pg.gray 取不到缓冲") }
+            let srcPtr = srcB.assumingMemoryBound(to: UInt8.self)
             var g = [UInt8](repeating: 0, count: bw * bh)
             for j in 0..<bh {
-                let src = (bh - 1 - j) * bw * 4
-                let dst = j * bw
+                let s = (bh - 1 - j) * bw * 4
+                let d = j * bw
                 for i in 0..<bw {
-                    let o = src + i * 4
-                    let r = Int(buf[o]), gg = Int(buf[o + 1]), b = Int(buf[o + 2])
+                    let o = s + i * 4
+                    let r = Int(srcPtr[o]), gg = Int(srcPtr[o + 1]), b = Int(srcPtr[o + 2])
                     // PIL `convert("L")`：L = round(0.299R + 0.587G + 0.114B)
-                    g[dst + i] = UInt8(max(0, min(255, (299 * r + 587 * gg + 114 * b + 500) / 1000)))
+                    g[d + i] = UInt8(max(0, min(255, (299 * r + 587 * gg + 114 * b + 500) / 1000)))
                 }
             }
             return self.val(["ok": true, "x": bx, "y": by, "w": bw, "h": bh,
@@ -715,20 +730,21 @@ private final class PGBridge {
             guard bx < W, by < H, bw > 2, bh > 2 else { return self.fail("pg.tpl 区域越界") }
             guard let cg = cgAll.cropping(to: CGRect(x: CGFloat(bx), y: CGFloat(by), width: CGFloat(bw), height: CGFloat(bh)))
             else { return self.fail("pg.tpl 裁剪失败") }
-            // ROI 灰度（与 pg.gray 同一口径）
-            var buf = [UInt8](repeating: 0, count: bw * bh * 4)
-            guard let ctx = CGContext(data: &buf, width: bw, height: bh,
+            // ROI 灰度（与 pg.gray 同一口径）—— ⛔ §3106 同样用 `data: nil` + `ctx.data`
+            guard let ctx = CGContext(data: nil, width: bw, height: bh,
                                       bitsPerComponent: 8, bytesPerRow: bw * 4,
                                       space: CGColorSpaceCreateDeviceRGB(),
                                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
             else { return self.fail("pg.tpl 建缓冲失败") }
             ctx.draw(cg, in: CGRect(x: 0, y: 0, width: CGFloat(bw), height: CGFloat(bh)))
+            guard let srcB = ctx.data else { return self.fail("pg.tpl 取不到缓冲") }
+            let srcPtr = srcB.assumingMemoryBound(to: UInt8.self)
             var s = [Double](repeating: 0, count: bw * bh)
             for j in 0..<bh {
                 let src = (bh - 1 - j) * bw * 4
                 for i in 0..<bw {
                     let o = src + i * 4
-                    let r = Double(buf[o]), g = Double(buf[o + 1]), b = Double(buf[o + 2])
+                    let r = Double(srcPtr[o]), g = Double(srcPtr[o + 1]), b = Double(srcPtr[o + 2])
                     s[j * bw + i] = 0.299 * r + 0.587 * g + 0.114 * b
                 }
             }
@@ -738,13 +754,14 @@ private final class PGBridge {
                 let th0 = Double(img.size.height * img.scale)
                 let tw = max(1, Int((tw0 * scale).rounded()))
                 let th = max(1, Int((th0 * scale).rounded()))
-                var tb = [UInt8](repeating: 0, count: tw * th * 4)
-                guard let tctx = CGContext(data: &tb, width: tw, height: th,
+                guard let tctx = CGContext(data: nil, width: tw, height: th,
                                            bitsPerComponent: 8, bytesPerRow: tw * 4,
                                            space: CGColorSpaceCreateDeviceRGB(),
                                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
                       let tcg = img.cgImage else { return nil }
                 tctx.draw(tcg, in: CGRect(x: 0, y: 0, width: CGFloat(tw), height: CGFloat(th)))
+                guard let tbB = tctx.data else { return nil }
+                let tb = tbB.assumingMemoryBound(to: UInt8.self)
                 var p = [Double](repeating: 0, count: tw * th)
                 for j in 0..<th {
                     let src = (th - 1 - j) * tw * 4      // 翻成左上原点
