@@ -104,6 +104,52 @@ final class Navigator {
                                       evidence: used)
             }
             return nil
+        // ⭐⭐⭐⭐⭐ §3013 **模板优先 + OCR 兜底**（`match: "template_or_ocr"`）
+        //
+        // ## ⛔ 为什么必须有（真机血案，2026-10-18）
+        // H5 落地页（「纵横修仙界」）上，返回腿 k=0/1/2 全部失败：
+        // ```
+        //   §tap ⛔ 没找到「back_arrow」⇒ 不点
+        //      （match=template roi=[0,55,110,130] tpl=["nav/chevron_dark.png", ...]）
+        //   ⇒ 一路试到 k=8 ⇒ 卡在「还在落地页」
+        // ```
+        // 而**同一帧的 `/ocr` 明明白白读到了那个箭头**：
+        // ```
+        //   y=66.7 x=15.6 w=21.3 h=29.8  '<'  conf=0.30
+        //   ⇒ 中心 (26.3, 81.6)
+        // ```
+        // 我用手动点 (26.3, 81.6)，**一次就回到广告页**（顶栏「已成功领取1666金币」）。
+        // ⇒ 📏 **模板在 H5 上认不出这个 `<`**（细笔画被压扁/抗锯齿），但 OCR 认得。
+        //
+        // ## 为什么是"两种并联"而不是改成 ocr
+        // 模板在**深色页/圆钮**上表现更好（`back_circle`），OCR 在**H5 细箭头**上更好。
+        // PC 的 `find_page_back` 本身就是**几何判据 + 多 ROI**并联（⛔ 不依赖单一手段），
+        // 这里照同一思路：**模板先试，miss 再用词表**（顺序固定，⛔ 不并发）。
+        //
+        // ## 安全性（为什么不会误点）
+        // `words` 只收方向符（`< ＜ 〈 ‹`），且 `roi` 仍是左上返回区；
+        // 语言模型 OCR 对单个 `<` 给 conf=0.30，所以本模式**默认放宽到 0.25**（可配 `min_conf`）。
+        case "template_or_ocr":
+            let names = e.templates ?? []
+            if !names.isEmpty,
+               let (rect, score, used) = rec.poolMatch(img, tplNames: names, roi: r,
+                                                       threshold: e.threshold ?? tplThr,
+                                                       mask: e.mask) {
+                return Recognizer.Hit(name: name, rect: rect, score: score,
+                                      evidence: "tpl:" + used)
+            }
+            let words = e.words ?? []
+            guard !words.isEmpty else { return nil }
+            let minConf = e.min_conf ?? 0.25
+            if let h = rec.findWords(img, words: words, roi: r,
+                                     minHits: e.min_hits ?? 1,
+                                     minConfidence: minConf) {
+                var hh = h
+                hh.name = name
+                hh.evidence = "ocr:" + hh.evidence
+                return hh
+            }
+            return nil
         // ⭐⭐⭐⭐⭐ §2621 **色彩判据元素**（`match: "color"`）——
         //    目前只有一种：`coin_ball`（红包/金币悬浮球）。
         //
