@@ -64,6 +64,8 @@ final class KGXNet {
     /// ⭐ §3162 最近一次推理的**几何量 + 采样点**（诊断用，⛔ 不参与推理）
     ///   用途：与 PC `_3132_kgx_ref.py` 逐点对拍，定位"输入数据不一致"还是"输出读法不一致"
     static var lastDebug: [String] = []
+    /// ⭐ §3164 最近一次 `out0` 的**前几个浮点 + Mat 几何**（诊断用）
+    static var lastOut0: [String] = []
 
     // MARK: - 加载
 
@@ -228,6 +230,22 @@ final class KGXNet {
                 for i in 0..<total { dst[i] = fpSrc[i] }
             }
             ncnn_mat_destroy(outMat)          // ✅ 数据已拷出，立刻销毁
+            // ⭐ §3164 诊断：把 out0 的**前 6 个浮点**与**几何量**存下来，
+            //   与 PC 的 `np.array(m).reshape(-1)[:6]` 逐值对拍 ⇒ 一次分清
+            //   "内存布局读错" 还是 "后处理算错"
+            if name == "out0" {
+                KGXNet.lastOut0 = [
+                    "w=\(wOut) h=\(hOut) c=\(cOut) cstep=\(cstep) total=\(total)",
+                    String(format: "raw[0]=%.6f", raw[0]),
+                    String(format: "raw[1]=%.6f", raw[1]),
+                    String(format: "raw[2]=%.6f", raw[2]),
+                    String(format: "raw[3]=%.6f", raw[3]),
+                    String(format: "raw[64]=%.6f", raw[64]),
+                    String(format: "raw[65]=%.6f", raw[65]),
+                    String(format: "raw[66]=%.6f", raw[66]),
+                    String(format: "raw[5280]=%.6f", raw.count > 5280 ? raw[5280] : -999),
+                ]
+            }
             let fp = raw                       // 后续只用 Swift 数组
             // 布局（PC 实测）：w=66(通道) h=side(格x) c=side(格y) cstep=w*h
             // ⇒ 格子 (gy,gx) 的 66 个通道 = raw[(gy*side+gx)*66 ... +65]
