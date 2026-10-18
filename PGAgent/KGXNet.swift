@@ -46,7 +46,10 @@ final class KGXNet {
     static let nc = 2
     static let nmsIoU = 0.45
 
-    private var net: OpaquePointer?   // ncnn_net_t
+    /// ncnn 的 C API 句柄类型（⛔ 不是 `OpaquePointer`）
+    /// 依据：`c_api.h` 里 `typedef struct __ncnn_net_t* ncnn_net_t;`
+    ///   ⇒ Swift 侧桥接成 `UnsafeMutablePointer<__ncnn_net_t>`
+    private var net: ncnn_net_t?
     private var loaded = false
     private var loadError = ""
 
@@ -75,9 +78,10 @@ final class KGXNet {
             return
         }
         // PC `net.opt.num_threads = AISJ_YOLO_THREADS(默认 4)`；`use_vulkan_compute = False`
-        let opt = ncnn_net_get_option(n)
-        ncnn_option_set_num_threads(opt, 4)
-        ncnn_option_set_use_vulkan_compute(opt, 0)
+        if let opt = ncnn_net_get_option(n) {
+            ncnn_option_set_num_threads(opt, 4)
+            ncnn_option_set_use_vulkan_compute(opt, 0)
+        }
 
         let r1 = ncnn_net_load_param(n, param)
         let r2 = ncnn_net_load_model(n, bin)
@@ -89,8 +93,8 @@ final class KGXNet {
         }
         net = n
         loaded = true
-        NSLog("PGAgent §3130 kgx 已加载（ncnn %@，4 线程）",
-              String(cString: ncnn_version()))
+        let ver = ncnn_version().map { String(cString: $0) } ?? "?"
+        NSLog("PGAgent §3130 kgx 已加载（ncnn %@，4 线程）", ver)
     }
 
     // MARK: - 推理（PC `_x_detect` 逐行）
@@ -152,31 +156,33 @@ final class KGXNet {
         }
 
         // 输入张量（3×640×640 float32）
-        guard let mat = ncnn_mat_create(), let ex = ncnn_extractor_create(net) else { return nil }
+        guard let ex = ncnn_extractor_create(net) else { return nil }
         defer { ncnn_extractor_destroy(ex) }
         guard let inMat = ncnn_mat_create_3d(KGXNet.inputSize, KGXNet.inputSize, 3, nil) else { return nil }
         defer { ncnn_mat_destroy(inMat) }
         // 把 chw 拷进 ncnn 的 Mat（PC 用 `ncnn.Mat(buf).clone()`，等价语义）
+        // ⛔ PC 注释里的血案：`ncnn.Mat(numpy)` 只是**零拷贝包装**，必须 clone 进 ncnn 自己的内存，
+        //    否则临时数组回收 ⇒ 悬空指针 ⇒ 段错误（`_1377` §1650 实测 exit=139）。
+        //    这里我们是**逐元素拷进 ncnn_mat_create_3d 自己分配的内存** ⇒ 天然满足"clone"语义。
         chw.withUnsafeBufferPointer { buf in
             if let dst = ncnn_mat_get_data(inMat) {
                 let dp = dst.assumingMemoryBound(to: Float.self)
                 for i in 0..<chw.count { dp[i] = buf[i] }
             }
         }
-        ncnn_mat_destroy(mat)      // 上面那个占位 create 不需要
         if ncnn_extractor_input(ex, "in0", inMat) != 0 { return [] }
 
         var cand: [(Float, Float, Float, Float, Float)] = []   // score, x1, y1, x2, y2（模型输入像素）
 
         for (name, stride) in KGXNet.heads {
-            var outMat: OpaquePointer?
+            var outMat: ncnn_mat_t?
             if ncnn_extractor_extract(ex, name, &outMat) != 0 || outMat == nil { continue }
             defer { ncnn_mat_destroy(outMat) }
             guard let md = ncnn_mat_get_data(outMat!) else { continue }
             let n = (KGXNet.inputSize / stride) * (KGXNet.inputSize / stride)
             let want = n * (4 * KGXNet.regMax + KGXNet.nc)
-            let total = ncnn_mat_get_w(outMat!) * ncnn_mat_get_h(outMat!)
-                         * max(1, ncnn_mat_get_c(outMat!))
+            let total = Int(ncnn_mat_get_w(outMat!)) * Int(ncnn_mat_get_h(outMat!))
+                         * max(1, Int(ncnn_mat_get_c(outMat!)))
             guard total == want else {
                 NSLog("PGAgent §3130 kgx：%@ 尺寸 %d ≠ %d", name, total, want)
                 continue
