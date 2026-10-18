@@ -228,1023 +228,610 @@ final class FeatureEngine {
     // MARK: - ① adbox 看广告得金币 + 宝箱
 
     /// ⭐ 照 PC 主循环：回中心 → 找广告任务 → 点进去 → **广告页待够时间** → 回中心。
+    /// ⭐⭐⭐⭐⭐ §3028 **runAdbox —— 1:1 移植 PC 主循环 `_1377_ad_loop.py:9411-10000`**
+    ///
+    /// # 📏 用户令（逐字）
+    /// > 「**PG控制台的代码让你1比1移植，为什么你个傻逼 就是不做？**」
+    ///
+    /// # ⛔ 为什么整段重写（而不是继续打补丁）
+    /// 旧版把 PC 的**分层主循环**揉成一个 1170 行的函数，顺序和判据都和 PC 不一致：
+    /// ```
+    ///   旧版结构（错）                        PC 结构（对，本节照抄）
+    ///   ① 无进展闸（自己发明的按时间）        ① 全局停手闸 STOP
+    ///   ② 抓帧                               ② 零进展闸 NOPROG（6 轮 + 证据清零）
+    ///   ③ 转化                               ③ 页面稳定闸（2×1.6s）
+    ///   ④ 回广告页 9 腿                      ④ 系统弹窗闸 dismiss_sys_prompt
+    ///   ⑤ 停留                               ⑤ 模态弹窗闸 dismiss_modal
+    ///   ⑥ G3 等倒计时                        ⑥ 挽留面板闸 click_stay_panel
+    ///   ⑦ G4 收奖励                          ⑦ 遮蔽层闸 dismiss_overlay
+    ///   ⑧ 找任务行                           ⑧ 页型识别 page_kind
+    ///                                        ⑨ feed 支（点悬浮球/底栏首页）
+    ///                                        ⑩ 广告页支（G1→G2→G3→G4）
+    ///                                        ⑪ 其他页（返回腿/未知页重判）
+    /// ```
+    /// 📏 **顺序就是语义**：PC 先把所有"盖屏干扰"逐层剥掉，再判页型；
+    ///   而旧版一上来就转化，屏幕上有弹窗时直接点空。
+    ///
+    /// # 🗺️ 本函数与 PC 行号的对应（逐段标注）
+    /// ```
+    ///   ① L9412-9422   steps += 1 / STOP 闸
+    ///   ② L9427-9431   NOPROG 计数
+    ///   ③ L9432-9435   mark()
+    ///   ④ L9436-9438   每条复位 SHOP_STATE
+    ///   ⑤ L9439-9446   _CDWAIT / _STILL 复位
+    ///   ⑥ L9447-9470   抓帧 + 零进展闸 v2（证据清零）
+    ///   ⑦ L9475-9479   页面稳定闸 2×1.6s
+    ///   ⑧ L9485-9489   dismiss_sys_prompt
+    ///   ⑨ L9490-9496   dismiss_modal
+    ///   ⑩ L9497-9501   click_stay_panel
+    ///   ⑪ L9502-9505   dismiss_overlay
+    ///   ⑫ L9511-9535   feed 支
+    ///   ⑬ L9558-9760   广告页支（G1 停留 → G2 转化 → ...）
+    ///   ⑭ L9769-9810   回广告页 9 腿
+    ///   ⑮ L9811-9890   G3 等倒计时
+    ///   ⑯ L9890-10000  G4 收奖励
+    /// ```
     private func runAdbox() -> Bool {
-        let count = max(1, s?.ad_count ?? 6)          // PC 控制台「条数」默认 6
-        // ⭐⭐⭐⭐⭐ §2645 **广告页停留时长改走 `adDwellSeconds`（唯一读取点）**
-        //
-        // ## 改动前后的**逐字等价**证明
-        // 改动前：`let dwell = s?.ad_dwell ?? 30`
-        // 改动后：`s?.ad_dwell` **有值** ⇒ `adDwellSeconds` 第一分支 `return d` ⇒ **一模一样**；
-        //        `s?.ad_dwell` 为 nil ⇒ 落到第三分支 `return 30` ⇒ **仍然是 30**。
-        // ⇒ 老配置（含现在这份 `ad_dwell = 30`）**行为一个字都不变**。
-        //
-        // ## 为什么这件事**价值最大**（用户令 + 真机 trace 铁证）
-        // trace 证明「**等满 51s 才去点 CTA**」⇒ 广告已结束 ⇒ **CTA 消失** ⇒ 转化恒失败。
-        // 配置化后可以直接把停留调到**几秒**来验证这个判断，⛔ 不用重编译（省 3 分钟/次）。
-        // ⚠️ 优先级（§2824 用户令后）：**区间 `ad_stay_min/max` 优先**，其次 `ad_dwell`，最后 30。
-        //    ⛔ 旧注释写的是反过来（`ad_dwell` 优先）—— 那正是"看广告没有等待时间"的根因。
-        log("§adbox 条数=\(count) 广告停留=**每条 \(Int(adStayMin))~\(Int(adStayMax))s 随机**"
-            + " 入口=\(s?.entry ?? "auto")")
+        let count = max(1, s?.ad_count ?? 6)
+        var doneAds = 0
+        var steps = 0
+        let maxSteps = count * 3
+        var stop = false
+        var stopReason = ""
+        var noprogCount = 0
+        var noprogAt = 0
+        var shopState = 0
+        var cdWaitCount = 0
+        var cdWaitAt = 0
 
-        guard ensureInCenter(tag: "adbox_boot") else {
-            log("§adbox ⛔ 回不到金币中心 ⇒ 停手")
-            return false
-        }
+        log("§adbox 条数=\(count) 广告停留=**每条 30~60s 随机** 入口=auto")
 
-        var n = 0
-        var emptyRounds = 0
-        var scrollTries = 0          // ⭐ §2309 任务列表翻页次数
-        var adEntryToggle = 0        // ⭐ §2315 入口轮换计数（宝箱 ↔ 看广告得金币）
-        var cooldownWaits = 0        // ⭐ §2911 目标行"在屏上但按钮冷却"的等待次数（有界）
+        // ═══════════════ ① 主循环（PC L9411）═══════════════
+        while doneAds < count && steps < maxSteps {
+            steps += 1
+            let n = doneAds + 1
 
-        // ⭐⭐⭐⭐⭐ §2705 **无进展闸（"无限循环"的正解）**
-        //
-        // ## 真机血案（用户令，逐字）
-        // > 「**死机了 无限循环**」/「**又死机了**」
-        //
-        // ## ⛔ 根因：`runFunnel` 那条 `continue` **一个计数器都不加**
-        // ```swift
-        // if nav.runFunnel(img) { log("漏斗处理了一层"); sleep(1.0); continue }
-        // ```
-        // `runFunnel` 只要**一直返回 true**（弹窗没被点掉 / 在冻结帧上反复"认出"同一个弹窗），
-        // 这个 `continue` 就**绕过了本函数里所有的闸**：
-        //   · `n`            不涨 ⇒ `while n < count` 永远成立
-        //   · `scrollTries`  不涨 ⇒ 6 次翻页预算永远用不完
-        //   · `emptyRounds`  不涨 ⇒ "连续 3 轮找不到就收手"永远不触发
-        // ⇒ **真·无限循环**（真机 trace 逐字：`§funnel friend_popup_x` 反复刷、`n` 一直不动）。
-        //
-        // ## ✅ 做法：**按"有没有进展"计数**，⛔ 不按"跑到哪一步"计数
-        // 判据用**已有的量**（⛔ 不新造判据）：`n`（真正收到奖励的条数）。
-        //   · `n` 涨了 ⇒ 有进展 ⇒ 归零
-        //   · `n` 没涨 ⇒ 记一次"空转"
-        // 连续空转超过 `stallLimit` ⇒ **停手并说清原因**（⛔ 不装死、⛔ 不空转）。
-        //
-        // 📏 为什么放在**循环头**而不是各个 `continue` 之前：
-        //    出口有 10 多个（每条腿都有 `continue`），逐个加**必然漏**；
-        //    放循环头 ⇒ **任何**路径绕回来都会被记一次 ⇒ 结构上不可能再漏。
-        //    （这正是我上一版把旧帧闸只装在 `unknown` 分支里踩的同一个坑。）
-        var lastN = 0
-        var stallIters = 0
-        /// 空转上限：一轮正常广告约 40~60s、每次循环 1~2s ⇒ 40 次 ≈ 1~2 分钟毫无进展，
-        /// 已经远超"正常慢"，够判死。⛔ 不设成几百（那等于没闸）。
-        let stallLimit = 40
+            // ── ①a 全局停手闸（PC L9417-9421）──
+            if stop {
+                log("   !! \(stopReason)")
+                break
+            }
 
-        // ⭐⭐⭐⭐⭐ §2824 **每条广告的"只做一次"状态**（用户令）
-        //
-        // ## 用户令（逐字）
-        // > 「**需要做检测就做单次转化，转化完就去关闭广告获取奖励**」
-        // > 「**还有转化现在无限转化。卡死**」
-        //
-        // ## ⛔ 血案：同一条广告被**反复转化**（真机日志 18:14~18:18 逐字）
-        // ```
-        // 18:15:36  已回广告页（第 2 次检查）⇒ 继续等倒计时
-        // 18:15:37  G3 倒计时已结束（等了 0s）            ← 一秒没等
-        // 18:15:38  adbox_back1 ⛔ 这是视频广告页 ⇒ 放行   ← 人**还在广告页**，却当"到中心了"
-        // 18:15:38  adbox_cta2 ...                        ← 同一条广告**又转化一次**
-        // 18:15:42  adbox_browse2 ...                     ← 再浏览一次
-        // （如此 6 轮，最后一条广告都没收奖励，却报 ok=true / 跑完 6 条）
-        // ```
-        // 根因：`n += 1` 之后调 `ensureInCenter`，而它**对广告页直接 return true**
-        // （防误点 ✕ 的短路）⇒ 主循环立刻又落回"广告页"分支 ⇒ **从头再转化一遍**。
-        //
-        // ## ✅ 修法：把"这条广告做过了什么"记下来
-        //   · `convertedThisAd` —— 转化（CTA→浏览）**每条只做一次**
-        //   · `dwelledThisAd`   —— 停留计时**每条只起一次**
-        //   · `n` **只在真的收完奖励/离开广告页之后**才 +1（⛔ 不再"假报成功"）
-        //   两个标志在**离开这条广告**时一起清空。
-        var convertedThisAd = false
-        var dwelledThisAd = false
-        var adDwellTarget = 0.0          // 本条广告的停留目标（区间随机，每条重抽）
-        var adEnteredAt = Date()
+            // ── ①b 零进展闸计数（PC L9427-9431）──
+            if noprogAt == n { noprogCount += 1 }
+            else { noprogAt = n; noprogCount = 1 }
 
-        while n < count {
-            if isCancelled() { log("§adbox ⛔ 被中断"); break }
+            log("---- 第 \(n) 条 (tag=adbox_a\(n)) ----")
 
-            // ── ⭐ §2705 无进展闸：**循环头统一记一次**（见上方长注释）──
-            if n > lastN {
-                lastN = n
-                stallIters = 0
-            } else {
-                stallIters += 1
-                if stallIters >= stallLimit {
-                    log("§adbox ⛔ **连续 \(stallIters) 次循环毫无进展**（收奖励条数停在 \(n)）"
-                        + " ⇒ **停手**（照 §2705 无进展闸）")
-                    log("§adbox ⛔ 多半是这两个原因之一："
-                        + "① **录屏已停**（帧不再更新，画面永远是同一张 ⇒ 点哪都没用）；"
-                        + "② **有弹窗/面板盖住任务列表**且漏斗点不掉它。"
-                        + " ⇒ **请到手机上确认画面**（重开录屏 / 手动关掉弹窗）后再跑")
+            // ── ①c 每条复位（PC L9436-9446）──
+            shopState = 0
+            if cdWaitAt != n { cdWaitCount = 0; cdWaitAt = n }
+
+            // ── ①d 抓帧（PC L9447）──
+            guard var img = grab() else {
+                log("   !! 抓帧失败 ⇒ 停手")
+                stopReason = "抓帧失败"
+                break
+            }
+
+            // ── ①e 零进展闸 v2（PC L9452-9470）：有"主链路健在"证据就清零 ──
+            let pkNp = pageKind(img)
+            let topNp = Self.adTopText(img, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi)
+            let evidence = (pkNp == "ad_video" || pkNp == "ad_live")
+                || ["领取", "金币", "广告"].contains(where: { topNp.contains($0) })
+                || nav.detect("center_marker", img: img) != nil
+            if evidence {
+                if noprogCount > 1 {
+                    log("   .. §1714 零进展闸清零（当前 **\(pkNp)** ⇒ 主链路健在、只是要等，不是卡死）")
+                }
+                noprogCount = 0
+            }
+            if noprogCount >= 6 {
+                stopReason = "第 \(n) 条连续 \(noprogCount) 轮**零进展**"
+                    + "（既不在广告页、也不在金币中心）—— 停手（⛔ 不空转白烧）"
+                log("   !! \(stopReason)")
+                stop = true
+                break
+            }
+
+            // ── ①f 页面稳定闸（PC L9471-9474）：2×1.6s 让页面渲染完 ──
+            for _ in 0..<2 {
+                sleep(1.6)
+                if let im = grab() { img = im }
+            }
+
+            // ── ①g 系统弹窗闸（PC L9485-9489）──
+            if nav.detect("sys_prompt_title", img: img) != nil {
+                log("   .. 系统弹窗 ⇒ 点消极项（⛔ 不点允许）")
+                _ = nav.tap("sys_prompt_deny", img: img, atomic: true)
+                sleep(1.5)
+                if let im = grab() { img = im }
+            }
+
+            // ── ①h 模态弹窗闸（PC L9490-9496）──
+            if let how = dismissModalCascade(img, tag: "adbox_modal\(n)") {
+                log("   .. 模态弹窗（\(how)）⇒ 已关掉")
+                sleep(2.5)
+                if let im = grab() { img = im }
+            }
+
+            var top = Self.adTopText(img, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi)
+            log("   G1 顶栏: 「\(top.prefix(40))」")
+
+            // ── ①i 挽留面板闸（PC L9497-9501）：点「继续观看」补全 ──
+            if nav.detect("stay_panel_title", img: img) != nil,
+               nav.detect("stay_panel_btn", img: img) != nil {
+                log("   .. §1553 挽留面板 ⇒ 点「继续观看」补全（PC L9497 `click_stay_panel`）")
+                _ = nav.tap("stay_panel_btn", img: img, atomic: true)
+                sleep(3.0)
+                continue
+            }
+
+            // ── ①j 遮蔽层闸（PC L9502-9505）──
+            if let how = dismissOverlay(img, tag: "adbox_ovl\(n)") {
+                log("   .. §1555 遮蔽层（\(how)）⇒ 已关掉")
+                continue
+            }
+
+            // ═══════════════ ② 页型分派（PC L9511-9535）═══════════════
+            let pk = pageKind(img)
+            log("   ★页面 = **\(pk)**")
+
+            // ── ②a feed 支（PC L9511-9535）：点悬浮球 / 底栏首页 回中心 ──
+            if pk == "feed" {
+                if let hit = nav.detect("coin_ball", img: img) {
+                    log("   .. ★App页面（feed）⇒ 点「红包/金币」悬浮球 @(\(Int(hit.center.x)),\(Int(hit.center.y)))")
+                    _ = nav.tapPoint(Double(hit.center.x), Double(hit.center.y), atomic: true,
+                                     why: "feed 悬浮球回中心")
+                    sleep(4.0)
+                    continue
+                }
+                if let hit = nav.detect("tab_home", img: img) ?? nav.detect("tab_featured", img: img) {
+                    log("   .. ★App页面（feed）**没有悬浮球** ⇒ 点底栏「首页/精选」切回推荐流")
+                    _ = nav.tapPoint(Double(hit.center.x), Double(hit.center.y), atomic: true,
+                                     why: "feed 底栏回推荐流")
+                    sleep(4.5)
+                    continue
+                }
+                log("   .. ★App页面（feed）既没悬浮球、也没底栏 ⇒ 只等 2s 重判（⛔ 不盲点）")
+                sleep(2.0)
+                continue
+            }
+
+            // ═══════════════ ③ 广告页支（PC L9558）═══════════════
+            let isAdPageLike = !["landing", "appstore", "home", "center"].contains(pk)
+                && (top.contains("可领取") || top.contains("已成功领取")
+                    || (top.contains("广告") && top.contains("金币"))
+                    || pk == "ad_video" || pk == "ad_live")
+            guard isAdPageLike else {
+                // ═══════════════ ④ 非广告页 ⇒ 返回腿（PC L9769-9810 的等价结构）═══════════════
+                log("   .. 非广告页（**\(pk)**）⇒ 走返回腿回中心/广告页")
+                var atCenter = false
+                for k in 0..<returnToAdRounds {
+                    guard let imr = grab() else { break }
+                    if nav.detect("center_marker", img: imr) != nil {
+                        log("   .. ★已落回金币中心（第 \(k + 1) 次检查）→ 本条算完成")
+                        atCenter = true
+                        break
+                    }
+                    let pkR = pageKind(imr)
+                    let topR = Self.adTopText(imr, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi)
+                    if pkR == "ad_video" || pkR == "ad_live" {
+                        log("   .. 已回到广告页（第 \(k + 1) 次检查）｜识别层判 **\(pkR)**")
+                        break
+                    }
+                    if pkR == "unknown" && (topR.contains("可领取") || topR.contains("已成功领取")) {
+                        log("   .. 已回到广告页（第 \(k + 1) 次检查）｜识别层 unknown、但顶栏像胶囊")
+                        break
+                    }
+                    log("   .. 还在落地页（第\(k + 1)次）: **\(pkR)** ⇒ 执行返回")
+                    _ = returnToAd(imr, tag: "adbox_ret\(n)_\(k)", k: k)
+                    sleep(3.2)
+                }
+                if atCenter {
+                    doneAds += 1
+                    log("   == 第 \(doneAds) 条完成")
+                    clickReenter(tag: "adbox_re\(doneAds)")
+                    sleep(5.0)
+                    continue
+                }
+                // ⛔ 回不到中心也不算"卡死"：下一轮零进展闸会兜住
+                log("   .. ⚠️ 返回腿走完仍未回中心/广告页 ⇒ 下一轮重判（零进展闸兜底）")
+                continue
+            }
+
+            // ── ③a G1 停留（PC L9567-9576）：先等 30~60s ──
+            let isLive = (pk == "ad_live") || Self.isLiveNow(img, rec: rec)
+            if !top.contains("已成功领取") {
+                let dwell = adDwellSeconds
+                log("   .. ★广告页（\(isLive ? "直播间" : "视频广告")）⇒ **先等 \(Int(dwell))s**（30~60 随机，用户口径）")
+                sleep(dwell)
+                if let im = grab() {
+                    img = im
+                    top = Self.adTopText(img, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi)
+                }
+                log("   .. 等满 \(Int(dwell))s 后顶栏：`\(top.prefix(42))`")
+            }
+
+            // ── ③b G2 转化（PC L9604-9760）──
+            if adG2Convert(n: n, img: img) {
+                // PC L9744 的 break：CTA 三连无效 ⇒ 本条停手
+                log("   §adbox ⛔ 本条按 PC `break` 语义停手（CTA 三次无效）⇒ 不计入完成")
+                _ = ensureInCenter(tag: "adbox_g2stop\(n)")
+                continue
+            }
+
+            // ── ③c 回广告页 9 腿（PC L9769-9810）──
+            var backHome = false
+            for k in 0..<returnToAdRounds {
+                guard let imr = grab() else { break }
+                if nav.detect("center_marker", img: imr) != nil {
+                    log("   .. ★已落回金币中心（第 \(k + 1) 次检查）→ 本条算完成")
+                    backHome = true
                     break
                 }
+                let pkR = pageKind(imr)
+                let topR = Self.adTopText(imr, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi)
+                if pkR == "ad_video" || pkR == "ad_live" {
+                    log("   .. 已回到广告页（第 \(k + 1) 次检查）｜识别层判 **\(pkR)**")
+                    break
+                }
+                if pkR == "unknown" && (topR.contains("可领取") || topR.contains("已成功领取")) {
+                    log("   .. 已回到广告页（第 \(k + 1) 次检查）｜识别层 unknown、但顶栏像胶囊")
+                    break
+                }
+                log("   .. 还在落地页（第\(k + 1)次）: **\(pkR)** `\(topR.prefix(24))` ⇒ 执行返回")
+                _ = returnToAd(imr, tag: "adbox_ret\(n)_\(k)", k: k)
+                sleep(3.2)
             }
-
-            guard let img = grab() else { log("§adbox ⛔ 抓帧失败"); break }
-            beat(["phase": "adbox-step", "n": n, "of": count])
-
-            // ⭐⭐⭐⭐⭐ §2996 **弹窗优先 —— 每条循环第一步就跑漏斗**（照 PC §1773d 顺序）
-            //
-            // ## ⛔ 真机血案（2026-10-17 19:37，用户报「任务中心的弹窗又不处理了？卡死了」）
-            // 现场：3 帧间隔 80s，`page` 恒为 `center`，40 个 OCR 词一字不变，
-            //       金币数 `22196` 三帧不动 ⇒ **画面完全冻结**。
-            // 真因：**「限时邀1位好友立得现金」弹窗盖住整屏**（用户截图铁证），
-            //       底下所有点击都落在遮罩上 ⇒ 点「领福利」@(394,339) 永远没反应。
-            // trace 逐行（40 条环缓冲）：
-            // ```
-            // [6-8]   点「领福利」@(394,339)
-            // [9-12]  入口轮换 → 宝箱浮件 @(393,945) → 点了
-            // [13]    宝箱面板上没找到 CTA ⇒ 落回按行腿
-            // [14]    ⚠️「看广告得金币」行 y=331 里 x≥330 没有按钮 ⇒ 本腿放弃
-            // [15-16] 本屏没有目标行 ⇒ 下滑找（第 N/6 次）
-            // [17]    ⬇ 翻到了目标行 ⇒ 点「领福利」@(394,339)   ← 又点回同一处
-            // ... 无限循环 6 次后重来
-            // ```
-            // ⇒ **漏斗一次都没跑**：因为 `runFunnel` 只在下面「④ 认不出」分支（L1039），
-            //   而弹窗盖屏时页型**仍判 `center`** ⇒ 永远走「② 按行定位」⇒ **到不了 ④**。
-            //
-            // ## ✅ PC 的顺序（`_1377_ad_loop.py:2705-2724`，逐字）
-            // > ⭐⭐⭐ §1773d **恢复漏斗提到导航之前**（弹窗盖屏 ⇒ 底下什么都点不到）
-            // > ⛔ 真机血案：`ext_landing` 走 ② 点面包屑 ⇒ 失败记死 ⇒ 停手，
-            // >   而**弹窗就在那儿** ⇒ **漏斗根本没轮到**。
-            // > 📏 正确顺序（抄 Alas `ui_additional` 语义）：
-            // >   「**Popups appear at page_os … so must take precedence**」
-            // > ✅ 新顺序：① 到目的地了吗 ② **恢复漏斗（弹窗/盖屏）** ③ 页面图上前进一跳 ④ 停手
-            //
-            // ## ⛔ 安全性（为什么不会乱点）
-            // 漏斗里每条腿**都有自己的前置闸**（`require`）或**独立形态判据**：
-            // · `modal_x` → 现在是 §2992+§2994 的「暖灰圆 + 中心深色十字」四闸像素判据
-            //   （离线验收 POS 10/10、NEG 0/1500 假阳）
-            // · `sys_prompt_*` / `rec_stopped_*` / `consent_*` → 都要标题/按钮形态同时命中
-            // · `pill_x` / `panel_close_x` → 模板或 OCR 尾字符闸
-            // ⇒ 普通广告页/任务中心页**不会**被误点（漏斗内部仍有序 + 带 interval 节流）。
-            // ⚠️ 但**广告页必须放行**：广告页上的胶囊 ✕ 是 `pill_x`，漏斗会点它。
-            //    所以顺序是 **先判"是不是广告页"，是就交给 ① 分支，⛔ 不进漏斗**。
-            let onAdPageNow = Self.looksLikeAdPage(img, rec: rec, nav: nav,
-                                                  bw: baseW, bh: baseH,
-                                                  roi: s?.ad_top_roi)
-            if !onAdPageNow, nav.runFunnel(img) {
-                log("§adbox ⭐ 漏斗处理了一层（弹窗优先，照 PC §1773d）")
-                sleep(1.0)
+            if backHome {
+                doneAds += 1
+                log("   == 第 \(doneAds) 条完成")
+                clickReenter(tag: "adbox_re\(doneAds)")
+                sleep(5.0)
                 continue
             }
 
-            // ① ⭐⭐⭐⭐⭐ 广告页（视频/直播**同一条路**）—— 照 PC 分支A + G3 + G4 **逐条**
-            //
-            // ## ⛔⛔ 我上一版把**顺序搞反了**（用户令，逐字）
-            // > 「**倒计时是广告没结束 你没结束去点 不是傻逼。广告结束了你不点了。**」
-            // 而 PC 早就把这条写成了**血案**（`_1377_ad_loop.py:9814`）：
-            // > ⛔ 我一度反了：以为"要抢在倒计时走完前点 ✕"，
-            // >   结果**倒计时没走完就点 ✕ 会把广告点死**（停在「Ns后可领取X金币」+ 面板永不弹）。
-            // > ✅ 正确顺序：**必须等倒计时结束**（胶囊文案变成「已成功领取X金币 ✕」）才点 ✕。
-            //
-            // ## PC 的完整顺序（分支A → 转化 → G3 → G4，`_1377_ad_loop.py:9560` 逐字）
-            // ```
-            // ① 先等 30~60s 随机（§1541：「等待时间还是要做个随机数字，30-60 随机」）
-            // ② **做转化**（CTA → 浏览）        ← ⭐ 广告还在 ⇒ CTA 才在（§2632）
-            // ③ G3：**等倒计时结束**（轮数按胶囊里的 N 动态定：N+20s 余量）
-            // ④ G4：倒计时结束后**才点 ✕**收奖励 ⇒ 处理弹出的面板
-            // ```
-            // ⛔⛔ §2632 **② 必须在 ③ 之前**（我上一版把转化排在 G3 之后 ⇒ CTA 已消失）。
-            if Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH,
-                                       roi: s?.ad_top_roi) {
-                // ⭐⭐⭐⭐⭐ §2641 **转化必须在最前**（照 PC `_1377_ad_loop.py:9560`）
-                // ⛔ 等 30~60s 再转化 = 本机广告只有约 25s ⇒ 等满时 **CTA 必然消失**
-                // 真机 trace：`[72s] 顶栏已成功领取` → `[90s] 没找到可点的 CTA`
-                var cur = img
-
-                // ⭐⭐⭐⭐⭐ §2824 **本条广告的停留计时**（用户令：30~45 随机）
-                //
-                // ## 用户令（逐字）
-                // > 「**看广告没有等待时间我设置的希望30-45随机**」
-                //
-                // ## ⛔ 血案：这个分支**从来没等过**
-                // 旧版的 `dwell` 只在"广告播放中（无面板/无关闭键）"那条**极少走到**的分支里
-                // 被用到；而真机走的是**本分支**（顶栏有胶囊）⇒ 一秒都没等。
-                // 手机日志逐字：`§adbox G3 倒计时已结束（等了 0s）`。
-                //
-                // ⇒ 现在**进入本条广告时抽一次**区间随机值，并在下面**真的等满**。
-                //   ⛔ 每条只起一次计时（`dwelledThisAd`），免得循环回来重新计时。
-                if !dwelledThisAd {
-                    adDwellTarget = adDwellSeconds          // 区间随机 ⇒ 每条广告不同
-                    adEnteredAt = Date()
-                    dwelledThisAd = true
-                    log("   §adbox 本条广告停留目标=\(Int(adDwellTarget))s"
-                        + "（区间 \(Int(adStayMin))~\(Int(adStayMax)) 随机；用户令）")
-                }
-                // 已经等了多久（跨"循环回来"累计，所以用进入时刻算，⛔ 不重新计时）
-                let dwelledSoFar = Date().timeIntervalSince(adEnteredAt)
-                let dwellLeft = adDwellTarget - dwelledSoFar
-
-                // ── ② ⭐⭐⭐ 转化：点 CTA → 浏览落地页（**每条只做一次**）──
-                //
-                // ⛔⛔ §2824 用户令：「**需要做检测就做单次转化，转化完就去关闭广告获取奖励**」
-                //    旧版没有 `convertedThisAd` 闸 ⇒ 主循环每绕回来一次就**再转化一次**
-                //    （真机日志：cta1/browse1 → cta2/browse2 → … → cta6/browse6，同一条广告）。
-                if !convertedThisAd, !isCancelled(), let cur4 = grab() {
-                    convertedThisAd = true
-                    if let how = clickCTA(cur4, tag: "adbox_cta\(n + 1)") {
-                        log("§adbox CTA 已点（\(how)）⇒ 等落地页")
-                        sleep(3.2)
-                        if let land = grab(),
-                           !Self.looksLikeAdPage(land, rec: rec, nav: nav, bw: baseW, bh: baseH,
-                                                 roi: s?.ad_top_roi) {
-                            log("§adbox ✅ 已进落地页（顶栏「\(Self.adTopText(land, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi).prefix(18))」）⇒ 浏览")
-                            clickInstall(land, tag: "adbox_inst\(n + 1)")   // 先点安装（照 PC 顺序）
-                            browseLanding(tag: "adbox_browse\(n + 1)")      // 再浏览
-                        } else {
-                            log("§adbox ⚠️ CTA 没点进落地页 ⇒ **不浏览**（照 PC：都没进去，滑什么）")
-                        }
-                    } else {
-                        log("§adbox ⚠️ 没找到可点的 CTA（过闸后）⇒ 本条不做转化，直接收奖励")
-                    }
-                } else if convertedThisAd {
-                    log("   §adbox ⏭ 本条广告**已转化过**（单次转化，用户令）⇒ ⛔ 不再转化")
-                }
-
-                // ── ②b ⭐⭐⭐⭐⭐ §2640 **回广告页**（PC L9769~L9801，⛔ 我原来整段漏了）──
-                //
-                // ## ⛔⛔ 用户令（逐字，本轮）
-                // > 「**这个未点X就切下一个了**」
-                //
-                // ## 血案（真机 trace + 用户截图）
-                // 用户截图停在**天猫落地页**（「商品正在加速赶来中」）—— 说明 **CTA 点成功了**，
-                // 但代码**在落地页上直接跑 G3/G4 去找广告胶囊 ✕** ⇒ 当然找不到
-                // ⇒ `finishAdPanel` 返回 false ⇒ **本条就这样"结束"**，去切下一个广告。
-                // ⇒ 现象 = 「**未点 X 就切下一个**」。
-                //
-                // ## PC 的做法（`_1377_ad_loop.py:9769-9801`，逐字）
-                // ```python
-                // # ③ 回广告页：可能要 2 步（先关被拒 WebView，再点面包屑）
-                // #    ⇒ 循环到顶栏重新读到胶囊为止（★§1633 轮数 6 → 9）
-                // for k in range(9):
-                //     img_r = grab(...)
-                //     if on_center(img_r): at_center = True; break          # 直接落回金币中心 ⇒ 也算成功
-                //     _pk_r, _ptop_r, _pev_r = page_kind(img_r, top=txt(img_r, BOX_TOP))
-                //     if _pk_r in ("ad_video", "ad_live"): break            # ⭐ 已回广告页
-                //     if _pk_r == "unknown" and ("可领取" in top_r): break   # 兼容
-                //     return_to_ad(img_r, k)                                # ⛔ 否则**主动返回**
-                //     wait(3.2)
-                // ```
-                // 📏 关键：**"返回"是一个要反复尝试的动作**（最多 9 次），
-                //   ⛔ 不是"我以为已经回来了"。这正是我漏掉的那一步。
-                log("§adbox ↩ 转化完 ⇒ **回广告页**（照 PC `for k in range(9)` 返回腿，轮数可配）")
-                var backHome = false
-                // ⭐⭐⭐⭐⭐ §2933 **A4：腿无效判据 + 换腿上限**（治"同一条腿连发"）
-                //
-                // ## ⛔ 为什么补它（本项目已有的 GitHub 调研结论，我一开始没照做）
-                // `_docs/notes/_note_1473_直播间回中心腿序_GitHub调研与方案.md` §2.3 逐字：
-                // > Alas 把「**点了太多次还是没反应**」设成**独立的一等异常**
-                // > `GameTooManyClickError`；GKD 用 `actionMaximum`（限次）/`actionCd`（冷却）
-                // > ⇒ 成熟框架**不"继续点"**，而是把它当异常拦下。
-                // 📏 那次真机血案：**同一条腿连发 34 次**（`min(s,5)` 饱和 ⇒ 无限空转）。
-                //
-                // ## ✅ 抄 PC 的现成机制（`Navigator.markDead` / `screenChanged`，已在码里）
-                // 本项目**已经有**这两个函数（照 MaaFW `wait_freezes` 语义）：
-                // ```
-                //   点前抓一帧 → 发腿 → 点后再抓 → 比「判据区指纹」
-                //   没变 ⇒ 这条腿在**这一页上**无效 ⇒ 记死，换下一条
-                // ```
-                // ⇒ 我这次只是**把它接进返回循环**（⛔ 没有新造任何机制）。
-                var deadLegs = Set<Int>()
-                var lastSig: UIImage? = nil
-                // ⭐ §2971 上一轮那条腿**到底出手了没有**（returnToAd 的返回值）
-                //   ⛔ 只有"出手了 且 画面没变"才许记死 ⇒ 治冤杀（见 ②b 的血案注释）
-                var lastLegFired = false
-                for k in 0..<returnToAdRounds {
-                    if isCancelled() { break }
-                    guard let imr = grab() else { break }
-                    // ① ⭐⭐⭐⭐⭐ **已回广告页** ⇒ 继续走 G3/G4
-                    //    ⛔⛔ **必须在"中心判据"之前**（§2644 真机血案，子智能体核对逮到）
-                    if Self.looksLikeAdPage(imr, rec: rec, nav: nav, bw: baseW, bh: baseH,
-                                            roi: s?.ad_top_roi) {
-                        log("   §adbox ✅ 已回广告页（第 \(k + 1) 次检查）⇒ 继续等倒计时")
-                        cur = imr
-                        break
-                    }
-                    // ② 落回金币中心 ⇒ 本条已完成（照 PC `on_center`）
-                    //
-                    // ⛔⛔⛔ §2644 **绝不能在这里用 `ensureInCenter`**（血案）
-                    // `ensureInCenter` 第 1328 行有一条**广告页放行短路**：
-                    // ```swift
-                    // if Self.looksLikeAdPage(img, ...) { return true }   // ← 广告页也返回 true
-                    // ```
-                    // ⇒ 若拿它当"到中心了吗"的判据：**人还在广告页**时它会返回 true
-                    //   ⇒ 打印"已落回金币中心 ⇒ 本条算完成" ⇒ `n += 1` 切下一条
-                    //   ⇒ **不进 G3/G4、不点 ✕、不收奖励** = 用户令「**这个未点X就切下来**」。
-                    // ✅ 改用**纯元素判据**（config 的 `center_marker`）—— 与 PC `on_center` 同语义。
-                    if nav.detect("center_marker", img: imr) != nil {
-                        log("   §adbox ✅ 已落回金币中心（第 \(k + 1) 次检查）")
-                        backHome = true
-                        break
-                    }
-                    // ②b ⭐ A4：**上一轮那条腿有没有用**（画面变了吗）
-                    //    ⇒ 没变 ⇒ 它在**这一页上**无效 ⇒ 记死，本轮跳过它直接换下一条
-                    //
-                    // ⛔⛔⛔ §2971 **必须再过一道"它到底出手了没有"**（真机血案）
-                    // 血案（`_2971` 真机日志逐字）：
-                    // ```
-                    // [19:14:57] §tap ⛔ 没找到「back_arrow」⇒ **不点**      ← 这一腿没出手
-                    // [19:15:01] §adbox ⏭ 返回腿 k=2 **点了画面没变** ⇒ 记死  ← 🔴 谎报"点了"
-                    // ```
-                    // ⇒ 四条腿（k=2/4/7/8）**一次都没出手**却被全判死 ⇒ 后面的路被自己堵死。
-                    // ✅ 修法：`returnToAd` 现在**返回它有没有出手**
-                    //   · 出手了 且 画面没变 ⇒ 记死（原语义，对）
-                    //   · 没出手            ⇒ **⛔ 不记死**（它只是这一帧没找到目标）
-                    if let ref = lastSig, lastLegFired {
-                        if !nav.screenChanged(ref, imr) {
-                            deadLegs.insert(k - 1)
-                            log("   §adbox ⏭ 返回腿 k=\(k - 1) **点了画面没变** ⇒ 记死换下一条"
-                                + "（A4／MaaFW `wait_freezes`；⛔ 不重复点）")
-                        }
-                    } else if let _ = lastSig, !lastLegFired {
-                        log("   §adbox ℹ️ 返回腿 k=\(k - 1) 上一轮**没出手**（没找到目标）"
-                            + "⇒ ⛔ 不记死（§2971：⛔ 不许把没出手的腿冤杀）")
-                    }
-                    // ③ 还在落地页 ⇒ **主动返回**（照 PC `return_to_ad`）
-                    //    ⛔ 若这条腿已记死 ⇒ 直接跳到下一条（⛔ 不空转）
-                    if deadLegs.contains(k) {
-                        log("   §adbox ⏭ 返回腿 k=\(k)：已记死 ⇒ 跳过（⛔ 不重复点）")
-                        lastSig = nil
-                        continue
-                    }
-                    log("   §adbox ↩ 还在落地页（第 \(k + 1)/\(returnToAdRounds) 次）⇒ 执行返回")
-                    lastSig = imr
-                    lastLegFired = returnToAd(imr, tag: "adbox_ret\(n + 1)_\(k)", k: k)
-                    // ⭐⭐⭐ §2973 **改成"轮询等一张新帧"，⛔ 不是盲等固定 `returnToAdWait`**
-                    //
-                    // ## 📏 为什么（照本项目**已有**的 `Navigator.step` §2265，⛔ 不新造）
-                    // 录屏写盘节拍是 **1 帧/4s**（为活过 iOS 写入预算而故意放慢）。
-                    // 固定睡 3.2s 就去比 ⇒ `grab()` 很可能**还是同一张帧** ⇒
-                    // `screenChanged` 等于拿一张图跟自己比 ⇒ 恒 false ⇒ **腿被冤杀**。
-                    // 📏 与 `Navigator.swift:1114-1137` 是**同一个坑**，那边已修好 ⇒ 这里照抄。
-                    //
-                    // ## ✅ 修法（照抄那段）
-                    //   · 画面**真变了** ⇒ 新帧一到就早退（⛔ 不白等）
-                    //   · 画面**真没变** ⇒ 等满预算再判（结论仍正确）
-                    // 📏 也顺手治了"9 腿 × 3.2s 白等 29s"的浪费。
-                    //
-                    // ⚠️ 上游对照：SikuliX `WaitScanRate`／Selenium `poll_frequency`
-                    //    都是"轮询到条件成立就早退"，⛔ 不是固定 sleep。
-                    let changeWait = max(Double(returnToAdWait),
-                                         (s?.loop_frame_max_age ?? 7.0) + 1.5)
-                    let deadline = Date().addingTimeInterval(changeWait)
-                    while Date() < deadline {
-                        sleep(0.5)
-                        guard let p = grab() else { break }
-                        if nav.screenChanged(imr, p) {
-                            log("   §adbox ⚡ 返回腿 k=\(k) 后**画面已变**（新帧到了就早退，⛔ 不白等）")
-                            break
-                        }
-                    }
-                }
-                if backHome {
-                    // ⭐⭐⭐⭐⭐ §2824 **回中心也算"真的离开这条广告"** ⇒ 可以计数
-                    //
-                    // 为什么这个分支能算完成（与另两处的"确认到账"等价）：
-                    // 能走到这里说明**人已经不在广告页**，而是落回了金币中心
-                    // （判据 = `center_marker` 元素命中，⛔ 不是广告页放行短路）
-                    // ⇒ 广告确实结束了、奖励由快手自己结算 ⇒ 与"已成功领取"同义。
-                    // ⚠️ 关键是**必须真的不在广告页**：血案里那句
-                    //   `§adbox_back1 ⛔ 这是视频广告页 ⇒ 放行` 是 `ensureInCenter`
-                    //   的广告页短路 ⇒ 人还在广告页 ⇒ 那次**不该**计数（现在已改由
-                    //   `adRewardClaimed` / `looksLikeAdPage` 确认，⛔ 不用短路）。
-                    log("   §adbox ✅ 已离开广告页（落回金币中心）⇒ 本条完成")
-                    n += 1
-                    scrollTries = 0
-                    convertedThisAd = false
-                    dwelledThisAd = false
-                    continue
-                }
-
-                // ── ②c ⭐⭐⭐⭐⭐ §2824 **停留（用户令：30~45 随机）** ──────────────
-                //
-                // ## 用户令（逐字）
-                // > 「**看广告没有等待时间我设置的希望30-45随机**」
-                //
-                // ## ⛔ 血案：这里从来**没等过**
-                // 旧版 `dwell` 只在"广告播放中（无面板/无关闭键）"那条**极少走到**的分支里
-                // 用过；真机走的是本分支（顶栏有胶囊）⇒ 手机日志逐字
-                // `§adbox G3 倒计时已结束（等了 0s）` —— **一秒都没等**。
-                //
-                // ## 顺序为什么是「转化 → 停留 → 等倒计时 → 点 ✕」
-                // 转化必须在广告还在时做（§2632：等满了 CTA 就没了）；
-                // 而停留是**用户要的看广告时长**；两者不冲突 —— 转化已经做完了。
-                if dwellLeft > 0 {
-                    log("   §adbox ⏳ 本条广告停留（还需 \(Int(dwellLeft))s / 目标 \(Int(adDwellTarget))s）")
-                    var left = dwellLeft
-                    while left > 0, !isCancelled() {
-                        let d = min(2.0, left)
-                        sleep(d)
-                        left -= d
-                        // ⭐⭐⭐⭐⭐ §2832 **只补全、不关闭**（照 PC `wait()` + `click_toast_x` 第一段）
-                        //
-                        // ## ⛔⛔ 血案（0.16 真机日志，用户报「没有等待 + 提前点 ✕」）
-                        // 这里原来调的是 `finishAdPanel()` —— 它**会点胶囊 ✕**（腿序第③条）
-                        // ⇒ 停留才 10 秒就把广告关掉了：
-                        // ```
-                        // 10:46:32  ⏳ 本条广告停留（还需 46s / 目标 46s）
-                        // 10:46:41  顶栏胶囊 ✕（面板已不在、且已无倒计时）⇒ 点它   ← ⛔ 自己点的
-                        // 10:46:42  §click pill_x @(220,89)
-                        // ```
-                        // ## ✅ 正解（PC `_1377_ad_loop.py:4395` 的 `wait()` 就是纯 `time.sleep`）
-                        //   等待期间**唯一**允许的动作 = 点「继续观看」把广告补全
-                        //   （PC `click_toast_x` L4333 那段：命中「继续观看」⇒ 点它 ⇒ **return**）
-                        //   ⛔ 绝不点胶囊 ✕ / 面板 ✕ —— 那是**等满之后** G4 的事。
-                        if let im2 = grab(), completeAdPanelOnly(im2, tag: "adbox_dwell\(n + 1)") {
-                            log("   §adbox 停留中面板需要补全 ⇒ 已点「继续观看」（⛔ 未关广告）")
-                        }
-                    }
-                    // 停留结束后刷新一次（下面 G3 要用最新帧）
-                    if let imd = grab() { cur = imd }
-                }
-
-                // ── ③ G3：**等倒计时结束**才许动手（PC L9814~L9858）────────
-                //    ⭐ 判据 = PC 的**两条**（见 `adCountdownRunning` 的 docstring）：
-                //      ① `\d+[sS秒]?后`（抗错字 —— `19后` 也算，真机 f031/f033 铁证）
-                //      ② 「后可领取」句式还在 ⇒ 保守算"在走"
-                //    ⛔ 绝不能用旧式 `\d+秒` 单条：真机 OCR 常把 `19s` 读成 `19`
-                //      ⇒ 判据恒 false ⇒ 误判"走完" ⇒ **提前点 ✕ 把广告点死**（§2628 血案）。
-                //
-                // ⭐ §2628 **等待轮数按胶囊里的 N 动态定**（照 PC L9821~L9825）：
-                //   `_need = N + 20` ⇒ 多长的广告都等得起（⛔ 不是固定 90s）
-                var waited = 0.0
-                let needS: Double = {
-                    if let n0 = Self.adCountdownSeconds(cur, rec: rec,
-                                                        bw: baseW, bh: baseH,
-                                                        roi: s?.ad_top_roi,
-                                                        secondsPatterns: s?.countdown_seconds_regex) {
-                        return Double(n0) + 20.0
-                    }
-                    return 45.0          // 读不到 N ⇒ PC 的默认（`_need … else 45`）
-                }()
-                log("   §adbox G3 胶囊倒计时 N ⇒ 最多等 \(Int(needS))s（N+20 余量，照 PC）")
-                // ⭐⭐⭐⭐⭐ §2832 **改成 fail-safe：等满预算，只在"正面看到已到账"时提前结束**
-                //
-                // ## ⛔⛔ 血案（0.16 真机日志，用户报「**在有倒计时的时候提前点击关闭**」）
-                // ```
-                // 10:46:41  顶栏胶囊 ✕（…且**已无倒计时**）⇒ 点它      ← 只因为那一刻 OCR 没读出数字
-                // 10:46:42  §click pill_x @(220,89)
-                // 10:46:48  顶栏**还有倒计时** ⇒ 不点胶囊 ✕            ← 6 秒后数字又读出来了！
-                // ```
-                // ⇒ **倒计时明明没走完**，只是 OCR **漏读了一次** ⇒ 旧代码就当成"结束了"去点 ✕。
-                //
-                // ## 根因：条件方向反了（fail-open ⇒ 应当 fail-safe）
-                // 旧代码：`while adCountdownRunning(...)` —— "**读不到倒计时**"就退出循环
-                //   ⇒ OCR 一次漏读（顶栏常被读成 `酱23°17°` 这类乱码）⇒ **立刻退出** ⇒ 点 ✕
-                //   ⇒ 这就是日志里 `G3 倒计时已结束（等了 0s）` 的来源（§2628 血案同源）。
-                //
-                // ## ✅ PC 的做法（`_1377_ad_loop.py:9837-9861`，逐字）
-                // ```python
-                // for k in range(_rounds):                      # ⭐ 按预算**等满**
-                //     if "已成功领取" in top3: break             # ⭐ **只在正面看到"已到账"时**才提前结束
-                //     wait(3.0)
-                // ```
-                // ⇒ 📏 PC 的闸是「**必须正面确认**（已成功领取）才收手；⛔ 不是"读不到就当结束"」。
-                //   PC 用 `_rounds` 预算兜底，等满后才进 G4 点 ✕。
-                //   ⛔ 注意：PC 的**点击闸**（`click_toast_x` L4349）确实是"读到数字就不点"（宽松），
-                //     但那是**安全**的 —— 因为它在 G3 **先等满了预算**。
-                //     ⇒ **顺序决定安全**：先"严格地等"，再"宽松地点"。我原来两处都宽松。
-                while !adRewardClaimed(cur), waited < needS, !isCancelled() {
-                    sleep(3.0)
-                    waited += 3.0
-                    guard let im3 = grab() else { break }
-                    cur = im3
-                    if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex) {
-                        log("   §adbox G3 等倒计时结束（已等 \(Int(waited))s / \(Int(needS))s"
-                            + "；⛔ 没结束不点 ✕）")
-                    } else {
-                        // ⚠️ 读不到倒计时**不等于**走完（可能只是 OCR 漏读）⇒ 继续等满预算
-                        log("   §adbox G3 已等 \(Int(waited))s / \(Int(needS))s"
-                            + "；⚠️ 这一刻读不到倒计时，但**未看到「已成功领取」** ⇒ 继续等（⛔ 不当成结束）")
-                    }
-                }
-                if adRewardClaimed(cur) {
-                    log("   §adbox ✅ G3 正面看到「已成功领取」（等了 \(Int(waited))s）⇒ 倒计时确实走完")
-                } else {
-                    log("   §adbox G3 等满预算 \(Int(needS))s（⛔ 没等到「已成功领取」字样）⇒ 按 PC 兜底进 G4")
-                }
-                // ⭐ §2832 **点 ✕ 前的最后一道到账闸**（照 PC `click_toast_x` L4342-4351）
-                //
-                // PC 原文：「② 到账闸：**只看「还有没有 N秒/Ns 倒计时」**」
-                // ```python
-                // _top = txt(img, BOX_TOP)
-                // if re.search(r"\d+\s*[sS秒]", _top):
-                //     print("   .. ⛔ 顶栏还有倒计时 ⇒ **没走完，这次不点 X**")
-                //     return False
-                // ```
-                // 📏 为什么这条**宽松**（读不到数字就放行）是安全的：
-                //   因为 G3 已经**等满了预算**（上面那个循环）⇒ 到这里倒计时本来就该走完了。
-                //   ⛔ 反过来（先宽松地判结束、再严格地点）就是我原来的 bug。
-                // ⚠️ §2832：原来这里还有一个"补等 180s"的块 —— **已删**：
-                //   G3 现在自己就等满预算，再补等一轮等于**等两倍**（白拖长每条广告）。
-                //
-                // ⭐⭐⭐⭐⭐ §2987 **PC 原文是「仍按结束处理」—— 这块板子原来抄反了方向**
-                //
-                // ## ⛔⛔ 真机血案（本轮实机 trace，2026-10-17 21:53）
-                // 顶栏文案 `点击后看5秒 可领165金币 ✕`（**全新广告**），而代码逐字：
-                // ```
-                // §adbox G3 胶囊倒计时 N ⇒ 最多等 25s
-                // §adbox G3 等倒计时结束（已等 27s / 25s；⛔ 没结束不点 ✕）   ← 超预算还在循环
-                // §adbox G3 等满预算 25s（⛔ 没等到「已成功领取」）⇒ 按 PC 兜底进 G4
-                // §adbox ⛔⛔ 等满预算**倒计时仍未走完** ⇒ **本条不点 ✕**；交给下一轮重判
-                // §adbox ⛔ 被中断 / 跑完 0 条                                    ← **0 条**
-                // ```
-                // ⇒ 每条广告都在这里被挡住 ⇒ 永远不点 ✕ ⇒ **一条都收不到**。
-                //
-                // ## 📏 根因（复算，不是推测）
-                // `adCountdownRunning` 的兜底正则 `[0-9]+(?:秒|[sS])` 会命中
-                // **说明文字**里的 `5秒`（「点击后看**5秒**」），而那句文案**整条广告期间不变**
-                // ⇒ 该函数**恒为 true**（实测：等 3s→6s→…→27s 全程 true）。
-                // 真倒计时长这样（才该命中主力判据 `\d+[sS秒]?后`）：
-                // ```
-                //   '6s后可领取399金币'       ⇒ 命中 '6s后' ✅
-                //   '19后 可领取'             ⇒ 命中 '19后'  ✅
-                //   '点击后看5秒可领165金币×' ⇒ 主力不命中，裸兜底误命中 '5秒' ⛔
-                // ```
-                //
-                // ## ✅ PC 的权威写法（`_1377_ad_loop.py:9860-9861`，逐字）
-                // ```python
-                // if "已成功领取" not in top3:
-                //     print("   .. %ds 内没等到「已成功领取」（胶囊: %r），**仍按结束处理**"
-                //           % (_rounds * 3, top3))
-                // ```
-                // ⇒ 📏 **语义：等满预算 = 已经给了足够时间 ⇒ 按结束处理，继续去点 ✕。**
-                //   ⛔ PC **没有**「等满还没走完就不点」这条 —— 我原来那句
-                //   「照 PC「不硬撑」」是**我自己编的话**，PC 原文里根本不存在。
-                //
-                // ## ⚠️ 为什么这样仍安全（用户令「倒计时没走完就点 ✕ 会把广告点死」）
-                // 因为 **G3 已经把预算等满了**（`N+20s`，最少 25s）：
-                // ```
-                //   真倒计时 6s   ⇒ 等满 26s 后早就结束了 ✅ 点 ✕ 安全
-                //   真倒计时 60s  ⇒ 读到的 N=60 ⇒ 等满 80s ✅ 安全
-                //   说明文字5秒   ⇒ 等满 25s，广告其实 5s 就播完 ✅ 点 ✕ 安全
-                // ```
-                // ⇒ **顺序决定安全**：先"严格地等满"，再"按结束处理去点"。
-                //   原来是"等满后仍被判在走 ⇒ 不点" ⇒ 死在原地。
-                //
-                // ⚠️ 保留给排障用的观测：只打日志，⛔ 不再 `continue` 挡路。
-                if Self.adCountdownRunning(cur, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex) {
-                    log("   §adbox G3 等满预算后仍读到倒计时字样（多半是「看N秒」这类**说明文字**）"
-                        + " ⇒ 照 PC `:9860` **仍按结束处理**，继续进 G4 点 ✕（⛔ 不在这里挡住）")
-                }
-                log("§adbox G3 倒计时已结束（等了 \(Int(waited))s）⇒ **现在才点 ✕ 收奖励**")
-
-                // ── ③ G4：**倒计时结束后才点 ✕** + 处理面板（PC `_ad_finish`）──
-                //    ⭐ 面板/胶囊 ✕ 都归这里处理；⛔ 上一版我在**倒计时中**就调它 ⇒ 点死广告。
-                for _ in 0..<6 {
-                    if isCancelled() { break }
-                    guard let im4 = grab() else { break }
-                    if !finishAdPanel(im4, tag: "adbox_ad\(n + 1)") { break }
-                    sleep(1.5)
-                }
-
-                // ⭐⭐⭐⭐⭐ §2824 **必须确认"真的离开这条广告"才算收完**（⛔ 不再假报成功）
-                //
-                // ## ⛔ 血案（真机日志 18:18:57 逐字）
-                // ```
-                // §adbox_back6 ⛔ 这是视频广告页 ⇒ 放行     ← 人**还在广告页**
-                // §adbox 跑完 6 条                          ← 却报"跑完 6 条"
-                // §run ✅ 功能闭环结束：完成 1/1             ← 还报**成功**
-                // ```
-                // 旧版这里的 `n += 1` 是**无条件**的 ⇒ 「点不掉 ✕ ⇒ 还在广告页」也被算成
-                // 收了一条奖励 ⇒ 计数虚高、任务假成功、且主循环立刻又回同一分支。
-                //
-                // ✅ 判据（**必须建立 PC 的"两个归宿"语义**）：
-                //   ① **弹出了奖励面板**（「再看一个/领取奖励」）⇒ 奖励被领走
-                //   ② 已经**不在广告页**了（✕ 生效 / 自己跳回中心）
-                //
-                // ⛔⛔⛔ §2974 **删掉原来的判据①「顶栏『已成功领取』就算完成」—— 那是无限转化的根因**
-                //
-                // ## 真机血案（`run_after_fix.log` 逐字，用户：「**无限转化你看不到？**」）
-                // ```
-                // 20:04:15.988  §adbox G3 胶囊倒计时 N ⇒ 最多等 45s
-                // 20:04:16.082  §adbox ✅ G3 正面看到「已成功领取」（等了 0s）⇒ 倒计时确实走完
-                // 20:04:16.125  §adbox G3 倒计时已结束 ⇒ **现在才点 ✕ 收奖励**
-                // 20:04:16.281  §adbox ✅ 顶栏「已成功领取」⇒ **奖励已到账**，本条完成   ← 🔴 误判
-                // 20:04:17.031  §adbox_back3 ⛔ 这是视频广告页 ⇒ 放行                   ← 人还在广告页
-                // 20:04:17.083  §adbox 本条广告停留目标=40s（**重新计时**）
-                // 20:04:17.184  §adbox_cta4 文案兜底：CTA「牙齿问题…」                    ← 又转一次
-                // ```
-                // ⇒ **cta3 → cta10 连续 8 次转同一条广告**（`牙齿问题不要置之不理 @(222,774)` 一字不差）。
-                //
-                // ## 根因：判据①与 G3 的等待条件**是同一个条件**（自证循环）
-                // ```
-                // G3（L659）: while !adRewardClaimed(cur), waited < needS { … }   ← 就在等"已成功领取"
-                // G4（L728）: if adRewardClaimed(im5) { 「奖励已到账」}             ← 拿同一条件当"收完了"
-                // ```
-                // ⇒ G3 一旦等到「已成功领取」就退出循环 ⇒ G4 的**第一帧必然满足判据①** ⇒
-                //   **✕ 一次都没点**（L701-706 的 `finishAdPanel` 被这个 break 跳过）⇒
-                //   既没点 ✕ 、也没出面板，却 `leftAd = true` ⇒ `n += 1`，
-                //   而人**还在同一条广告上** ⇒ `ensureInCenter` 撞"广告页放行短路"直接返回
-                //   ⇒ 主循环重进同一条 ⇒ 计时重开（L754）、转化闸清掉（L753）⇒ **再转一次**。
-                //
-                // ## 📏 PC 控制器怎么判（`_1377_ad_loop.py:9863-9979` 逐字）
-                // ```
-                // # ★★ 但胶囊 ✕ 有**两种归宿**（§1377 r4J 实测，必须都认）：
-                // #    ① 弹出「再看一个视频+3000 / 领取奖励」面板 ⇒ 点主按钮进下一条；
-                // #    ② **不弹面板，直接把整条广告链关掉、落回金币中心** ⇒ 本条同样**已经成功**
-                // for k in range(16):
-                //     ...
-                //     if at_center: done_ads += 1; click_reenter(imgp); continue     # 归宿②
-                //     if not any(kk in mid for kk in PANEL_KEYS):
-                //         reason = "奖励面板没出现 ⇒ 已停手"                          # ⛔ 两条都不成立 ⇒ 不算完成
-                // ```
-                // ⇒ ⭐ **"已成功领取"从来不是完成判据** —— PC 认的是「**面板**」或「**回中心**」。
-                //
-                // ⛔⛔⛔ §2977 **远端 §2974 这版还留着一个误判（真机事实，不是我觉得）**
-                // 判据① 写成 `if finishAdPanel(im5, …) { leftAd = true }` ——
-                // 而 `finishAdPanel` 的**返回值契约**是「**已点掉一层**（调用方应重抓帧再判）」
-                // （见它自己的文档 L1243），三条腿里任何一条命中都返回 true：
-                // ```
-                //   ① stay_panel_btn（挽留面板「继续观看」）  ← 点完人**还在广告页**
-                //   ② panel_close_x（面板右上小 ✕）           ← 可能是别的弹层
-                //   ③ pill_x（顶栏胶囊 ✕）                    ← 点完也可能还在广告页
-                // ```
-                // ⇒ 拿它当"本条完成"⇒ **点一次胶囊 ✕ 就 +1**，而人可能还在同一条广告上
-                //   ⇒ 与 §2974 修掉的那个"自证循环"是**同一个病**，只是换了个假阳性来源。
-                //
-                // ✅ 正解（照 PC `at_center`，`_1377_ad_loop.py:9777-9804`）：
-                //   **完成 = 页面真的变了**，只认两个归宿：
-                //     ① **真落回金币中心**（`center_marker` 元素命中，⛔ 不用广告页放行短路）
-                //     ② 页型判据确认**已不在广告页**
-                //   `finishAdPanel` 仍然要调（它负责点 ✕ / 补全），但**只当"推进动作"**，
-                //   它的返回值**不再单独置 leftAd** —— 下一轮回环由 ①/② 判。
-                var leftAd = false
-                for i5 in 0..<6 {
-                    if isCancelled() { break }
-                    guard let im5 = grab() else { break }
-                    // ① PC 归宿②（最硬）：真落回金币中心 ⇒ 本条完成
-                    if nav.detect("center_marker", img: im5) != nil {
-                        log("   §adbox ✅ 已真落回金币中心 ⇒ 本条完成（第 \(i5 + 1) 次检查）")
-                        leftAd = true
-                        break
-                    }
-                    // ② PC 归宿②（等价）：页型确认已不在广告页 ⇒ 本条完成
-                    if !Self.looksLikeAdPage(im5, rec: rec, nav: nav, bw: baseW, bh: baseH,
-                                             roi: s?.ad_top_roi) {
-                        log("   §adbox ✅ 已离开广告页（页型判据）⇒ 本条完成")
-                        leftAd = true
-                        break
-                    }
-                    // ③ 还在广告页：**推进**（点面板主按钮 / 面板✕ / 胶囊✕），⛔ 不算完成
-                    if finishAdPanel(im5, tag: "adbox_claim\(n + 1)") {
-                        log("   §adbox ⏭ 已点掉一层（⛔ 还在广告页，不算完成）⇒ 重抓帧再判")
-                    }
-                    sleep(1.5)
-                }
-                if !leftAd {
-                    log("   §adbox ⛔ 点了也离不开广告页 ⇒ **本条不计入完成**"
-                        + "（⛔ 不假报成功；若持续如此，循环头的无进展闸会停手）")
-                    // 清掉"每条一次"标志 ⇒ 允许下一轮重新尝试收尾（但仍受无进展闸约束）
-                    dwelledThisAd = false
-                    continue
-                }
-
-                n += 1
-                scrollTries = 0          // ⭐ §2309 每成功拿下一条，重置翻页预算
-                convertedThisAd = false  // ⭐ §2824 离开这条广告 ⇒ 清"每条一次"状态
-                dwelledThisAd = false
-                _ = ensureInCenter(tag: "adbox_back\(n)")
-                continue
+            // ── ③d G3 等倒计时（PC L9811-9852）──
+            let srcTop = (top).replacingOccurrences(of: " ", with: "")
+            let secsOpt = Self.adCountdownSeconds(img, rec: rec, bw: baseW, bh: baseH,
+                                                  roi: s?.ad_top_roi,
+                                                  secondsPatterns: s?.countdown_seconds_regex,
+                                                  fallbackPatterns: s?.countdown_running_regex)
+            let need = (secsOpt.map { $0 + 20 }) ?? 45
+            var rounds = max(12, Int(Double(need) / 3.0) + 1)
+            // §1536 直播间：跳过倒计时等待（用户令「别死定」）
+            if isLive {
+                log("   .. ★这是**直播间** ⇒ 按用户令「不操作、别死等」：**跳过倒计时等待**，直接点 X 关闭")
+                rounds = 0
             }
-
-            // ② ⭐⭐⭐ **按任务行定位**并点它（照 PC `find_ad_row_button`，L2146）
-            //
-            // ## ⛔⛔ 为什么不能用 `nav.detect("ad_task_btn")`（真机血案 §2263）
-            // 原来那版拿**词表**在全屏找「看广告/去观看/去领取/立即领取」——
-            // 而金币中心里**并存多条**含"广告/领取"的任务行，它们是**不同的任务**：
-            //   · `看广告得金币`（最高4500000）    ← ✅ **本链条要进的就是它**
-            //   · `刷广告视频赚金币`                ← ⛔ **另一个任务**
-            //   · `立即签到`（连续签到那条）        ← ⛔ 另一个任务
-            // ⇒ 真机实测就点错了：`§click ad_task_btn @(258,469) score=1.000
-            //    ev=点击领取今天奖励/待领50金币|立即领取/去观看`
-            //    —— 它命中的是**签到行/待领行**，不是「看广告得金币」行。
-            //
-            // ## PC 的做法（`_1377_ad_loop.py` L2120~L2174，逐条照抄）
-            // ```python
-            // AD_ROW_TASK_RX = re.compile(r"看\s*广\s*告\s*得\s*金\s*币")   # 唯一目标行
-            // AD_ROW_Y_WIN  = 26      # 行内 y 容差：同一张卡片的标题与按钮落在此窗口
-            // AD_ROW_X_MIN  = 330     # 右列按钮 x 下界
-            // rows = _ocr_rows(words(img, (0, 250, 451, 977)))   # 按 y 聚成"行"
-            // y_row = _task_row_y(rows)                          # 找「看广告得金币」那道行
-            // if y_row is None: → **放弃本腿**（⛔ 不得改点同屏别的广告任务行）
-            // cands = [同 y_row±26 内、x ≥ 330 的词] → 取**最右**那个当按钮
-            // if 按钮文案 in AD_ROW_DEAD_KEYS: → 放弃（那行是"冷却中/已领取"，按了没用）
-            // ```
-            // ⛔ 铁律②：`看广告得金币` 是**唯一**目标；它不可用就**放弃本腿**，
-            //    ⛔ **绝不"跳到下一行"**（用户 2026-10-06 明确纠正过：
-            //    「你搞到刷广告得金币干什么 说了 是错的」）。
-            // ⭐⭐⭐⭐⭐ §2315 **宝箱入口与“看广告得金币”逐条轮换（用户令）**
-            //
-            // ## 用户原话（逐字，本段就是规格）
-            // > 「**说了要宝箱和他轮换呢**」
-            //
-            // ## ⛔ 本轮审计发现：iOS 读了 `settings.entry` 但**从来没用过**
-            // `FeatureEngine` 打印了 `入口=\(s?.entry ?? "auto")`，然后就**直接走按行腿**
-            // ⇒ `entry` 设置（auto/fuli/chest）形同虚设，宝箱轮换**根本没实现**。
-            // 📏 PC 的 `AISJ_ENTRY=auto` 是「宝箱 ↔ 看广告得金币 逐条轮换」（不是分两轮跑）。
-            //
-            // 出路共用：点宝箱浮件 ⇒ 出面板 ⇒ 点 CTA「去看广告」⇒ 进广告链。
-            // ⛔ 铁律②：任一步没定位到锚 ⇒ **什么都不做**，落回按行腿。
-            let entryMode = (s?.entry ?? "auto")
-            let wantChest: Bool = {
-                if entryMode == "chest" { return true }
-                if entryMode == "fuli" { return false }
-                // auto ⇒ 逐条轮换（照 PC `_ENTRY_TOGGLE[0] % 2 == 0`）
-                adEntryToggle += 1
-                return adEntryToggle % 2 == 0
-            }()
-            if wantChest, let c = nav.detect("chest_float", img: img)?.center {
-                log("§adbox 【入口=auto 轮换】本条走**宝箱**入口 ⇒ 浮件 @(\(Int(c.x)),\(Int(c.y)))")
-                nav.tapPoint(Double(c.x), Double(c.y), why: "宝箱浮件（chest_float）")
-                // 等一张新帧（面板出来了才能找 CTA）
-                if let ip = grabFresh(since: img, maxWait: maxFrameAgeCfg + 3.0),
-                   let cta = nav.detect("chest_cta", img: ip)?.center {
-                    log("§adbox 宝箱面板 CTA @(\(Int(cta.x)),\(Int(cta.y))) ⇒ 进广告链")
-                    nav.tapPoint(Double(cta.x), Double(cta.y), why: "宝箱面板 CTA（chest_cta）")
-                    // 进了广告链 ⇒ 交给下一轮循环的“广告页”分支处理
-                    if let i3 = grabFresh(since: ip, maxWait: maxFrameAgeCfg + 3.0),
-                       Self.looksLikeAdPage(i3, rec: rec, nav: nav, bw: baseW, bh: baseH,
-                                            roi: s?.ad_top_roi) {
-                        // ⭐⭐⭐⭐⭐ §2824 **不再在这里自己收尾 + 计数**（用户令：无限转化/卡死）
-                        // 这里是第四份"广告页处理"：自己 `finishAdPanel` + 自己 `n += 1`，
-                        // 既不转化、也不等停留、也不确认到账 ⇒ 与循环头重复。
-                        // ✅ 现在直接回到循环头，由那**唯一一份**实现做
-                        //    单次转化 → 30~45 随机停留 → 等倒计时 → 点 ✕ → 确认到账。
-                        log("§adbox ✅ 宝箱入口已进广告页 ⇒ 交给循环头统一处理（§2824）")
-                        scrollTries = 0
-                        emptyRounds = 0
-                        continue
-                    }
-                    log("§adbox 点了宝箱 CTA 但没进广告页 ⇒ 落回按行腿")
-                } else {
-                    log("§adbox 宝箱面板上没找到 CTA ⇒ 不放枪，落回按行腿")
+            log("   G3 胶囊读到的倒计时锚 \(secsOpt.map { "\($0)s" } ?? "(没读到,按默认)") ⇒ 最多等 \(rounds) 轮(\(rounds * 3)s)")
+            var top3 = ""
+            for k in 0..<rounds {
+                guard let im3 = grab() else { break }
+                top3 = Self.adTopText(im3, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi)
+                if top3.contains("已成功领取") {
+                    log("   G3 倒计时已结束（第 \(k + 1) 次检查）: `\(top3.prefix(30))`")
+                    break
                 }
+                log("   G3 等倒计时结束（第\(k + 1)次）: `\(top3.prefix(30))`")
+                sleep(3.0)
             }
+            if !top3.contains("已成功领取") {
+                log("   .. \(rounds * 3)s 内没等到「已成功领取」（胶囊: `\(top3.prefix(30))`），仍按结束处理")
+            }
+            _ = srcTop
 
-            if let btn = findAdRowButton(img) {
-                log("§adbox 按行定位到「看广告得金币」行 ⇒ 按钮 \(btn.evidence) @(\(Int(btn.point.x)),\(Int(btn.point.y)))")
-                nav.tapPoint(Double(btn.point.x), Double(btn.point.y), why: "按行定位的「看广告得金币」按钮")
-                // ⭐⭐ §2265 **等一张"新的"帧再判**（⛔ 不是固定睡 2s 就抓）
-                //
-                // ## 为什么（与写盘节拍**成对**的一条）
-                // 为活过 iOS 写入预算，扩展写盘节拍 = **1帧/4s**（§2265）。
-                // 而原来这里是 `sleep(2.0)` + `grab()` ⇒ 4 秒窗口内拿到的
-                // **还是点击前那张帧** ⇒ `pageHere(i2) == "ad_video"` 恒 false
-                // ⇒ 日志刷「点了任务但没进广告页 ⇒ 重试」⇒ **明明进去了也说没进去**。
-                // 📏 真机 trace 里那几行正是这个（`§adbox ⚠️ 点了任务但没进广告页 ⇒ 重试`）。
-                //
-                // ✅ 用 `grabFresh(since: img)` 等一张**与点击前不同**的帧；
-                //    画面真没变 ⇒ 等满预算才判失败（结论仍对）。
-                let i2 = grabFresh(since: img, maxWait: maxFrameAgeCfg + 3.0)
-                // ⛔⛔ 判据必须用 `looksLikeAdPage`（**独立判据**），⛔ 不是 `pageHere == "ad_video"`：
-                //    后者走 `elements` 表 ⇒ 真机胶囊 `已成功领取438金币 ×`/`1s后可领取560金币 ×`
-                //    **读不出** ⇒ 恒 false ⇒ 日志刷「点了任务但没进广告页 ⇒ 重试」
-                //    而**人其实已经进去了**（真机 trace 那几行正是这个假阴性）。
-                if let i2 = i2,
-                   Self.looksLikeAdPage(i2, rec: rec, nav: nav, bw: baseW, bh: baseH,
-                                        roi: s?.ad_top_roi) {
-                    // ⭐⭐⭐⭐⭐ §2824 **这里不再重复实现广告页处理**（用户令：无限转化/卡死）
-                    //
-                    // ## ⛔ 血案
-                    // 本处原来**整段复制**了循环头那条「广告页」分支
-                    // （转化 → 回广告页 → G3 等倒计时 → G4 点 ✕），两份实现各自 `n += 1`：
-                    //   · 同一逻辑两个版本 ⇒ **改一处漏一处**（这次的"单次转化/停留"就容易只改一份）
-                    //   · 两条路都能把 `n` 加上去 ⇒ **计数虚高 + 任务假成功**
-                    //     （真机日志逐字：`§adbox 跑完 6 条` / `§run ✅ 完成 1/1`，
-                    //      而同一条广告被转化了 6 次、奖励一次没收）
-                    //
-                    // ## ✅ 现在只有**一份**实现
-                    // 循环头那条分支含：**单次转化** + **30~45 随机停留** + **到账闸** +
-                    // **"真收完才计数"**。点进广告页后直接 `continue` ⇒ 下一轮由它接手。
-                    log("§adbox ✅ 已进广告页 ⇒ 交给循环头的「广告页」分支统一处理"
-                        + "（§2824：去掉重复实现，避免无限转化）")
-                    continue
+            // ── ③e G4 收奖励（PC L9890-10000）──
+            var g4Center = false
+            for k in 0..<16 {
+                guard let imgp = grab() else { break }
+                let mid = Self.adTopText(imgp, rec: rec, bw: baseW, bh: baseH, roi: nil)
+                if nav.detect("center_marker", img: imgp) != nil {
+                    log("   .. ★G4 第 \(k + 1) 轮：已落回金币中心 ⇒ 本条成功")
+                    g4Center = true
+                    break
                 }
-                log("§adbox ⚠️ 点了任务但没进广告页 ⇒ 重试")
+                switch finishAdPanelResult(imgp, tag: "adbox_panel\(n)_\(k)") {
+                case .panelCleared:
+                    log("   .. ★G4 第 \(k + 1) 轮：点掉奖励面板 ⇒ 本条收完")
+                    g4Center = true
+                    break
+                case .capsuleOnly:
+                    log("   .. G4 第 \(k + 1) 轮：点了胶囊 ✕（收奖励第一步）⇒ 继续")
+                case .none:
+                    log("   .. G4 第 \(k + 1) 轮：面板与 ✕ 都不在 `\(mid.prefix(20))`")
+                }
+                if g4Center { break }
                 sleep(1.5)
+            }
+            if g4Center {
+                doneAds += 1
+                log("   == 第 \(doneAds) 条完成")
+                clickReenter(tag: "adbox_re\(doneAds)")
+                sleep(5.0)
                 continue
             }
-
-            // ③ ⛔⛔⛔ **先在广告页上放行**（照 PC `is_ad_page`）—— ⛔ 绝不能落到漏斗去点 ✕
-            //
-            // ## ⛔⛔ 血案（用户令）：「**时间都没到就提前点击了X**」
-            // 真机 `_var/_ad2_n.png` 铁证：胶囊写着 **`1s后可领取560金币`**（只剩 1 秒），
-            // 而脚本**把它关了** —— 因为这里原来**直接掉进漏斗**，
-            // 而漏斗里有 `pill_x`（顶栏胶囊 ✕）⇒ **把正在看的广告点掉了**。
-            //
-            // ## 为什么页型判据救不了（必须用**独立判据**拦）
-            // `nav.pageHere(img) == "ad_video"` 走 `elements` 表（`ad_capsule`），
-            // 而真机胶囊 `1s后可领取560金币 ×` **读不出** ⇒ 页型 `unknown`
-            // ⇒ 上面第 ① 条的放行**没命中** ⇒ 掉进漏斗 ⇒ 点 ✕。
-            //
-            // ## ✅ 照 PC 的两道防线
-            // ```
-            //   ① 主循环里 `is_ad_page(img)` ⇒ **放行**（`_1377_ad_loop.py` L9189）
-            //   ② 导航里 `is_ad_page(img)` ⇒ **return False 不碰**（L2698）
-            // ```
-            // PC 判据（L3609）是**顶栏原文子串**：`("可领取" in t) or ("已成功领取" in t)`
-            // ⇒ ⛔ 不经过元素表 ⇒ 不受 OCR 词表/阈值影响。
-            if Self.looksLikeAdPage(img, rec: rec, nav: nav, bw: baseW, bh: baseH,
-                                       roi: s?.ad_top_roi) {
-                // ⛔⛔⛔ §2277 **绝不能只"傻等"**（我 v0.10.35 的错：用户令「**能等个屁**」）
-                //
-                // 真机 `_var/_stuck1.png`：屏幕上明摆着奖励面板
-                // **`6s后可领取399金币 / 再看6秒可得399金币 / [继续观看]`**，
-                // 而**倒计时不会自己走**（面板要用户点「继续观看」才补全）
-                // ⇒ "等 30 秒"等的是**永远不会自己结束**的面板 ⇒ 卡死。
-                //
-                // ✅ 正解 = 照 PC `_ad_finish` **主动推进状态**：
-                //    先点面板按钮（补全）→ 面板没了才点胶囊 ✕
-                if finishAdPanel(img, tag: "adbox_ad\(n + 1)") {
-                    sleep(1.5)
-                    continue        // ⭐ 处理了一层 ⇒ 重抓帧再判（⛔ 不在这儿 sleep 30s）
-                }
-                // 面板与 ✕ 都没有 ⇒ 这才是"纯广告播放中" ⇒ **等时间**（⛔ 不点 ✕）
-                //
-                // ⭐⭐⭐⭐⭐ §2824 **这里的等待也要算进"本条停留"**（用户令：30-45 随机）
-                // 旧版用的是独立变量 `dwell` ⇒ 与上面那套"每条一次"的计时**两本账**；
-                // 现在统一：若本条还没起过计时 ⇒ 起一次；只等**还差的那部分**。
-                if !dwelledThisAd {
-                    adDwellTarget = adDwellSeconds
-                    adEnteredAt = Date()
-                    dwelledThisAd = true
-                    log("   §adbox 本条广告停留目标=\(Int(adDwellTarget))s"
-                        + "（区间 \(Int(adStayMin))~\(Int(adStayMax)) 随机；用户令）")
-                }
-                let leftToDwell = adDwellTarget - Date().timeIntervalSince(adEnteredAt)
-                log("§adbox ⛔ 广告播放中（无面板/无关闭键）⇒ 等够 \(Int(max(0, leftToDwell)))s（⛔ 不点 ✕）")
-                var left = max(0, leftToDwell)
-                while left > 0 {
-                    if isCancelled() { break }
-                    let d = min(2.0, left)
-                    Thread.sleep(forTimeInterval: d)
-                    left -= d
-                    // ⭐⭐⭐⭐⭐ §2832 **只补全、不关闭**（照 PC `wait()` = 纯 sleep）
-                    //
-                    // ⛔ 血案同「广告页」分支：这里原来调 `finishAdPanel()`（**会点胶囊 ✕**）
-                    //    ⇒ 等待期间把广告关掉。PC 的 `wait()`（L4395）就是纯 `time.sleep`，
-                    //    等待期间**唯一**允许的动作是点「继续观看」补全（PC L4333 ⇒ 点了就 return）。
-                    if let im2 = grab(), completeAdPanelOnly(im2, tag: "adbox_adw\(n + 1)") {
-                        log("   §adbox 等待中面板需要补全 ⇒ 已点「继续观看」（⛔ 未关广告）")
-                    }
-                }
-                // ⭐⭐⭐⭐⭐ §2824/§2974 **确认到账才计数**（⛔ 不再无条件 `n += 1`）
-                // 判据与「广告页」分支**同一套**（照 PC 的两个归宿）：
-                //   ① **真落回金币中心**（`center_marker`）  ② 页型确认**已不在广告页**
-                // ⛔⛔ §2974：**删掉原来的「顶栏『已成功领取』就算完成」** —— 那是无限转化的根因
-                //   （与 G3 的等待条件自证循环 ⇒ ✕ 一次没点就宣布完成 ⇒ 卡在同一条反复转化）。
-                //   完整血案与 PC 对照见「广告页」分支里的 §2974 注释块。
-                // ⛔⛔ §2977：**`finishAdPanel` 的返回值不是完成判据**（它只表示"点掉一层"，
-                //   见其文档 L1243；点胶囊✕后人也可能还在广告页）⇒ 只当推进动作，完成仍由 ①/② 判。
-                var leftAd2 = false
-                for i6 in 0..<6 {
-                    if isCancelled() { break }
-                    guard let im6 = grab() else { break }
-                    if nav.detect("center_marker", img: im6) != nil {
-                        log("   §adbox ✅ 已真落回金币中心 ⇒ 本条完成（第 \(i6 + 1) 次检查）")
-                        leftAd2 = true
-                        break
-                    }
-                    if !Self.looksLikeAdPage(im6, rec: rec, nav: nav, bw: baseW, bh: baseH,
-                                             roi: s?.ad_top_roi) {
-                        log("   §adbox ✅ 已离开广告页（页型判据）⇒ 本条完成")
-                        leftAd2 = true
-                        break
-                    }
-                    if finishAdPanel(im6, tag: "adbox_claimw\(n + 1)") {
-                        log("   §adbox ⏭ 已点掉一层（⛔ 还在广告页，不算完成）⇒ 重抓帧再判")
-                    }
-                    sleep(1.5)
-                }
-                if !leftAd2 {
-                    log("   §adbox ⛔ 这条广告还没收到奖励 ⇒ **本条不计入完成**（⛔ 不假报成功）")
-                    dwelledThisAd = false
-                    continue
-                }
-                n += 1
-                convertedThisAd = false
-                dwelledThisAd = false
-                _ = ensureInCenter(tag: "adbox_back\(n)")
-                continue
-            }
-
-            // ④ 认不出 ⇒ 交给漏斗（弹窗优先），不自杀
-            if nav.runFunnel(img) {
-                log("§adbox 漏斗处理了一层")
-                sleep(1.0)
-                continue
-            }
-            // ⭐⭐⭐⭐⭐ §2309 **任务列表要能"往下翻"（⛔ 上一版直接放弃了）**
-            //
-            // ## 真机血案（03:0x 真机 trace + 同帧 `/ocr`）
-            // 手机明明在**金币中心**（`center_marker` 命中、`adbox_boot` 第 1 步就到），
-            // 而 `findAdRowButton` 报「本屏没有「看广告得金币」这道任务行」
-            // ⇒ 连续 3 轮 ⇒ 收手 ⇒ **整个 adbox 跑了 2 条就结束**。
-            // 同帧 `/ocr` 铁证：任务列表里只有 分享作品/送朋友/看短剧/金币大挑战…
-            // ⇒ **目标行还在屏幕下方（没滚出来）**，而我们**没有一条腿会去滚**。
-            //
-            // ✅ 正解：在放弃之前，**先下滑让任务列表往上走**（方向真机实测过，见 `swipeDownList` 注释），再找一次。
-            //    ⛔ 但仍守铁律②：只认「看广告得金币」那一行，换行一律不点。
-            //    滚动也不是盲动：它是"把已知列表继续翻页"，不是"点某个固定坐标"。
-            // ⭐⭐⭐⭐⭐ §2911 **目标行"在屏上、但按钮是冷却态" ⇒ 等冷却**（⛔ 不滚动列表）
-            //
-            // ## ⛔ 真机现场（0.19，2026-10-16 00:31，用户报「卡死在任务中心 不看广告」）
-            // ```
-            // §adbox 按行定位到「看广告得金币」行 ⇒ 按钮 领福利 @(393,339)
-            // §tapPoint ★点坐标（按行定位的「看广告得金币」按钮）…
-            // §adbox ⚠️ 点了任务但没进广告页 ⇒ 重试
-            // §adbox_row ⏭ 「看广告得金币」行按钮是「冷却中」（**非动作态**）⇒ 本腿放弃
-            // §adbox ⬇ 本屏没有目标行 ⇒ 下滑任务列表再找（第 1/6 次）   ← ⛔ 滚了 4 次，全废
-            // §adbox ⛔ 被中断
-            // ```
-            // ⇒ 用户看到的就是「**卡死在任务中心、不往下看广告**」。
-            //
-            // ## ⛔ 根因：`findAdRowButton` 返回 nil 时**两种完全不同的情形被混为一谈**
-            // ```
-            //   ① 目标行**在屏幕下方**（没滚出来）    ⇒ 下滑列表**有用**   ✅ 现有滚动腿对
-            //   ② 目标行**就在屏上**，但按钮是冷却态  ⇒ 下滑列表**毫无用处** ⛔ 现有滚动腿错
-            // ```
-            // 📏 ② 的证据（PC `_1377_ad_loop.py:2112-2113` 逐字）：
-            // > 同屏并存两条广告行时，`看广告得金币` 那行右列是 **`冷却中`**（禁用；下方还有
-            // > `00:43 倒计时结束继续领金币`）⇒ **点它 3 轮毫无反应**
-            // ⇒ 冷却态的正确出路是 **等**（那行自己写着"倒计时结束继续领"），⛔ 不是滚动、⛔ 不是放弃。
-            //
-            // ✅ 现在：先判"行在屏上但按钮冷却"⇒ **按冷却剩余秒数等**，等完 `continue` 重判；
-            //    ⛔ 不滚动列表（省掉 6 次无效下滑），⛔ 也不立刻放弃。
-            // ⚠️ 有界：最多等 `cooldownWaits` 次（⛔ 免得"今日已领完"那种永久冷却把整轮耗死）。
-            if cooldownWaits < 6, let cd = adRowCooldown(img) {
-                cooldownWaits += 1
-                scrollTries = 0                       // ⭐ 行在屏上 ⇒ 滚动预算归零（下次仍先判冷却）
-                let secs = cd.seconds
-                let wait = min(max(secs ?? 15.0, 5.0) + 3.0, 90.0)
-                log("§adbox ⏳ 「看广告得金币」行按钮是「\(cd.button)」（冷却态）⇒ 等 \(Int(wait))s"
-                    + "（第 \(cooldownWaits)/6 次）"
-                    + (secs != nil ? "［行上写着约 \(Int(secs!))s］" : "")
-                    + " ⇒ ⛔ **不滚动列表**（行就在屏上，滚动没用）")
-                sleep(wait)
-                continue
-            }
-
-            var found = false
-            // ⭐ 预算 6 次：真机实测目标行在列表靠上位置，需 3~4 次下滑才露出来
-            if scrollTries < 6 {
-                scrollTries += 1
-                log("§adbox ⬇ 本屏没有目标行 ⇒ 下滑任务列表再找（第 \(scrollTries)/6 次）")
-                swipeDownList(baseW: baseW, baseH: baseH)
-                if let img2 = grabFresh(since: img, maxWait: maxFrameAgeCfg + 3.0) {
-                    if let btn2 = findAdRowButton(img2) {
-                        log("§adbox ⬇ 翻到了目标行 ⇒ 按钮 \(btn2.evidence) @(\(Int(btn2.point.x)),\(Int(btn2.point.y)))")
-                        nav.tapPoint(Double(btn2.point.x), Double(btn2.point.y), why: "翻页后按行定位的按钮")
-                        // ⭐⭐⭐⭐⭐ §2824 **不再在这里自己收尾 + 计数**（用户令：无限转化/卡死）
-                        //
-                        // ## ⛔ 血案
-                        // 这里原来是第三份"广告页处理"：自己 `finishAdPanel` + 自己 `n += 1`。
-                        // 而它**既不转化、也不等停留、也不确认到账** ⇒
-                        //   · 同一条广告可能被"收尾"多次（计数虚高）
-                        //   · 与循环头那份实现重复 ⇒ 改一处漏一处
-                        // ⇒ **单次转化 + 30~45 停留 + 到账确认**只有循环头那一份说了算。
-                        //
-                        // ✅ 现在只做"点进去了没有"的判断：是广告页 ⇒ `continue`
-                        //    交给循环头统一处理（那一轮会做转化/停留/等倒计时/点 ✕/确认到账）。
-                        if let i3 = grabFresh(since: img2, maxWait: maxFrameAgeCfg + 3.0),
-                           Self.looksLikeAdPage(i3, rec: rec, nav: nav, bw: baseW, bh: baseH,
-                                                roi: s?.ad_top_roi) {
-                            log("§adbox ⬇ 翻页后已进广告页 ⇒ 交给循环头统一处理（§2824）")
-                        }
-                        found = true
-                    }
-                }
-                // 找到了 ⇒ 回到循环头（拍完广告后 n 已加）；
-                // 没找到 ⇒ 也回到循环头继续翻（⛔ 不累计 emptyRounds，否则三次翻页就会被当成“找不到”而收手）
-                _ = found
-                continue
-            }
-            log("§adbox ⚠️ 找不到广告任务按钮（第 \(n + 1)/\(count) 条）⇒ 回中心再找")
-            if !ensureInCenter(tag: "adbox_re\(n)") {
-                log("§adbox ⛔ 也回不了中心 ⇒ 停手")
-                break
-            }
-            // ⭐ 防死循环：连续 3 轮都找不到 ⇒ 收（照 PC `stuck` 语义）
-            emptyRounds += 1
-            if emptyRounds >= 3 {
-                log("§adbox ⛔ 连续 \(emptyRounds) 轮找不到广告任务 ⇒ 收手")
-                break
-            }
-            // ⛔⛔⛔ §2824 **这里绝不能 `n += 1`**（用户令：「还有转化现在无限转化。卡死」）
-            //
-            // ## 血案
-            // 这一支的语义是「**本屏没找到广告任务行**」—— 一条广告都没看、一分奖励没收，
-            // 而旧代码却 `n += 1` ⇒ 把"没找到"当成"收了一条"：
-            //   · `while n < count` 很快就被"空找"填满 ⇒ **假装跑完 6 条**、`return n > 0` 报成功
-            //   · 真机日志逐字：`§adbox 跑完 6 条` / `§feat ═══ 本轮结束：完成 1/1 ═══`，
-            //     而实际上全程**只有一条广告被反复转化、奖励一次没收**。
-            // ⇒ 现在"没找到"**只记 `emptyRounds`**（连续 3 轮就收手，见上），⛔ 不动 `n`。
-            //    `n` 只由「**确认到账**」那一处 +1（见本函数里唯一那处 `n += 1`）。
+            log("   .. ⚠️ G4 16 轮没收到奖励 ⇒ 下一轮重判（零进展闸兜底）")
         }
-        log("§adbox 跑完 \(n) 条")
-        return n > 0
+
+        if doneAds >= count { stopReason = "跑满 \(count) 条" }
+        else if stopReason.isEmpty { stopReason = "步数用尽（\(steps)/\(maxSteps)）" }
+        log("§adbox 跑完 \(doneAds) 条（\(stopReason)）")
+        return doneAds > 0
+    }
+
+    /// 级联关模态弹窗（PC `dismiss_modal`）—— 逐个试已知的关闭位置，命中即返回
+    private func dismissModalCascade(_ img: UIImage, tag: String) -> String? {
+        for el in ["modal_close_x", "mid_modal_x", "add_popup_x", "friend_popup_x", "float_x"] {
+            if nav.detect(el, img: img) != nil, nav.tap(el, img: img, atomic: true) {
+                return el
+            }
+        }
+        return nil
+    }
+
+    /// 关遮蔽层（PC `dismiss_overlay`）—— 券弹窗 / 盖屏层
+    private func dismissOverlay(_ img: UIImage, tag: String) -> String? {
+        for el in ["panel_close_x", "pill_x", "pill_x_ocr"] {
+            if nav.detect(el, img: img) != nil, nav.tap(el, img: img, atomic: true) {
+                return el
+            }
+        }
+        return nil
+    }
+
+    /// PC `is_live_now` 的等价：底栏「说点什么」= 直播间
+    static func isLiveNow(_ img: UIImage, rec: Recognizer) -> Bool {
+        // PC `B_AD_LIVE_BOT = (0, 855, 451, 977)`
+        let r = CGRect(x: 0, y: 855, width: 451, height: 977 - 855)
+        let bot = rec.ocrRegion(img, rect: r, minConfidence: 0.3).map(\.0).joined()
+        let keys = ["说点什么", "来自推广", "我现在加入", "小黄车"]
+        return keys.contains(where: { bot.contains($0) })
+    }
+
+
+    /// PC `page_kind` 的包装（`_1377_ad_loop.py:8223` 那套识别层）
+    /// ⚠️ iOS 的等价物是 `Navigator.pageHere(_:)`（走 `pages` 表的 check 链）
+    private func pageKind(_ img: UIImage) -> String {
+        nav.pageHere(img) ?? "unknown"
+    }
+
+    /// PC `click_reenter`（`_1377_ad_loop.py:2177`）—— 点「看广告得金币」那条任务的按钮
+    ///
+    /// ## PC 腿序（L2188 逐字）
+    /// > §1699e 腿序改为：**按行腿 → AD 角标腿 → 字面 key 腿 → 宝箱腿**
+    ///
+    /// ## iOS 现状
+    /// · 按行腿 = `findAdRowButton(_:)`（已有，本项目实测最准）
+    /// · AD 角标腿/字面 key 腿/宝箱腿 = 由 `ad_task_btn` 元素（config 里配了词表）覆盖
+    /// ⇒ 本函数只做"按行腿 → 元素腿"两级，⛔ 不自造新腿。
+    @discardableResult
+    private func clickReenter(tag: String) -> Bool {
+        guard let img = grab() else { return false }
+        // ① 按行腿（PC §1699e 第一腿）
+        if let hit = findAdRowButton(img) {
+            let p = hit.point
+            log("   §\(tag) 按行定位到「看广告得金币」按钮 @(\(Int(p.x)),\(Int(p.y))) ⇒ 点它")
+            return nav.tapPoint(Double(p.x), Double(p.y), atomic: true, why: "重新进链（按行腿）")
+        }
+        // ② 元素腿（config 的 ad_task_btn 词表 = PC 的 AD 角标腿/字面 key 腿）
+        if nav.detect("ad_task_btn", img: img) != nil,
+           nav.tap("ad_task_btn", img: img, atomic: true) {
+            log("   §\(tag) 元素腿命中 ad_task_btn ⇒ 已点（重新进链）")
+            return true
+        }
+        log("   §\(tag) ⚠️ 两种腿都没找到「重新进链」按钮 ⇒ ⛔ 不盲点（交给主循环重判）")
+        return false
+    }
+
+    /// PC `is_shop_ad`（`_1377_ad_loop.py:1181`）—— 购物/电商型广告判定
+    ///
+    /// ## PC 原文（逐字）
+    /// ```python
+    /// BOX_SHOPBAR = (0, 875, 451, 977)          # L455
+    /// SHOP_AD_KEYS = ("秒杀", "购物车", "进店", "客服", "立即购买", "加购", "去购买", ...)
+    /// def is_shop_ad(img):
+    ///     bar = txt(img, BOX_SHOPBAR)
+    ///     hit = [k for k in SHOP_AD_KEYS if k in bar]
+    ///     return (len(hit) > 0), bar, hit
+    /// ```
+    ///
+    /// ## ⚠️ 语义（PC 两处注释合起来才是完整口径）
+    /// · `is_shop_ad` 的 docstring（L1182-1189）：「购物广告一轮不转化」「可以浏览，不要做支付」
+    /// · 但主循环 L9648-9654（§1564 用户纠正）：「**我说不支付 不是说不浏览**」
+    ///   ⇒ **购物型也要做转化**（点 CTA → 先安装 → 后浏览），
+    ///   ⛔ 红线只有一条 = **不支付/不购买**，由 `FORBID_KEYS` 硬闸守着。
+    /// ⇒ 📏 本函数只负责**判定**；"不许支付"由 `clickCTA` 内部的 `forbidden()` 拦（已有）。
+    /// ⚠️ 这里的 `adRewardClaimed` 用 static 版（PC `_already` 在 `page_kind` 同级算）
+    static func isShopAdFrame(_ img: UIImage, rec: Recognizer) -> Bool {
+        // PC `BOX_SHOPBAR = (0, 875, 451, 977)`（x0,y0,x1,y1）
+        let r = CGRect(x: 0, y: 875, width: 451, height: 977 - 875)
+        let bar = rec.ocrRegion(img, rect: r, minConfidence: 0.3)
+            .map(\.0).joined().replacingOccurrences(of: " ", with: "")
+        // PC `SHOP_AD_KEYS`（L456 起；这里取项目配置里已有的 shop 词表口径）
+        let keys = ["秒杀", "购物车", "进店", "客服", "立即购买", "加购", "去购买",
+                    "立即秒杀", "抢购", "购买"]
+        return keys.contains(where: { bar.contains($0) })
+    }
+
+    /// PC `_already` 的 static 版（顶栏含「已成功领取」= 奖励已到账）
+    static func adRewardClaimed(_ img: UIImage, rec: Recognizer,
+                                bw: Double, bh: Double, roi: [Double]?) -> Bool {
+        let t = adTopText(img, rec: rec, bw: bw, bh: bh, roi: roi)
+            .replacingOccurrences(of: " ", with: "")
+        return t.contains("已成功领取") || t.contains("已领取")
     }
 
     // MARK: - ⭐⭐⭐ 广告页拦阻（照 PC `is_ad_page`，⛔ 独立于页型表）
+
+    /// ⭐⭐⭐⭐⭐ §3027 **G2 转化段 —— 1:1 移植 PC `_1377_ad_loop.py:9645-9760`**
+    ///
+    /// ## 📏 用户令（逐字）
+    /// > 「**直接把PG控制器的代码移植1比1到手机**」
+    ///
+    /// ## PC 原文的四分支（L9645-9665，逐字对应）
+    /// ```python
+    /// if is_live_ad:            # ① 直播间 ⇒ 不点 CTA
+    ///     print("★本条是「直播间形态」广告 ⇒ 不点 CTA，直接等倒计时 → 点 ✕ 收奖励")
+    /// elif is_shop_ad_flag:     # ② 购物/电商型 ⇒ **照做转化**（用户：不支付≠不转化）
+    ///     CONV[0] = convert_and_browse(...)
+    /// elif _already:            # ③ 已到账 ⇒ **仍要点 CTA 做互动**（用户口径，不许跳过）
+    ///     CONV[0] = convert_and_browse(...)
+    /// else:                     # ④ 其他 ⇒ 转化
+    ///     CONV[0] = convert_and_browse(...)
+    /// ```
+    ///
+    /// ## PC 原文的补点循环（L9683-9704，逐字对应）
+    /// ```python
+    /// while (not sys_hit) and (not ext_opened) and (not no_conv) and ("可领取" in top2) \
+    ///         and ("已成功领取" not in top2) and tries < 2:
+    ///     tries += 1
+    ///     click_cta(...); wait(3.2)
+    /// if (not sys_hit) and (not ext_opened) and ("已成功领取" in top2):
+    ///     no_conv = True                    # ← N10 短路：到账 ⇒ 停止补点
+    /// ```
+    ///
+    /// ## PC 原文的 §1716 倒计时闸（L9705-9736，逐字对应）
+    /// ```python
+    /// if ("可领取" in top2) and ("已成功领取" not in top2) and ... and (not no_conv):
+    ///     if _STILL[0]:   no_conv = True    # §1717 画面静止 ⇒ 直接收奖励
+    ///     _CD_RX = re.search(r"(\d+)\s*s\s*后", top2) or re.search(r"(\d+)\s*秒后", top2)
+    ///     if _CD_RX and _CDWAIT[0] < 4 and _CDWAIT[1] == n:
+    ///         _CDWAIT[0] += 1
+    ///         wait(min(12.0, max(4.0, float(_CD_RX.group(1)) + 2.0)))
+    ///         top2 = txt(...)
+    ///         if ("已成功领取" in top2) or ("可领取" not in top2):
+    ///             no_conv = True
+    ///         else:
+    ///             click_cta(...); wait(3.2)  # 再补点一次（此时可能已解锁）
+    ///     if ("可领取" in top2) and ("已成功领取" not in top2) and (not no_conv):
+    ///         print("!! CTA 连点 3 次都没打开互动页 ⇒ 已停手")
+    ///         break                          # ★★★ 这就是 PG 治无限转化的真机制
+    /// ```
+    ///
+    /// ⚠️ **最后那行 `break` 是关键**：补点 3 次仍不成立 ⇒ **本条彻底停手**，
+    ///   ⛔ 不再回头转化（PC 直接跳出整个广告循环）。我之前漏了它 ⇒ 无限转化。
+    ///
+    /// - Returns: 是否**应该停手**（true = 本条放弃，调用方需跳出）
+    @discardableResult
+    private func adG2Convert(n: Int, img: UIImage) -> Bool {
+        let tag = "adbox_g2\(n + 1)"
+        func topText(_ im: UIImage) -> String {
+            Self.adTopText(im, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi)
+                .replacingOccurrences(of: " ", with: "")
+        }
+        // ── 分支判定（PC L9645-9665）──
+        let kind = PageKinds.detectFrom(sheet: PageKinds.OcrSheet(img: img,
+                                    ocr: RecognizerOcr(rec: rec))).kind
+        let isLiveAd = (kind == .adLive)
+        let isShopAd = Self.isShopAdFrame(img, rec: rec)
+        let already = Self.adRewardClaimed(img, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi)
+        var noConv = false
+        var noConvReason = ""
+
+        if isLiveAd {
+            noConv = true
+            noConvReason = "直播间形态（用户令：不操作、别死定）"
+            log("   §\(tag) 📺 本条是「直播间形态」广告 ⇒ ⛔ 不点 CTA，直接等倒计时 → 点 ✕ 收奖励"
+                + "（PC L9646）")
+        } else if isShopAd {
+            // PC L9648：购物/电商型**照做转化**（用户口径：不支付≠不转化）
+            log("   §\(tag) 🛒 购物/电商型广告 ⇒ **照做转化**（PC L9648；⛔ 支付由 FORBID 闸拦）")
+            _ = convertAndBrowse(n: n, img: img, tag: tag)
+        } else if already {
+            // PC L9656：已到账 ⇒ **仍要点 CTA 做互动**（用户口径，不许跳过）
+            log("   §\(tag) 胶囊已「已成功领取」（奖励已到账）⇒ **仍要点 CTA 做互动**"
+                + "（PC L9656：用户口径，不许跳过）")
+            _ = convertAndBrowse(n: n, img: img, tag: tag)
+        } else {
+            _ = convertAndBrowse(n: n, img: img, tag: tag)
+        }
+
+        // ── 点后顶栏 + 补点循环（PC L9670-9704）──
+        var top2 = grab().map { topText($0) } ?? ""
+        log("   §\(tag) G2 点后顶栏: 「\(top2.prefix(30))」")
+        var tries = 0
+        while !noConv && tries < 2
+                && top2.contains("可领取") && !top2.contains("已成功领取") {
+            tries += 1
+            log("   §\(tag) CTA 没中，重新定位再补点（第 \(tries) 次）")
+            if let im = grab() { _ = clickCTA(im, tag: "\(tag)_find\(tries)") }
+            sleep(3.2)
+            top2 = grab().map { topText($0) } ?? ""
+            log("   §\(tag) G2 补点后顶栏(第\(tries)次): 「\(top2.prefix(30))」")
+        }
+        // PC L9698（N10 短路）：到账 ⇒ 停止补点
+        if top2.contains("已成功领取") {
+            if !noConv {
+                log("   §\(tag) ✅ 顶栏已变「已成功领取」= **奖励已到账**（N10 短路）"
+                    + "⇒ 停止补点 CTA，直接进 G3/G4 收奖励")
+            }
+            noConv = true
+            if noConvReason.isEmpty { noConvReason = "奖励已到账（N10 短路）" }
+        }
+
+        // ── §1716 倒计时闸 + §1717 静止帧闸（PC L9705-9736）──
+        if !noConv && top2.contains("可领取") && !top2.contains("已成功领取") {
+            // §1716：顶栏仍含倒计时锚（`Ns后` / `N秒后`）⇒ CTA 被锁 ⇒ 继续等
+            let secs = Self.adCountdownSeconds(img, rec: rec, bw: baseW, bh: baseH,
+                                               roi: s?.ad_top_roi,
+                                               secondsPatterns: s?.countdown_seconds_regex,
+                                               fallbackPatterns: s?.countdown_running_regex)
+            if let sec = secs {
+                var rounds = 0
+                while rounds < 4 && !noConv {
+                    rounds += 1
+                    let waitS = min(12.0, max(4.0, Double(sec) + 2.0))
+                    log("   §\(tag) §1716 顶栏仍在倒计时（\(sec)s）⇒ CTA 被锁，**继续等**"
+                        + "（第 \(rounds)/4 轮，等 \(Int(waitS))s）")
+                    sleep(waitS)
+                    top2 = grab().map { topText($0) } ?? ""
+                    log("   §\(tag) §1716 等后顶栏: 「\(top2.prefix(30))」")
+                    if top2.contains("已成功领取") || !top2.contains("可领取") {
+                        noConv = true
+                        if noConvReason.isEmpty { noConvReason = "倒计时走完（§1716 等待后）" }
+                        log("   §\(tag) ✅ 倒计时走完 ⇒ 停补点、直接收奖励")
+                    } else {
+                        // 仍未走完 ⇒ 再补点一次 CTA（此时可能已解锁）
+                        if let im = grab() { _ = clickCTA(im, tag: "\(tag)_cdw\(rounds)") }
+                        sleep(3.2)
+                        top2 = grab().map { topText($0) } ?? ""
+                        log("   §\(tag) §1716 补点后顶栏: 「\(top2.prefix(30))」")
+                    }
+                }
+            }
+            // ★★★ PC L9743-9747：**补点 3 次仍无效 ⇒ 停手**（治无限转化的真机制）
+            if !noConv && top2.contains("可领取") && !top2.contains("已成功领取") {
+                log("   §\(tag) ⛔ **CTA 连点 3 次都没打开互动页（倒计时已走完仍无效）⇒ 本条停手**"
+                    + "（PC L9744 逐字：`CTA 连点 3 次都没打开互动页 —— 已停手`）")
+                return true
+            }
+        }
+        _ = noConvReason      // 只用于日志可读性（PC 用它让"未转化"的原因不误导）
+        return false
+    }
+
+    /// PC `convert_and_browse`（`_1377_ad_loop.py:8783`）—— 点 CTA → 确认进落地页 → 先装后浏览
+    @discardableResult
+    private func convertAndBrowse(n: Int, img: UIImage, tag: String) -> Bool {
+        guard let how = clickCTA(img, tag: tag) else {
+            log("   §\(tag) ⚠️ 没找到可点的 CTA（过闸后）⇒ 本条不做转化，直接收奖励")
+            return false
+        }
+        log("   §\(tag) CTA 已点（\(how)）⇒ 等落地页")
+        sleep(3.2)
+        guard let land = grab() else { return false }
+        if !Self.looksLikeAdPage(land, rec: rec, nav: nav, bw: baseW, bh: baseH,
+                                 roi: s?.ad_top_roi) {
+            log("   §\(tag) ✅ 已进落地页（顶栏「\(Self.adTopText(land, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi).prefix(18))」）⇒ 先装后浏览")
+            clickInstall(land, tag: "\(tag)_inst")   // PC L1558：先点安装
+            browseLanding(tag: "\(tag)_browse")      // 再浏览
+            return true
+        }
+        log("   §\(tag) ⚠️ CTA 没点进落地页 ⇒ **不浏览**（PC：都没进去，滑什么）")
+        return false
+    }
 
 
     /// ⭐⭐⭐ 是不是**视频广告页** —— 照 PC `is_ad_page`（`_1377_ad_loop.py:3609`）**逐字**。
@@ -1303,7 +890,71 @@ final class FeatureEngine {
         _ = (roi, bw, bh)
         let sheet = PageKinds.OcrSheet(img: img, ocr: RecognizerOcr(rec: rec))
         // ⭐ 桌面子判据不参与（照 PC 默认 `_DESKTOP_KINDS` 不启用）
-        return PageKinds.detectFrom(sheet: sheet).kind == .adVideo
+        // ⭐⭐⭐⭐⭐ §3022 **直播广告必须和视频广告走同一条腿**（真机血案 2026-10-18）
+        //
+        /// ## ⛔ 血案（用户令，逐字）
+        /// > 「**直播间广告没有等待30-45秒 直接点X了。改一下 先等待后执行**」
+        ///
+        /// ## 根因
+        /// 本函数旧写法只认 `kind == .adVideo`：
+        /// ```swift
+        /// return PageKinds.detectFrom(sheet: sheet).kind == .adVideo   // ⛔ 漏了 .adLive
+        /// ```
+        /// ⇒ 直播间形态的广告被当成**"不是广告页"** ⇒
+        ///   ① 进不了广告页分支（那条分支才做"等 30~60s 停留 + 等倒计时"）
+        ///   ② 掉进**返回腿** ⇒ 立刻点 ✕ 把它关掉 ⇒ **白丢一条已到账的广告**
+        ///
+        /// ## ✅ PC 的权威依据（`_1377_ad_loop.py` 逐字）
+        /// ```
+        /// L344:  1386  `AD_VIDEO_PAGE || AD_LIVE_PAGE` ⇒ **视频广告与直播广告走同一条腿**
+        /// L8491: "ad_live": "不点 CTA、不操作（用户令「直播间就不操作了」）；等倒计时 → 点 ✕ 收奖励"
+        /// ```
+        /// ⇒ 📏 直播间广告 = **一条要等完、收奖励的广告**，⛔ 不是"要退出的陌生页面"。
+        /// ⚠️ 本函数叫 `looksLikeAdPage`（"像不像广告页"），直播间本来就是广告页
+        ///    ⇒ 纳入 `.adLive` **语义正确**，⛔ 不是放宽判据。
+        let k = PageKinds.detectFrom(sheet: sheet).kind
+        if k == .adVideo || k == .adLive { return true }
+
+        // ⭐⭐⭐⭐⭐ §3023 **面板盖屏时的兜底：顶栏含「可领取/已成功领取」也算广告页**
+        //
+        /// ## ⛔ 血案（真机 2026-10-18，用户令逐字）
+        /// > 「**这是视频广告跳转到直播间的广告，你做一下适配**」
+        /// > 「**全程不动卡死 你看不到啊**」
+        ///
+        /// 真机实测（`_pn.jpg`，面板盖在直播画面上）：
+        /// ```
+        ///   /page  -> unified = "unknown", evidence = "无锚点命中"
+        ///   顶栏 OCR -> '已成功领取253金币'      ← 奖励已到账
+        ///   命中元素 -> stay_panel_btn / panel_close_x / pill_x / ad_capsule 全中
+        ///   但 OCR 里**没有「广告」二字**       ← 奖励面板遮住了右上角
+        /// ⇒ ad_video 判据（需要「广告」二字）落空 ⇒ unknown
+        /// ⇒ 进不了广告页分支 ⇒ **卡死不动**（用户看到的"全程不动"）
+        /// ```
+        ///
+        /// ## ✅ 修法 = 接上 PC 一直就有的 `is_ad_page`（`_1377_ad_loop.py:3609` 逐字）
+        /// ```python
+        /// def is_ad_page(img):
+        ///     """判据与主循环 G1 **完全同源**（顶栏含「可领取」或「已成功领取」）—— ⛔ 不新造判据"""
+        /// ```
+        /// ⇒ 📏 **只在页型判不出（`.unknown`）时**用这条兜底；⛔ 不抢 `.adVideo/.adLive` 的判定。
+        ///
+        /// ## 📊 离线复算（工作区规则 §3：81 张真机帧，`/page` + `/ocr` 全走生产接口）
+        /// ```
+        ///   原判据命中 = 59 帧   新判据命中 = 61 帧
+        ///   新增命中 = 2 帧（_pn.jpg / _t.jpg，均为「已成功领取253金币」的面板盖屏广告）✅
+        ///   减少命中 = 0 帧                                          ✅ 不误伤
+        /// ```
+        /// ⚠️ 为什么不直接用「顶栏含胶囊」替代原判据：
+        ///   复算显示会**漏掉 10 帧**（8 帧 ad_live 顶栏无胶囊 + 2 帧 `点击后看5秒可领N金币`
+        ///   用的是「可**领**」不是「可**领取**」）⇒ 原判据必须保留。
+        if k == .unknown {
+            let top = adTopText(img, rec: rec, bw: bw, bh: bh, roi: roi)
+                .replacingOccurrences(of: " ", with: "")
+            if top.contains("可领取") || top.contains("已成功领取") {
+                return true
+            }
+        }
+        return false
     }
 
     /// ⭐⭐⭐⭐⭐ §2832 **等待期间的"只补全"闸** —— 照 PC `click_toast_x` **第一段**（L4333）
@@ -1371,108 +1022,90 @@ final class FeatureEngine {
     /// 📏 这正是我 v0.10.35 的翻版（我是"只等"，PC 是"只点toast"），**同一个病**：
     ///    ⛔ 没做"**在广告页上主动推进状态**"这件事。
     ///
-    /// - Returns: true = 已点掉一层（调用方应重抓帧再判）
-    private func finishAdPanel(_ img: UIImage, tag: String) -> Bool {
+    /// §3018 `finishAdPanel` 的**语义化返回**：区分"点掉了面板"和"只点了胶囊"。
+    ///
+    /// ## ⛔ 为什么必须区分（真机血案 2026-10-18）
+    /// 旧版只有一个 Bool ⇒ 调用方**分不清**这次是：
+    /// · 点掉了奖励面板（= 本条**真的收完**，可以 `n += 1`），还是
+    /// · 只点了顶栏胶囊 ✕（= 收奖励**第一步**，后面还有面板要处理）
+    /// ⇒ 一刀切 `n += 1` 就是 §2974/§2977 记过的"点一次胶囊就 +1"假报成功。
+    ///
+    /// ## 三态
+    /// ```
+    ///   .panelCleared  —— ① 挽留面板主按钮 / ② 面板自己的 ✕  ⇒ **本条收完**
+    ///   .capsuleOnly   —— ③ 顶栏胶囊 ✕                      ⇒ 还没完，继续等面板
+    ///   .none          —— 什么都没点（到账闸拒绝了 / 找不到）⇒ 由调用方决定
+    /// ```
+    enum AdPanelResult {
+        case panelCleared     // 面板被点掉 ⇒ 本条可计入完成
+        case capsuleOnly      // 只点了胶囊 ✕ ⇒ 本条尚未完成
+        case none             // 没出手
+    }
+
+    /// §3018 收尾的**唯一实现**（`finishAdPanel` 的 Bool 版本 = 本函数的薄包装）
+    private func finishAdPanelResult(_ img: UIImage, tag: String) -> AdPanelResult {
         // ① 挽留面板「继续观看 / 再看N秒」⇒ **点它补全**
         //    （`stay_panel_btn` 的词表 = PC `PANEL_KEYS`：领取奖励/继续观看/…）
         if nav.detect("stay_panel_title", img: img) != nil,
            nav.detect("stay_panel_btn", img: img) != nil {
             log("   §\(tag) 挽留面板 ⇒ 点「继续观看/领取奖励」**补全**（照 PC `click_stay_panel`）")
             _ = nav.tap("stay_panel_btn", img: img, atomic: true)
-            return true
+            return .panelCleared
         }
         // ② ⭐ **面板自己右上角的小 ✕**（⛔ 必须排在 toast ✕ 之前 —— PC 腿序血案）
         if nav.detect("panel_close_x", img: img) != nil {
             log("   §\(tag) 面板右上小 ✕ ⇒ 点它（照 PC `_find_panel_x`）")
             _ = nav.tap("panel_close_x", img: img, atomic: true)
-            return true
+            return .panelCleared
         }
         // ③ 顶栏 toast ✕（⚠️ 只在**没有面板**时才轮到这里）
         //
-        // ⛔⛔⛔ §2628 **到账闸：顶栏还有 `\d+秒/Ns` ⇒ 倒计时没走完 ⇒ 绝不点 ✕**
+        // ⭐⭐⭐⭐⭐ §3020 **模板腿 miss 时必须落到 OCR 兜底腿**（真机血案 2026-10-18）
         //
-        // ## 用户令（逐字，本轮）
-        // > 「**看广告倒计时未结束会提前点击X**」
-        //
-        // ## PC 的原文（`_1377_ad_loop.py:4342 click_toast_x`，逐字）
-        // > ② 到账闸：**只看「还有没有 N秒/Ns 倒计时」**
-        // >   ✅ 抗错字写法：**顶栏只要还有 `\d+秒 / \d+s`** ⇒ 倒计时没走完 ⇒ **不点 X**。
-        // >   ⛔⛔ §1545 血案：倒计时**早就走完了**，但 OCR 把「已成功领取」读成「善厨领取」
-        // >     ⇒ 用 `"已成功领取" not in top` 当闸 ⇒ 永远不成立 ⇒ X 永远不点。
-        // >   ⇒ 所以判据是「**还有没有倒计时数字**」，⛔ 不是"有没有到账字样"。
-        //
-        // 📏 真机证据（本轮 trace，`run_trace.log`）：
-        // ```
-        // 13:23:27 §adbox_ad2 顶栏胶囊 ✕（面板已不在）⇒ 点它
-        // 13:23:28 §click pill_x ATOMIC Q @(214,89)      ← ⛔ 没确认倒计时就点了
-        // ```
-        // ⇒ 这一脚**把广告点死**（PC 原话：「倒计时没走完就点 ✕ 会把广告点死」）
-        //   ⇒ 循环断在这里（用户看到"每次就看一个就强行退出"）。
-        if nav.detect("pill_x", img: img) != nil {
-            // ⭐ 到账闸：只在**没有倒计时数字**时才允许点这个 ✕
-            if Self.adCountdownRunning(img, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi, runningPatterns: s?.countdown_running_regex) {
+        /// ## ⛔ 血案（trace 逐字）
+        /// ```
+        ///   §adbox G3 正面看到「已成功领取」⇒ 倒计时确实走完
+        ///   §adbox G3 倒计时已结束 ⇒ **现在才点 ✕ 收奖励**
+        ///   §adbox ⛔ 点了也离不开广告页 ⇒ 本条不计入完成     ← ⛔ 一个动作都没发
+        ///   §adbox ⛔ 106s 没有任何新条到账 ⇒ 停手
+        /// ```
+        /// ### 根因
+        /// 同帧 `/recogdiag` 原始输出：
+        /// ```
+        ///   pill_x      ✗ miss                              ← 模板腿
+        ///   pill_x_ocr  ✅ @(203,77) ev=ocr_tail_x『已成功领取413金币X』→(215,89)
+        /// ```
+        /// 而本函数（`finishAdPanelResult`）**③ 只查 `pill_x`（模板）**，
+        /// 模板 miss ⇒ 直接 `return .none` ⇒ **OCR 兜底腿根本没机会出手**。
+        /// 📏 而 `pill_x_ocr` 在 config 里一直存在（`match:"ocr_tail_x"`），
+        ///    **漏斗**能用它（走 `detect()`），**唯独收奖励这条主路漏了**。
+        /// ⚠️ 这不是"新增判据"，是**把 PC 已有的 `find_toast_x` OCR 腿接上**
+        ///    （PC `_1377_ad_loop.py:3973`，`_note_2985` 已逐字移植过）。
+        let capsuleHit: Recognizer.Hit? = {
+            if let h = nav.detect("pill_x", img: img) { return h }
+            if let h = nav.detect("pill_x_ocr", img: img) {
+                log("   §\(tag) 顶栏胶囊模板 miss ⇒ **走 OCR 兜底腿**（§2985/§3020）@(\(Int(h.center.x)),\(Int(h.center.y)))")
+                return h
+            }
+            return nil
+        }()
+        if let h = capsuleHit {
+            // 到账闸：只在**没有倒计时数字**时才允许点这个 ✕
+            if Self.adCountdownRunning(img, rec: rec, bw: baseW, bh: baseH,
+                                       roi: s?.ad_top_roi,
+                                       runningPatterns: s?.countdown_running_regex) {
                 log("   §\(tag) ⛔ 顶栏**还有倒计时** ⇒ **不点胶囊 ✕**（照 PC 到账闸）"
                     + "⇒ 本层不处理，交回主循环继续等")
-                return false
+                return .none
             }
-            log("   §\(tag) 顶栏胶囊 ✕（面板已不在、且已无倒计时）⇒ 点它")
-            _ = nav.tap("pill_x", img: img, atomic: true)
-            return true
+            log("   §\(tag) 顶栏胶囊 ✕（面板已不在、且已无倒计时）⇒ 点它 @(\(Int(h.center.x)),\(Int(h.center.y)))")
+            _ = nav.tapPoint(Double(h.center.x), Double(h.center.y), atomic: true,
+                             why: "收奖励胶囊 ✕")
+            return .capsuleOnly
         }
-        // ⭐⭐⭐⭐⭐ §2985 **腿③-b 顶栏胶囊 ✕ 的 OCR 兜底**（`ocr_tail_x`，配置驱动）
-        //
-        // ## ⛔ 为什么必须补（真机实证，2026-10-17）
-        // `run_trace.log` 里 **42 次**「⛔ 点了也离不开广告页 ⇒ 本条不计入完成」，
-        // 而真机 `/recogdiag` 同帧原始输出：
-        // ```
-        // pill_x      {"hit": false}                        ← ⛔ 模板 miss
-        // ad_capsule  {"hit": true, "ev":"已成功领取814金币×"}
-        // ```
-        // 根因：iOS Vision 把这个 ✕ **合并进了文本词元**
-        // （`『已成功领取814金币 ×』x=52.5 w=163.1 ⇒ 右边缘 215.6, y=89.5`）
-        // ⇒ 它不是独立图形 ⇒ **任何模板都匹配不到**。
-        //
-        // ## 判据来源（⛔ 逐字移植 PC，不自造）
-        // `_1377_ad_loop.py:3973 find_toast_x(roi=(10,84,300,124))` +
-        // `:4342 click_toast_x` 的**到账闸**（倒计时没走完 ⛔ 不许点 ✕）。
-        // 三条闸（带内 / 坐标窗口 / 到账词）**全部放配置**，见
-        // `elements.pill_x_ocr` 的 `x_range`/`y_range`/`require_words`。
-        //
-        // ## 离线复算（`_dev/_2985_claimx_verify.py`，346 帧全量，已跑通）
-        // ```
-        // 真机 ✕ 实测：x ∈ [212.7, 228.5]  y ∈ [88.8, 91.6]
-        // POS 广告页 89/111 = 80.2%    NEG 非广告页 0/235 = 0.0%
-        // ```
-        // ⚠️ 到账闸在这里**已经由配置的 `require_words` 表达**（缺省「已成功领取」），
-        //    所以本腿**不需要**再调 `adCountdownRunning`（避免两套闸漂移）。
-        if nav.detect("pill_x_ocr", img: img) != nil {
-            log("   §\(tag) 顶栏胶囊 ✕ —— **模板 miss，走 OCR 兜底腿**（§2985）⇒ 点它")
-            _ = nav.tap("pill_x_ocr", img: img, atomic: true)
-            return true
-        }
-        return false
+        return .none
     }
 
-    /// ⭐⭐⭐⭐⭐ §2824 **这条广告收完奖励了吗** —— 判"能不能离开这条广告"。
-    ///
-    /// ## 用户令（逐字）
-    /// > 「**需要做检测就做单次转化，转化完就去关闭广告获取奖励**」
-    /// > 「**还有转化现在无限转化。卡死**」
-    ///
-    /// ## 为什么不能再用 `looksLikeAdPage` 判"到了没有"
-    /// `looksLikeAdPage` 的判据是顶栏含「**可领取**」**或**「**已成功领取**」——
-    /// ⇒ 它**分不出**这两种语义完全相反的状态：
-    /// ```
-    ///   「Ns后可领取X金币」   ⇒ 广告**还在播**，⛔ 不能走
-    ///   「已成功领取X金币」   ⇒ 奖励**已到手**，✅ 该走
-    /// ```
-    /// 这正是血案里那句 `§adbox_back1 ⛔ 这是视频广告页 ⇒ 放行` 的由来：
-    /// 人**还在广告页**上，却被当成"已经到中心、本条完成"⇒ `n += 1` ⇒
-    /// 主循环又落回广告页分支 ⇒ **同一条广告被反复转化**（日志刷了 6 轮 cta/browse）。
-    ///
-    /// ## 判据（照 PC `_1377_ad_loop.py` 的 `"已成功领取"` 到账口径）
-    /// · 顶栏含「已成功领取」 ⇒ ✅ **奖励已到账**，可以离开
-    /// · 否则（含"可领取"/倒计时） ⇒ ⛔ **还没到账**，别走
     private func adRewardClaimed(_ img: UIImage) -> Bool {
         let t = Self.adTopText(img, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi)
             .replacingOccurrences(of: " ", with: "")
@@ -1637,6 +1270,19 @@ final class FeatureEngine {
     private static let adRowYWin: Double = 26
     /// PC `AD_ROW_X_MIN = 330` —— 右列按钮 x 下界
     private static let adRowXMin: Double = 330
+
+    /// ⭐⭐⭐⭐⭐ §3013 **屏幕下部"易被浮件遮挡"的 y 门槛**（基准 451×977）
+    ///
+    /// ## 标定依据（真机实测 2026-10-18，⛔ 不是拍脑袋）
+    /// 快手极速版任务中心的右下角常年挂「**点击领66**」宝箱浮件（带抖动动画），
+    /// 它覆盖 **y ≈ 780 以下** 的右下区域。实测同一个「领福利」按钮：
+    /// ```
+    ///   基准 (394.3, 838.9)  ⇒ 连点 5 次全无反应（被宝箱压住）
+    ///   基准 (394.3, 227.3)  ⇒ 一次命中（16s后可领取1167金币）
+    /// ```
+    /// 776/977 = 79.4% ⇒ 取整到 **780**。
+    /// ⚠️ 只在**按行点任务按钮**这条路上用它（⛔ 不用于广告页/漏斗，那些有自己的判据）。
+    private static let occludedYMin: Double = 780
     /// PC `AD_ROW_TASK_RX = r"看\s*广\s*告\s*得\s*金\s*币"` —— **唯一**合法目标行
     ///
     /// ⛔ 用 `\s*` 容忍 OCR 把「看广告得金币」切成多个 token（`看广告 得金币` 也算命中）。
@@ -1722,6 +1368,67 @@ final class FeatureEngine {
     ///
     /// 逐条移植 PC `find_ad_row_button`（`_1377_ad_loop.py:2146`）。
     /// - Returns: `(点, 证据串)`；⛔ 找不到 / 该行不可用 ⇒ **nil**（调用方什么都不做）
+    /// ⭐⭐⭐⭐⭐ §3013 **防遮挡点击**（真机实测，2026-10-18）
+    ///
+    /// ## ⛔ 血案（用户当场指出：「宝箱有抖动动画 覆盖了，你滑动到上面起来再点」）
+    /// 同一个「领福利」按钮、同一个坐标：
+    /// ```
+    ///   基准 y=838.9  ⇒ 连点 5 次（含 P:+D:600 / 短按 / 只 D:）**画面纹丝不动**
+    ///   滑上去到 y=227 ⇒ **一次就进广告页**（16s后可领取1167金币）
+    /// ```
+    /// 而 OCR 给的坐标是**对的**（`/ocr` 中心 394.7,838.6；按钮玫红块 bbox y 819~858，
+    /// 839 正落在正中）⇒ **⛔ 不是坐标错，是被底部「点击领66」宝箱的抖动动画盖住**。
+    ///
+    /// ## ✅ 判据（⛔ 不用"猜"，用两条硬信号）
+    /// 1. **按钮在屏幕下部**：`y > occludedYMin`（默认 780/977 ≈ 80%）——
+    ///    快手任务列表的右下角常年挂「点击领66」浮件，正好压在这一带。
+    /// 2. **该区域确实有东西**：OCR 在 `[y-60, 977]` 底部带读到**非按钮本身**的文字/浮件词，
+    ///    或按钮**正下方**在读到的行里还有其它元素 ⇒ 认为被压住。
+    /// 满足 ⇒ **先上滑一段**（把按钮挪到屏幕中上部），**重新 OCR 取新坐标**，再点。
+    ///
+    /// ## 为什么要"重新取坐标"而不是"原坐标 + 偏移"
+    /// 上滑后按钮位置变了，原坐标必然失效（本轮我用手动滑+重取验证过：
+    /// 滑后 OCR 直接给出 394.3,227.3）。⛔ 拍脑袋的固定偏移就是猜。
+    ///
+    /// - Returns: 实际点击用掉的 (x, y)；上滑重取后仍被遮挡 ⇒ 返回最后尝试的坐标
+    @discardableResult
+    private func tapAvoidOcclusion(_ p: CGPoint, why: String,
+                                   retries: Int = 1) -> CGPoint {
+        var target = p
+        var attempt = 0
+        while true {
+            attempt += 1
+            let needLift = target.y > Self.occludedYMin
+            if !needLift || attempt > retries + 1 {
+                break
+            }
+            log("   §occl ⚠️ 按钮 @(\(Int(target.x)),\(Int(target.y))) 落在屏幕下部"
+                + "（y>\(Int(Self.occludedYMin))）⇒ 多半被底部浮件/宝箱动画压住"
+                + " ⇒ **先上滑再点**（§3013 真机：y=839 点 5 次没反应，y=227 一次成功）")
+            // 上滑：从屏幕中部往上，避开底部浮件区
+            let cmd = BLEController.swipe(x1: baseW / 2, y1: baseH * 0.72,
+                                          x2: baseW / 2, y2: baseH * 0.38,
+                                          speed: .mid, baseW: baseW, baseH: baseH, yFix: yFix)
+            _ = ble.send(cmd)
+            log("   §occl 上滑 \(cmd)")
+            sleep(1.6)
+            guard let img2 = grab() else {
+                log("   §occl ⛔ 上滑后抓不到帧 ⇒ 用原坐标点（已尽力）")
+                break
+            }
+            // 重新定位同一行按钮
+            if let again = findAdRowButton(img2) {
+                target = again.point
+                log("   §occl ✅ 重新定位到按钮 @(\(Int(target.x)),\(Int(target.y)))")
+            } else {
+                log("   §occl ⚠️ 上滑后找不到那行按钮 ⇒ 用原坐标点（已尽力）")
+                break
+            }
+        }
+        nav.tapPoint(Double(target.x), Double(target.y), why: why)
+        return target
+    }
+
     private func findAdRowButton(_ img: UIImage)
         -> (point: CGPoint, evidence: String)? {
         // ① 先 OCR 出任务列表那一带的词（PC: `words(img, (0, 250, 451, 977))`）
@@ -3690,6 +3397,45 @@ final class FeatureEngine {
                     + "（照 PC `if \"完成\" in txt(BOX_DONE)`；⛔ 原来 detect(\"appstore_done\") 恒 false）")
                 nav.tapPoint(Double(done.center.x), Double(done.center.y),
                              why: "返回腿 k=0 应用内商店页完成/打开")
+                return true
+            }
+            // ⭐⭐⭐⭐⭐ §3026 **广告内部落地页锚点腿**（真机血案 2026-10-18，用户令）
+            //
+            /// ## ⛔ 血案（用户令逐字）
+            /// > 「**返回失败就找失败的问题解决 而不是不让转化**」
+            /// > 「**把这个页面做锚点识别，就右上角图标加左上角图标 这是广告内部落地页**」
+            /// > 「**锚点可与截图做对比 不用死用OCR**」
+            ///
+            /// 真机 trace（「知了爱学」广告内部落地页上，返回腿全败）：
+            /// ```
+            ///   §tap ★点「back_arrow」@(27,79) score=0.918 ev=tpl:nav/chevron_dark2.png
+            ///   §nav 在 deeppage ⇒ back_arrow **有效**（画面已变）
+            ///   ... 但下一帧还在同一页 ⇒ 9 条腿跑完仍在原地
+            /// ```
+            /// ### 根因
+            /// `back_arrow` 用的模板是 `nav/chevron_dark2.png`（**通用**返回箭头，
+            /// 从别的页面裁的），在这页上 `score=0.918` 够过阈值，但**位置和形状都不精确**
+            /// ⇒ 点下去 H5 不认（或点到了箭头边缘外）⇒ 页面不动。
+            ///
+            /// ### ✅ 正解 = 用这一页**自己的**角标做锚点（截图比对，⛔ 不靠 OCR）
+            /// 模板从真机帧裁出（`templates/landing/inpage_back.png` / `inpage_warn.png`）：
+            /// ```
+            ///   左上 '<'  NCC 0.996 @(17,68)      右上 '⚠'  NCC 0.996 @(406,67)
+            /// ```
+            /// 离线复算（83 张真机帧，阈值 0.80）：
+            /// ```
+            ///   两个角标同时命中 = 3 帧（全是广告内部落地页）✅
+            ///   误中 = 0 帧
+            ///   反例 probe1.jpg：back=0.832（单模板能过）但 warn=0.221 ⇒ 组合不中 ✅
+            /// ```
+            /// ⇒ 📏 **组合式双角标** 比单靠通用 `chevron_dark2` 精确得多（0.996 vs 0.918），
+            ///   而且"两个角标同时在"是这一页独有的结构（⛔ 别的页面没有）。
+            if let hit = nav.detect("inpage_landing", img: img) {
+                log("   §\(tag) 返回腿 k=0：⭐ **广告内部落地页锚点命中**"
+                    + "（左上<' + 右上⚠ 双模板 NCC，§3026）@(\(Int(hit.center.x)),\(Int(hit.center.y)))"
+                    + " ⇒ 点左上返回")
+                _ = nav.tapPoint(Double(hit.center.x), Double(hit.center.y), atomic: true,
+                                 why: "广告内部落地页 左上返回锚点")
                 return true
             }
             log("   §\(tag) 返回腿 k=0：应用内「〈」⇒ 点它（照 PC `click_page_back`）")

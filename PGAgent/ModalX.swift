@@ -158,10 +158,30 @@ enum ModalX {
                                   space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return [] }
-        ctx.draw(cg, in: CGRect(x: -cropPx.minX, y: -(CGFloat(cg.height) - cropPx.maxY),
+        // ⭐⭐⭐⭐⭐ §3012 **绘制偏移的 y 用「ROI 顶」而不是「帧高减 ROI 底」**
+        //
+        // ## ⛔⛔ 血案（真机实测 2026-10-18，签到/宝箱奖励弹窗）
+        // 旧代码：`y: -(cg.height - cropPx.maxY)`
+        // ```
+        //   cg.height=977, cropPx.maxY=460  ⇒  draw_y = -(977-460) = **-517**
+        //   CGContext 左下原点 ⇒ 缓冲行 r 对应源图行 r - draw_y = r + 517
+        //   ⇒ 缓冲只覆盖源图行 **517..876**（屏幕最下方）
+        //   ⇒ 而 ROI 是 **100..460** ⇒ **ROI 一个像素都没画进缓冲！**
+        // ```
+        // 📏 后果（真机 trace 逐字）：`modal_x @(409,247)`，而 ✕ 真值在 **(409.4,310.2)**
+        //   ⇒ y 恒偏小 **63px** ⇒ 同一点连点 40 次 ⇒ 弹窗永远关不掉。
+        //   而**离线按 Swift 逻辑复算**（正序读 ROI）得 (409.4,311.3) —— 与真值差 1.1px
+        //   ⇒ 证明**判据与算法都对，错的是"把哪块像素画进缓冲"**。
+        //
+        // ## ✅ 修法
+        // 让 **ROI 顶行对齐缓冲顶行** ⇒ `draw_y = -y0`：
+        // ```
+        //   缓冲行 r 对应源图行 r + y0  ⇒  覆盖 100..459，正好是 ROI ✅
+        // ```
+        // ⚠️ `x` 那一路本来就是对的（`-cropPx.minX`），⛔ 不动。
+        ctx.draw(cg, in: CGRect(x: -cropPx.minX, y: -CGFloat(y0),
                                 width: CGFloat(cg.width), height: CGFloat(cg.height)))
         // ⚠️ CGContext 原点在**左下** ⇒ 缓冲第 0 行是 ROI 的底行 ⇒ 读时翻回来
-
         // ① 颜色闸 ⇒ 布尔掩码
         var mask = [Bool](repeating: false, count: rw * rh)
         for j in 0..<rh {

@@ -84,11 +84,50 @@ final class Navigator {
                                   minHits: e.min_hits ?? 1,
                                   minConfidence: minConf)
             // ⭐ §2307 **否定词闸**（见 `Element.not_words`）
+            //
+            // ⭐⭐⭐⭐⭐ §3021 **否定词要在「同一 ROI 内」找，⛔ 不是在 evidence 里找**
+            //
+            // ## ⛔ 血案（真机 2026-10-18，淘宝误判成快手消息页）
+            /// ```
+            ///   人在淘宝，底栏 OCR：'视频' '消息' '购物车' '我的淘宝'
+            ///   tab_msg(words:["消息"]) 命中 @(212,919) ⇒ 页型判 msg
+            ///   ⇒ §nav 在 msg 想要 tab_home/back_arrow ⇒ 淘宝里根本没有 ⇒ 停手
+            /// ```
+            /// 我给 `tab_msg` 加了 `not_words:["我的淘宝","购物车","淘"]`，
+            /// **但没生效** —— 因为旧实现是：
+            /// ```swift
+            /// if bad.contains(where: { ev.contains($0) }) { return nil }
+            /// //                      ↑ ev 只是「消息」这个词的 evidence
+            /// ```
+            /// ⇒ 否定词**永远不可能**出现在 evidence 里（evidence 只含命中词本身）
+            /// ⇒ 这道闸对"同页有别的特征"这种用法**恒不成立**。
+            ///
+            /// ## ✅ 修法
+            /// 否定词用**同一个 ROI**再跑一次 OCR：只要 ROI 内出现任一否定词 ⇒ 不成立。
+            /// ⚠️ 与原实现**并存**（原判据对"命中词自身含否定子串"仍然有效），
+            ///    只是多补一条"同 ROI 内的否定词"。
             if var hh = h {
                 let ev = hh.evidence
-                if let bad = e.not_words, !bad.isEmpty,
-                   bad.contains(where: { ev.contains($0) }) {
-                    return nil
+                if let bad = e.not_words, !bad.isEmpty {
+                    // ① 原判据：命中词本身含否定词
+                    if bad.contains(where: { ev.contains($0) }) { return nil }
+                    // ② §3021 新增：**同一 ROI 内**出现否定词 ⇒ 说明这不是目标页
+                    if let rr = r {
+                        let ws = rec.ocrRegion(img, rect: rr, minConfidence: minConf)
+                        let joined = ws.map(\.0).joined()
+                        if let hit = bad.first(where: { joined.contains($0) }) {
+                            log("   §neg \(name) 在 ROI 内出现否定词「\(hit)」⇒ 不算命中")
+                            return nil
+                        }
+                    } else {
+                        // 无 ROI ⇒ 退回全帧找（保守：宁可少命中）
+                        let ws = rec.ocrRegion(img, rect: nil, minConfidence: minConf)
+                        let joined = ws.map(\.0).joined()
+                        if let hit = bad.first(where: { joined.contains($0) }) {
+                            log("   §neg \(name) 全帧出现否定词「\(hit)」⇒ 不算命中")
+                            return nil
+                        }
+                    }
                 }
                 hh.name = name
                 return hh
@@ -97,11 +136,126 @@ final class Navigator {
         case "template":
             let names = e.templates ?? []
             guard !names.isEmpty else { return nil }
+            // ⭐⭐⭐⭐⭐ §3024 **多模板"全部命中"闸**（真机 2026-10-18，用户令）
+            //
+            // ## 用户令（逐字）
+            // > 「**把这个页面做锚点识别，就右上角图标加左上角图标 这是广告内部落地页**」
+            // > 「**锚点可与截图做对比 不用死用OCR 你看看今天给你看的软件 别人是怎么做的**」
+            //
+            // ## 为什么需要"全部命中"
+            // `poolMatch` 的语义是**任一命中就返回**（返回 `used` = 命中的那个）。
+            // 而广告内部落地页的判据是**两个角标同时存在**：
+            /// ```
+            ///   左上 '<'   +   右上 '⚠'
+            /// ```
+            /// 离线复算（83 张真机帧，阈值 0.80）：
+            /// ```
+            ///   两者都中 = 3 帧（_lp/_lp2/_now，全是「知了爱学」广告落地页）✅
+            ///   误中     = 0 帧
+            ///   反例：probe1.jpg  back=0.832（单个能过）但 warn=0.221 ⇒ 组合不中 ✅
+            /// ```
+            /// ⇒ 📏 **单模板有假阳（0.832），组合式才有区分力**。
+            ///
+            /// ## 实现
+            /// `min_hits >= 2` ⇒ 逐个模板各自跑一次 `matchTemplate`，**全部 >= 阈值**才算命中；
+            /// 返回**第一个**模板的矩形（调用方只用它拿坐标，组合语义已保证正确性）。
+            /// ⚠️ 与 OCR 分支的 `min_hits` **语义一致**（"必须命中 N 个不同目标"）。
+            if let need = e.min_hits, need >= 2 {
+                var firstRect: CGRect?
+                var firstScore = 0.0
+                for t in names {
+                    guard let (rect, score) = rec.matchTemplate(img, tplName: t, roi: r,
+                                                               threshold: e.threshold ?? tplThr,
+                                                               mask: e.mask) else {
+                        return nil      // 缺一个 ⇒ 组合不成立
+                    }
+                    if firstRect == nil { firstRect = rect; firstScore = score }
+                }
+                guard let rect = firstRect else { return nil }
+                return Recognizer.Hit(name: name, rect: rect, score: firstScore,
+                                      evidence: "tpl-all:" + names.joined(separator: "+"))
+            }
             if let (rect, score, used) = rec.poolMatch(img, tplNames: names, roi: r,
                                                        threshold: e.threshold ?? tplThr,
                                                        mask: e.mask) {
                 return Recognizer.Hit(name: name, rect: rect, score: score,
                                       evidence: used)
+            }
+            return nil
+        // ⭐⭐⭐⭐⭐ §3013 **模板优先 + OCR 兜底**（`match: "template_or_ocr"`）
+        //
+        // ## ⛔ 为什么必须有（真机血案，2026-10-18）
+        // H5 落地页（「纵横修仙界」）上，返回腿 k=0/1/2 全部失败：
+        // ```
+        //   §tap ⛔ 没找到「back_arrow」⇒ 不点
+        //      （match=template roi=[0,55,110,130] tpl=["nav/chevron_dark.png", ...]）
+        //   ⇒ 一路试到 k=8 ⇒ 卡在「还在落地页」
+        // ```
+        // 而**同一帧的 `/ocr` 明明白白读到了那个箭头**：
+        // ```
+        //   y=66.7 x=15.6 w=21.3 h=29.8  '<'  conf=0.30
+        //   ⇒ 中心 (26.3, 81.6)
+        // ```
+        // 我用手动点 (26.3, 81.6)，**一次就回到广告页**（顶栏「已成功领取1666金币」）。
+        // ⇒ 📏 **模板在 H5 上认不出这个 `<`**（细笔画被压扁/抗锯齿），但 OCR 认得。
+        //
+        // ## 为什么是"两种并联"而不是改成 ocr
+        // 模板在**深色页/圆钮**上表现更好（`back_circle`），OCR 在**H5 细箭头**上更好。
+        // PC 的 `find_page_back` 本身就是**几何判据 + 多 ROI**并联（⛔ 不依赖单一手段），
+        // 这里照同一思路：**模板先试，miss 再用词表**（顺序固定，⛔ 不并发）。
+        //
+        // ## 安全性（为什么不会误点）
+        // `words` 只收方向符（`< ＜ 〈 ‹`），且 `roi` 仍是左上返回区；
+        // 语言模型 OCR 对单个 `<` 给 conf=0.30，所以本模式**默认放宽到 0.25**（可配 `min_conf`）。
+        case "template_or_ocr":
+            let names = e.templates ?? []
+            if !names.isEmpty,
+               let (rect, score, used) = rec.poolMatch(img, tplNames: names, roi: r,
+                                                       threshold: e.threshold ?? tplThr,
+                                                       mask: e.mask) {
+                return Recognizer.Hit(name: name, rect: rect, score: score,
+                                      evidence: "tpl:" + used)
+            }
+            let words = e.words ?? []
+            guard !words.isEmpty else { return nil }
+            let minConf = e.min_conf ?? 0.25
+            if var h = rec.findWords(img, words: words, roi: r,
+                                     minHits: e.min_hits ?? 1,
+                                     minConfidence: minConf) {
+                // ⭐⭐⭐⭐⭐ §3013 **方向符"取左端"修正**（真机血案 2026-10-18）
+                //
+                // ## ⛔ 血案（淘宝商品详情页，逐字实测）
+                // iOS Vision 把返回箭头和页面标题**合并成一个词元**：
+                // ```
+                //   '＜ 天猫双11官方立减商品，8.5折起'   x=21.3  w=272.3   y=66.7
+                // ```
+                // 而 `findWords` 返回的是**整词 bbox** ⇒ `center = midX = 157`
+                // ⇒ 日志 `§tap ★点「back_arrow」@(65,76)`（65 已是钳制后的值）
+                // ⇒ **点在「天猫双11」那几个字上，箭头没被点到** ⇒ 页型仍是 ext_landing
+                // ⇒ 下一轮箭头也找不到了（标题变了）⇒ 停手。
+                //
+                // ## ✅ 修法
+                // 只要命中的词**以方向符开头**，就把 rect 裁成**最左边那一格**：
+                // ```
+                //   箭头真实位置 x ∈ [21.3, 21.3+22]  ⇒ 取 width = 0.35*h 的方块
+                //   center 自然落在箭头正中（而不是标题中间）
+                // ```
+                // ⚠️ 只对本模式生效（`template_or_ocr`），⛔ 不碰 `ocr` 通用路径 ——
+                //   普通 OCR 元素的语义就是"点这个词的中间"。
+                // ⚠️ 判据用 `h.evidence` 里是否出现方向符，⛔ 不用字符数猜。
+                let dirChars: [Character] = ["<", "＜", "〈", "‹", "‹"]
+                let ev = h.evidence
+                if let first = ev.first, dirChars.contains(first) || dirChars.contains(where: { ev.hasPrefix(String($0)) }) {
+                    let side = max(12.0, h.rect.height * 0.9)
+                    let leftRect = CGRect(x: h.rect.minX, y: h.rect.minY,
+                                          width: min(side, h.rect.width), height: h.rect.height)
+                    h.rect = leftRect
+                    h.evidence = "ocr-left:" + ev
+                } else {
+                    h.evidence = "ocr:" + ev
+                }
+                h.name = name
+                return h
             }
             return nil
         // ⭐⭐⭐⭐⭐ §2621 **色彩判据元素**（`match: "color"`）——
@@ -1414,7 +1568,30 @@ final class Navigator {
     func runFunnel(_ img: UIImage) -> Bool {
         guard let items = cfg.funnel else { return false }
         let now = Date()
+
+        // ⭐⭐⭐⭐⭐ §3012 **同一坐标重复点击闸**（真机实测，2026-10-18）
+        //
+        // ## ⛔ 血案（真机 trace 逐字）
+        /// 签到弹窗盖屏时，`modal_x` 在**同一个坐标** (419,371) 反复命中并点击：
+        /// ```
+        ///   §funnel modal_x（通用暖灰圆钮 ✕）@(419,371)     ← 同一点
+        ///   §tapPoint ★点坐标 @(419,371) ⇒ P:30490,12581
+        ///   §ble → P:30490,12581                              ← 命令确实发出去了
+        ///   §adbox ⭐ 漏斗处理了一层                          ← 又回循环头
+        /// ```
+        /// 实测 **连点 40 次画面纹丝不动** ⇒ 白烧约 80 秒。
+        ///
+        /// ## 判据为什么用「同一条腿 + 同一个点」而不是「画面变没变」
+        /// · 画面判据要**多抓一帧**（+0.5~2s/次），而这条闸本来就是为了省时间；
+        /// · 弹窗点击本来就可能"点两下才关"（动画/首次被吞），所以**允许前 3 次**；
+        /// · 第 3 次还落在**同一坐标**（±`funnelSameXY` 像素）⇒ 判定这条腿对它无效
+        ///   ⇒ **记死这条腿**（让它让位给后面的腿），⛔ 不是整轮停手
+        ///   （停手由 `FeatureEngine.stallLimit` 负责，两者分工不同）。
+        ///
+        /// 📏 与 PC 的关系：PC 有 YOLO 主路 + `find_gray_x` 兜底，这类"同点空转"很少发生；
+        ///   手机端像素判据是**唯一主路** ⇒ 必须自己防这一层（§2992 记过的同一类问题）。
         for it in items {
+
             if let last = funnelLast[it.element],
                now.timeIntervalSince(last) < (it.interval ?? 1.0) { continue }
             // ⭐⭐ **前置闸**（§2247）：必须**同时命中** `require` 才允许点 `element`
@@ -1436,6 +1613,8 @@ final class Navigator {
             // 所以**不能**走 `detect()`（那查的是 `elements` 表）。
             if it.element == "coin_ball" {
                 if let c = ColorBlob.findCoinBall(img) {
+                    // §3012 同点重复点击闸（与 modal_x 同一道，理由见 runFunnel 顶部）
+                    guard funnelAllowTap("coin_ball", Double(c.x), Double(c.y)) else { continue }
                     funnelLast[it.element] = now
                     log("   §funnel coin_ball（\(it.desc ?? "")）@(\(Int(c.x)),\(Int(c.y)))")
                     tapPoint(Double(c.x), Double(c.y), why: "漏斗 coin_ball")
@@ -1460,6 +1639,8 @@ final class Navigator {
             //   所以不会在普通页面上乱点 ✕；且仍然只认“暖灰圆钮”这一个形态。
             if it.element == "modal_x" {
                 if let c = ModalX.find(img) {
+                    // ⭐ §3012 同点重复点击闸（真机血案：同一点连点 40 次画面不动）
+                    guard funnelAllowTap("modal_x", Double(c.x), Double(c.y)) else { continue }
                     funnelLast[it.element] = now
                     log("   §funnel modal_x（通用暖灰圆钮 ✕）@(\(Int(c.x)),\(Int(c.y)))")
                     tapPoint(Double(c.x), Double(c.y), why: "漏斗 modal_x 暖灰圆钮")
@@ -1483,6 +1664,7 @@ final class Navigator {
             // ⛔ 铁律④：**只点消极项**，⛔ 不点右侧主按钮（词表故意只收消极项）。
             if it.element == "bottom_popup" {
                 if let hit = Self.findBottomPopup(img, rec: rec, bw: baseW) {
+                    guard funnelAllowTap("bottom_popup", Double(hit.x), Double(hit.y)) else { continue }
                     funnelLast[it.element] = now
                     log("   §funnel bottom_popup（底部弹窗 “\(hit.tag)”）@(\(Int(hit.x)),\(Int(hit.y)))")
                     tapPoint(Double(hit.x), Double(hit.y), why: "漏斗 bottom_popup 消极项「\(hit.tag)」")
@@ -1607,6 +1789,7 @@ final class Navigator {
 
             if it.element == "appstore_x" {
                 if let p = Self.findDarkCross(img) {
+                    guard funnelAllowTap("appstore_x", Double(p.x), Double(p.y)) else { continue }
                     funnelLast[it.element] = now
                     log("   §funnel appstore_x（App Store 页左上暗色 ✕）@(\(Int(p.x)),\(Int(p.y)))")
                     tapPoint(Double(p.x), Double(p.y), why: "漏斗 appstore_x 暗色 ✕")
@@ -1617,6 +1800,7 @@ final class Navigator {
             // ⭐ 券弹窗 ✕（PC `find_coupon_x`，ROI 在屏幕中下）—— 同一个判据换 ROI
             if it.element == "coupon_x" {
                 if let c = ModalX.findCoupon(img) {
+                    guard funnelAllowTap("coupon_x", Double(c.x), Double(c.y)) else { continue }
                     funnelLast[it.element] = now
                     log("   §funnel coupon_x（券弹窗 ✕）@(\(Int(c.x)),\(Int(c.y)))")
                     tapPoint(Double(c.x), Double(c.y), why: "漏斗 coupon_x 券弹窗 ✕")
@@ -1790,6 +1974,35 @@ final class Navigator {
     ///   ① 比的是**「点前 vs 点后」**（ROI 只看上半屏，避开视频区）
     ///   ② 记死的是 **(页型, 出路)** 组合 ⇒ 换一页还能用同一条腿
     private var dead: Set<String> = []
+
+    // ⭐⭐⭐⭐⭐ §3012 **漏斗"同点重复点击"记账**（真机血案，见 `runFunnel` 顶部注释）
+    //
+    // key   = 漏斗腿的元素名（如 `modal_x`）
+    // value = (上一次点的坐标, 已连续点了同一坐标几次)
+    // ⛔ 只记**坐标**不记画面：本闸的目的是"别在同一个死点烧时间"，
+    //    画面判据另有 `screenChanged` 负责（`step()` 里在用）。
+    private var funnelSameHits: [String: (x: Double, y: Double, n: Int)] = [:]
+    /// 同一坐标允许连续点的次数上限（第 3 次还同点 ⇒ 记死）
+    private static let funnelSameLimit = 3
+    /// 判定"同一个点"的像素容差（基准 451×977 尺度）
+    private static let funnelSameXY = 12.0
+
+    /// 记一次"要点这个点"，返回 **true = 允许点**，false = 已记死、本腿跳过。
+    private func funnelAllowTap(_ key: String, _ x: Double, _ y: Double) -> Bool {
+        if let h = funnelSameHits[key],
+           abs(h.x - x) <= Self.funnelSameXY, abs(h.y - y) <= Self.funnelSameXY {
+            let n = h.n + 1
+            if n > Self.funnelSameLimit {
+                log("   §funnel ⛔ \(key) 在同一坐标 (\(Int(x)),\(Int(y))) 已连点 \(h.n) 次"
+                    + " ⇒ **记死这条腿**（⛔ 不再烧时间，让位给后面的腿）")
+                return false
+            }
+            funnelSameHits[key] = (x, y, n)
+            return true
+        }
+        funnelSameHits[key] = (x, y, 1)
+        return true
+    }
 
     /// 记死一条腿（key = "页型|出路"）
     private func markDead(_ page: String, _ go: String) {
