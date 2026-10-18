@@ -315,7 +315,7 @@ final class FeatureEngine {
             }
 
             // ── ①e 零进展闸 v2（PC L9452-9470）：有"主链路健在"证据就清零 ──
-            let pkNp = nav.pageKind(img)
+            let pkNp = pageKind(img)
             let topNp = Self.adTopText(img, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi)
             let evidence = (pkNp == "ad_video" || pkNp == "ad_live")
                 || ["领取", "金币", "广告"].contains(where: { topNp.contains($0) })
@@ -374,7 +374,7 @@ final class FeatureEngine {
             }
 
             // ═══════════════ ② 页型分派（PC L9511-9535）═══════════════
-            let pk = nav.pageKind(img)
+            let pk = pageKind(img)
             log("   ★页面 = **\(pk)**")
 
             // ── ②a feed 支（PC L9511-9535）：点悬浮球 / 底栏首页 回中心 ──
@@ -414,7 +414,7 @@ final class FeatureEngine {
                         atCenter = true
                         break
                     }
-                    let pkR = nav.pageKind(imr)
+                    let pkR = pageKind(imr)
                     let topR = Self.adTopText(imr, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi)
                     if pkR == "ad_video" || pkR == "ad_live" {
                         log("   .. 已回到广告页（第 \(k + 1) 次检查）｜识别层判 **\(pkR)**")
@@ -470,7 +470,7 @@ final class FeatureEngine {
                     backHome = true
                     break
                 }
-                let pkR = nav.pageKind(imr)
+                let pkR = pageKind(imr)
                 let topR = Self.adTopText(imr, rec: rec, bw: baseW, bh: baseH, roi: s?.ad_top_roi)
                 if pkR == "ad_video" || pkR == "ad_live" {
                     log("   .. 已回到广告页（第 \(k + 1) 次检查）｜识别层判 **\(pkR)**")
@@ -610,7 +610,8 @@ final class FeatureEngine {
     private func clickReenter(tag: String) -> Bool {
         guard let img = grab() else { return false }
         // ① 按行腿（PC §1699e 第一腿）
-        if let p = findAdRowButton(img) {
+        if let hit = findAdRowButton(img) {
+            let p = hit.point
             log("   §\(tag) 按行定位到「看广告得金币」按钮 @(\(Int(p.x)),\(Int(p.y))) ⇒ 点它")
             return nav.tapPoint(Double(p.x), Double(p.y), atomic: true, why: "重新进链（按行腿）")
         }
