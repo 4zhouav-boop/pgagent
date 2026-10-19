@@ -26,7 +26,7 @@ targets:
         CFBundleDisplayName: PGAgent
         # ⭐ 版本号**唯一来源**（界面标题从 Info.plist 读，见 AppVersion）
         #    发版时只改这里 ⇒ 界面/接口/包 三处自动一致（§2239 的教训）
-        CFBundleShortVersionString: "0.77"
+        CFBundleShortVersionString: "0.78"
         CFBundleVersion: "1"
         UILaunchScreen: {}
         # ⭐ 关键 1：让 App 的 Documents 暴露给「文件」App
@@ -111,7 +111,7 @@ targets:
         #   ⚠️ 依赖写法 "framework:" 只加 -F（framework 搜索路径），不加 -I ⇒ 必须显式写。
         HEADER_SEARCH_PATHS:
           - $(inherited)
-          - $(SRCROOT)/ncnn.framework/Versions/A/Headers
+          - $(SRCROOT)/ncnn.framework/Headers
         # ⛔⛔⛔ §3134 **`ncnn.framework` 是「静态」C++ framework ⇒ 必须链 `libc++`**
         #
         # ## 真机血案（CI run 39139134310，2026-10-19 00:10）
@@ -157,9 +157,9 @@ targets:
           - $(inherited)
           - -lc++
           - -force_load
-          - $(SRCROOT)/ncnn.framework/Versions/A/ncnn
+          - $(SRCROOT)/ncnn.framework/ncnn
           - -force_load
-          - $(SRCROOT)/openmp.framework/Versions/A/openmp
+          - $(SRCROOT)/openmp.framework/openmp
     dependencies:
       - target: PGShot
       - sdk: ReplayKit.framework
@@ -174,10 +174,6 @@ targets:
       #   内含 Tencent/ncnn **20221128**，含真机(arm64/arm64e/armv7) + 模拟器两个 slice。
       #   ⛔ 只用 `ncnn.xcframework`：PC 的 `_x_detect` 只要 ncnn + numpy，
       #      不碰 OpenCV（letterbox 是自己算的，`cv2.resize` 用 `CGContext` 替）。
-      - framework: ncnn.framework
-        embed: false
-      - framework: openmp.framework
-        embed: false
 
   # ⭐⭐⭐ 「眼」—— ReplayKit 广播扩展（荔枝/所有 RPA App 的真正做法）
   #   主 App 用 RPSystemBroadcastPickerView().triggerPicker() **程序化启动**它，
@@ -191,7 +187,7 @@ targets:
       path: PGShot/Info.plist
       properties:
         CFBundleDisplayName: PGShot
-        CFBundleShortVersionString: "0.77"
+        CFBundleShortVersionString: "0.78"
         CFBundleVersion: "1"
         # ⭐ 扩展必须声明 NSExtension，否则 iOS 不认（xcodegen 会重写 Info.plist）
         NSExtension:
