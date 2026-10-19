@@ -85,7 +85,7 @@ enum BackgroundTask {
         if task == .invalid {
             NSLog("PGAgent BGT: ⛔ beginBackgroundTask 失败（%@）", name ?? "-")
         } else {
-            NSLog("PGAgent BGT: ▶️ 开始 %@ (id=%lu)", name ?? "-", UInt(task))
+            NSLog("PGAgent BGT: ▶️ 开始 %@ (id=%lu)", name ?? "-", task.rawValue)
         }
         return task
     }
@@ -95,7 +95,7 @@ enum BackgroundTask {
         guard task != .invalid else { return }
         let finish = {
             UIApplication.shared.endBackgroundTask(task)
-            NSLog("PGAgent BGT: ⏹ 结束 (id=%lu)", UInt(task))
+            NSLog("PGAgent BGT: ⏹ 结束 (id=%lu)", task.rawValue)
         }
         if Thread.isMainThread {
             finish()
