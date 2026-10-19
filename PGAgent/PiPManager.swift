@@ -50,8 +50,13 @@ final class PiPManager: NSObject, ObservableObject {
     ///    但 4 处还在用它 ⇒ `has no member 'startRetryLeft'` ⇒ 必须补回来。
     private var startRetryLeft = 3
 
-    /// 画面尺寸（小一点省资源）
-    private let W = 320, H = 180
+    /// 画面尺寸（⛔ 小尺寸！PiP 窗口大小 = 这个尺寸）
+    ///
+    /// ⛔⛔ §3468 血案：原来是 `320×180`，而宿主视图被做成了**全屏 888×1920**
+    ///   ⇒ PiP 弹出一整块黑屏（用户怒斥「出一大块黑屏」「狗屎黑屏在桌面山」）。
+    ///   ✅ 现在 **240×40**，与宿主视图完全一致 ⇒ PiP 只是一个小横条（黑底白字 "PGAgent"）。
+    ///   参考 UIPiPView Example：`pipView.frame = (margin, 160, 240, 40)`。
+    private let W = 240, H = 40
 
     static func supported() -> Bool {
         AVPictureInPictureController.isPictureInPictureSupported()
@@ -141,19 +146,34 @@ final class PiPManager: NSObject, ObservableObject {
         //   ⚠️ alpha 不能是 0：0 等于 hidden，系统同样不渲染（§2234 踩过 0.02 也不行，
         //      但那是因为当时尺寸只有 120×68；本次**尺寸够大**，0.01 可被渲染。
         //      若仍不 ready，`render()` 里会自动把 alpha 抬到 0.02 再试）。
-        let host = UIView(frame: CGRect(x: 0, y: 0, width: W, height: H))
+        //
+        // ⛔⛔⛔ §3468 **上面那条"全屏+置顶"是错的，会出全屏黑屏**（用户 2026-10-19 怒斥）
+        // > 「**你这个搞什么东西 出一大块黑屏？**」
+        // > 「**你拉倒吧 这种狗屎想法你也有。连接个电脑就要开个这个？**」
+        // > 「**怎么可能搞个狗屎黑屏在桌面山**」
+        //
+        // 原因：PiP 的"内容"就是这层 layer 的画面 ⇒
+        //   宿主铺满全屏 ⇒ PiP 窗口 = 全屏黑图 ⇒ 屏幕上多一块黑。
+        //
+        // ✅ 正确用法（UIPiPView **Example** 原文）：
+        // ```swift
+        // pipView.frame = .init(x: margin, y: 160, width: 240, height: 40)   // 小尺寸
+        // self.view.addSubview(pipView)                                      // 普通子视图
+        // let timeLabel = UILabel(frame: .init(x: 10, y: 0, width: 220, height: 40))
+        // pipView.addSubview(timeLabel)                                      // 内容 = label
+        // ```
+        // ⇒ **PiP 窗口大小 = 内容图大小**。内容小 ⇒ PiP 窗小 ⇒ 不会全屏黑。
+        //
+        // 📌 本项目结论：**PiP 不是必需的**（已有静音音频 + §3468 beginBackgroundTask）。
+        //   ⇒ 宿主改回 **240×40 小窗**，即使 PiP 起来也只是一个小方块，不会遮屏。
+        let host = UIView(frame: CGRect(x: 8, y: 8, width: 240, height: 40))
         host.isUserInteractionEnabled = false
         host.backgroundColor = .black
-        // ⭐ §3465 照 UIPiPView L133：**alpha = 0 也能跑通**
-        //   它源码就是 `videoLayerView.alpha = 0`，PiP 照样起来。
-        //   ⇒ 我之前"alpha 太透系统不认"的猜测**是错的**（已实测证伪）。
-        //   alpha=0 的好处：用户完全看不见，且 isUserInteractionEnabled=false 不挡操作。
-        host.alpha = 0
+        host.alpha = 0                     // 界面上完全看不见（内容只给 PiP 用）
         host.isHidden = false
         host.clipsToBounds = true
         if let root = win.rootViewController?.view {
-            root.addSubview(host)          // ⭐ 放最上层（能被真的渲染）
-            root.bringSubviewToFront(host)
+            root.addSubview(host)          // ⭐ 普通层级：⛔ 不置顶、⛔ 不铺满
         } else {
             win.addSubview(host)
         }

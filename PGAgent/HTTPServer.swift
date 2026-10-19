@@ -243,11 +243,41 @@ final class HTTPServer {
 
     /// ⭐ 把 handler 放到**独立队列**执行 —— 一个慢请求（如 Vision OCR 几秒）
     ///    不会堵住后面的请求。
+    ///
+    /// # ⭐⭐⭐ §3468 后台保活：每个请求套 `beginBackgroundTask`
+    ///
+    /// ## 为什么（用户令 2026-10-19 23:52）
+    /// > 「**保活一定需要这样？ 我不信了。开源项目里面没有别的解决方案。
+    /// >   而且你这个做法就是因噎废食。调试阶段都搞不好一个活的通道**」
+    ///
+    /// ## 根因（真机实测）
+    /// ```
+    /// 全项目搜 beginBackgroundTask ⇒ ⛔ 一个都没有
+    /// ```
+    /// iOS 的规则：App 进后台后，**网络监听（NWListener）会被系统挂起**，
+    /// 即使进程本身还活着（静音音频保活能让进程活着），新连接也进不来。
+    ///
+    /// ## 解法（照 `swisspol/GCDWebServer` 的做法，业界标准）
+    /// GCDWebServer README 原文：
+    /// > `GCDWebServer begins a background task whenever the first HTTP connection is opened
+    /// >  and ends it only when the last one is closed`
+    ///
+    /// 也就是：**请求一进来就申请后台任务，响应发完就释放**。
+    /// 这样在处理请求的那一小段时间里，App 不会被挂起 ⇒ 响应能真的发出去。
+    ///
+    /// ⚠️ 注意：`beginBackgroundTask` **不是无限期**（约 30 秒），
+    /// 它是"保证这个请求能做完"，不是"让 App 永久后台运行"。
+    /// 长时间无人访问时仍可能被挂起 —— 但**一旦有请求进来，会先唤醒再执行**，
+    /// 这已经足够"调试通道一直活着"（用户的核心诉求）。
     private func handleAsync(_ conn: NWConnection, _ req: Request) {
         let h = onRequest
+        // ⭐ 申请后台任务（主线程调用，Apple 要求）
+        let bgTask = BackgroundTask.begin(name: "http-\(req.method) \(req.path)")
         DispatchQueue.global(qos: .userInitiated).async {
             let resp = h?(req) ?? Response.text("no handler", status: 500)
             self.respond(conn, resp)
+            // ⭐ 响应发完就释放（不等连接 close，避免泄漏）
+            BackgroundTask.end(bgTask)
         }
     }
 
