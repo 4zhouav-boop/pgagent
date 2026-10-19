@@ -140,7 +140,11 @@ final class PiPManager: NSObject, ObservableObject {
         let host = UIView(frame: CGRect(x: 0, y: 0, width: W, height: H))
         host.isUserInteractionEnabled = false
         host.backgroundColor = .black
-        host.alpha = 0.01                  // ⭐ 几乎透明但**不是 0**
+        // ⭐ §3465 照 UIPiPView L133：**alpha = 0 也能跑通**
+        //   它源码就是 `videoLayerView.alpha = 0`，PiP 照样起来。
+        //   ⇒ 我之前"alpha 太透系统不认"的猜测**是错的**（已实测证伪）。
+        //   alpha=0 的好处：用户完全看不见，且 isUserInteractionEnabled=false 不挡操作。
+        host.alpha = 0
         host.isHidden = false
         host.clipsToBounds = true
         if let root = win.rootViewController?.view {
@@ -209,44 +213,84 @@ final class PiPManager: NSObject, ObservableObject {
     ///   旧实现只要 `possible==true` 就调一次然后 return（`startTries=1` 再不增长），
     ///   而真机上它失败了（delegate 的 `failedToStart` 被调用，但没人重试）。
     ///   现在改成：调完之后**等 delegate 回执**，若没 active 且有错误 ⇒ 重试。
-    private var startAttempt = 0
-    private var startRetryLeft = 3
+    /// ⭐ 启动 PiP —— **照 `uakihir0/UIPiPView`(MIT) 的正确姿势**
+    ///
+    /// ## ⛔⛔⛔ §3465 我之前错在哪（真机实测 2026-10-19 23:29）
+    /// ```
+    /// /pip/state: renderCount=17（Timer 在跑）
+    ///             startTries=4 （重试生效）
+    ///             hostAlpha=0.02
+    ///             layerReady=false, active=false  ⛔ 还是起不来
+    /// ```
+    /// 对比 UIPiPView 源码发现**三处关键差异**：
+    ///
+    /// ### ① 必须**异步**调 `startPictureInPicture()` —— 同步无效
+    /// UIPiPView L97-104 的注释原文：
+    /// > `/// Start asynchronously after processing is complete`
+    /// > `/// (will not work if run here synchronously)`
+    /// 我原来是**同步**调 ⇒ 这就是主因。
+    ///
+    /// ### ② 必须用 **KVO 监听** `isPictureInPicturePossible`，⛔ 不是固定轮询
+    /// UIPiPView L108-120：`pipController.observe(\.isPictureInPicturePossible,
+    ///   options: [.initial, .new]) { ... if change.newValue { startPictureInPicture() } }`
+    /// 固定轮询（0.2s/0.8s）会**错过**正好变 true 的那个窗口。
+    ///
+    /// ### ③ 启动前先 `render()` 一帧
+    /// UIPiPView L93：`render() /// For initial display` 然后才检查 possible。
+    ///
+    /// ## 另外：alpha **可以是 0**
+    /// UIPiPView L133：`videoLayerView.alpha = 0` —— 它用 0 也能跑通。
+    /// ⇒ 我之前"alpha 太低系统不认"的猜测是**错的**，现已改回 0（完全不可见）。
+    private var pipPossibleObservation: NSKeyValueObservation?
 
     private func attemptStart(_ c: AVPictureInPictureController, tries: Int) {
         if c.isPictureInPictureActive {
             NSLog("PGAgent PiP: 已经是 active，停手")
             return
         }
+
+        // ⭐ 差分③：先喂一帧「初始显示」
+        render()
+
         if c.isPictureInPicturePossible {
             startTries = tries + 1
-            NSLog("PGAgent PiP: 第 %d 次探测 possible=true ⇒ 调 startPictureInPicture() (重试余 %d)",
-                  tries + 1, startRetryLeft)
-            c.startPictureInPicture()
-            // ⭐ 调用后不 return：等 0.8s 看是否真的 active，没 active 就重试
-            guard startRetryLeft > 0 else {
-                lastError = "PiP 多次启动失败（已重试 3 次）"
-                NSLog("PGAgent PiP: %@", lastError)
-                return
-            }
-            startRetryLeft -= 1
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            NSLog("PGAgent PiP: possible=true ⇒ **异步**启动 PiP（第 %d 次）", tries + 1)
+            // ⭐ 差分①：必须异步（同步调用无效，UIPiPView 注释明说）
+            DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
-                if c.isPictureInPictureActive { return }
-                // 没 active ⇒ 可能图层还没 ready，把 alpha 抬一点再试
-                if let h = self.hostView, h.alpha < 0.05 { h.alpha = 0.02 }
-                self.render()                     // 再喂一帧
-                self.attemptStart(c, tries: tries + 1)
+                c.startPictureInPicture()
+                // 启动后若没成功，还有一次机会再试
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                    guard let self = self else { return }
+                    guard !c.isPictureInPictureActive else { return }
+                    guard self.startRetryLeft > 0 else {
+                        self.lastError = "PiP 异步启动后仍未 active（已重试 3 次）"
+                        NSLog("PGAgent PiP: %@", self.lastError)
+                        return
+                    }
+                    self.startRetryLeft -= 1
+                    self.attemptStart(c, tries: tries + 1)
+                }
             }
             return
         }
-        guard tries < 15 else {
-            startTries = tries
-            lastError = "PiP 当前不可用（isPictureInPicturePossible=false，等 3s）"
-            NSLog("PGAgent PiP: %@", lastError)
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            self.attemptStart(c, tries: tries + 1)
+
+        // ⭐ 差分②：**KVO 监听** possible 变 true（比固定轮询可靠）
+        if pipPossibleObservation == nil {
+            NSLog("PGAgent PiP: possible=false ⇒ 挂 KVO 监听")
+            pipPossibleObservation = c.observe(
+                \AVPictureInPictureController.isPictureInPicturePossible,
+                options: [.initial, .new]
+            ) { [weak self] controller, change in
+                guard let self = self else { return }
+                let now = change.newValue ?? false
+                NSLog("PGAgent PiP: KVO possible -> %@", now ? "true" : "false")
+                if now {
+                    self.pipPossibleObservation = nil
+                    self.startRetryLeft = 3
+                    self.attemptStart(controller, tries: tries + 1)
+                }
+            }
         }
     }
 
@@ -333,15 +377,8 @@ final class PiPManager: NSObject, ObservableObject {
                       return "?"
                   }())
         }
-        // ⭐ 连续喂 10 帧还没 ready ⇒ 把 alpha 再抬一点（系统才认为在显示）
-        if renderCount == 10 {
-            if #available(iOS 17.4, *), !l.isReadyForDisplay {
-                if let h = hostView, h.alpha < 0.05 {
-                    h.alpha = 0.02
-                    NSLog("PGAgent PiP: 10 帧仍未 ready ⇒ alpha 抬到 0.02")
-                }
-            }
-        }
+        // ⭐ §3465：删掉了"第 10 帧把 alpha 抬到 0.02"的逻辑 —— alpha 不是根因
+        //   （UIPiPView 用 alpha=0 照样能跑通）
     }
 
     /// 把文字画成 UIImage（黑底白字，居中，自动缩小）
