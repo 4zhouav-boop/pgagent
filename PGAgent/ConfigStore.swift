@@ -81,6 +81,14 @@ final class ConfigStore: ObservableObject {
             }
             cfg = c
             loadedAt = Date()
+            // ⭐⭐⭐⭐⭐ §3250 **把 config 的 base_w/base_h 注入归一化基准**
+            //   用户令（2026-10-19）：「直接用手机原分辨率」「不要压缩换算了」
+            //   config 现已配成 888×1920（= 手机帧真实尺寸）⇒ 归一化**不再重采样**，
+            //   全链路（OCR 裁切比例 / pg.pix / pg.gray / pg.kgx / 点击换算）统一走原生坐标。
+            //   ⛔ 不配就保持 451/977 的默认（不破旧场景）。
+            if let s = c.settings, let bw = s.base_w, let bh = s.base_h {
+                FrameNormalizer.applyBase(w: bw, h: bh, log: { s in NSLog("PGAgent %@", s) })
+            }
             lastConfigErrors = warnings        // ⚠️ 缺陷**照常加载**，但带出来给人看
             if warnings.isEmpty {
                 lastError = ""

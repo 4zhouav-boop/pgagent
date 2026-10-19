@@ -37,8 +37,40 @@ import UIKit
 enum FrameNormalizer {
 
     /// 标定基准（与 config.json 的 `base_w` / `base_h` 同源）
-    static let baseW: CGFloat = 451
-    static let baseH: CGFloat = 977
+    ///
+    /// ⭐⭐⭐⭐⭐ §3250 **改成"可被 config 覆盖"的 var**（用户令 2026-10-19）
+    ///
+    /// ## 用户原话（逐字，两轮）
+    /// > 「你就直接出 整图  不要压缩换算了。PG控制台是做了压缩的。不能完全一样」
+    /// > 「直接用手机原分辨率，你就直接用原分辨率 AI用什么方式识别的。」
+    /// > 「就用手机的分辨率，然后AI自己识图 做精确点击。把眼睛和手先测试好 再跑」
+    ///
+    /// ## 为什么原来是错的（真机事实）
+    /// 手机帧 = **888×1920**，而这里硬编码 **451×977** ⇒ 每一帧都被**重采样压扁**。
+    /// 📏 实测（2026-10-19 12:22）：把 config 的 `base_w/base_h` 改成 888/1920 并重启 App 后，
+    ///    `pg.gray(0,0,888,1920)` **仍然返回 451×977** ⇒ 证明这两个常量**根本不读 config**。
+    /// ⇒ 后果：所有 ROI / 阈值 / 模板尺度 / OCR 坐标都建立在**被压缩过的图**上；
+    ///   AI 看图也是压缩图（小字糊掉），点击换算多绕一层，误差被放大。
+    ///
+    /// ## 现在的做法
+    /// · 默认值保持 451/977（⛔ 不破没配 config 的场景）
+    /// · **App 启动 / config 加载时**由 `ConfigStore` 调 `FrameNormalizer.applyBase(w:h:)` 覆盖
+    /// · 归一化只在**尺寸真的不等于 base** 时发生 ⇒ 配成 888×1920 后**完全不重采样**
+    static var baseW: CGFloat = 451
+    static var baseH: CGFloat = 977
+
+    /// 由 config 注入基准分辨率（`base_w` / `base_h`）
+    /// - Parameter log: 只改一次，变了才打日志（⛔ 不刷屏）
+    static func applyBase(w: Double, h: Double, log: ((String) -> Void)? = nil) {
+        guard w >= 2, h >= 2 else { return }
+        let changed = abs(baseW - CGFloat(w)) > 0.5 || abs(baseH - CGFloat(h)) > 0.5
+        baseW = CGFloat(w)
+        baseH = CGFloat(h)
+        didLog = false          // 基准变了 ⇒ 允许再打一次归一化日志
+        if changed {
+            log?("   §geo 基准分辨率改为 \(Int(w))x\(Int(h))（来自 config）")
+        }
+    }
 
     /// ⭐ 把任意尺寸的帧归一到 **451×977**
     ///

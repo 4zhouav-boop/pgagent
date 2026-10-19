@@ -506,6 +506,17 @@ private final class PGBridge {
         def("ocr", unsafeBitCast(fOcr, to: AnyObject.self))
 
         // ── 手：点 / 滑 / 原始命令（全部走 ESP32）──
+        // ⭐ §3250 **`pg.base()`** —— 暴露当前坐标系基准（用户令：直接用手机原分辨率）
+        //   JS 侧 `PG.BASE_W` / `PG.BASE_H` / `PG.USEABLE_W` 全部从它取，
+        //   ⛔ 不再在 JS 里硬编码 451/977（那样一改 config 就不一致）。
+        //   `usable_w` 照 PC `usable_w()` 语义 = base_w - 9（442/451）；见 brain_act 的说明。
+        let fBase: @convention(block) () -> JSValue = {
+            let b = self.bw, h = self.bh
+            return self.val(["ok": true, "w": b, "h": h,
+                             "usable_w": b - 9.0, "y_fix": self.yf])
+        }
+        def("base", unsafeBitCast(fBase, to: AnyObject.self))
+
         let fTap: @convention(block) (JSValue, JSValue, JSValue) -> Bool = { x, y, at in
             if self.stopped() { return false }
             guard x.isNumber, y.isNumber else { self.fail("pg.tap(x, y)"); return false }
