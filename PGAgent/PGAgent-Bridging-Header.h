@@ -28,6 +28,20 @@
 #define PGAgent_Bridging_Header_h
 
 // ncnn 官方 C API（纯 C；头文件只依赖 stddef.h / stdint.h）
+//
+// ⛔⛔⛔ §3176 **include 路径要带 `ncnn/` 前缀**（真机 CI 血案，2026-10-19）
+//   `error: 'ncnn/c_api.h' file not found`（CI run 39147116476）
+//
+// 📏 结构实测（`ncnn.framework` 官方 20260526 包）：
+// ```
+//   ncnn.framework/Versions/A/Headers/ncnn/c_api.h      ← 头文件都在 **ncnn/ 子目录**下
+//   ncnn.framework/Versions/A/ncnn                      ← 静态库
+// ```
+//   ⇒ 正确写法是 `<ncnn/c_api.h>`，**前提是 framework 的 `Headers` 目录进了头文件搜索路径**。
+//   ⚠️ 我上一版用的是第三方 `ncnn.xcframework`，它的头文件**直接在 Headers 根**（`Headers/c_api.h`），
+//      所以当时 `<ncnn/c_api.h>` 反而是错的 —— 换包必须同步换 include 路径。
+// ✅ 现在这个就是对的；**同时**在 project.yml 里给 `HEADER_SEARCH_PATHS` 补
+//    `$(SRCROOT)/ncnn.framework/Versions/A/Headers`（framework 类型不自动加 `-I`）。
 #include <ncnn/c_api.h>
 
 #endif /* PGAgent_Bridging_Header_h */

@@ -942,6 +942,89 @@ private final class PGBridge {
         }
         def("kgxDbg", unsafeBitCast(fKgxDbg, to: AnyObject.self))
 
+        // ═══════════════════════════════════════════════════════════════════════════
+        // ⭐⭐⭐ §3180 **`pg.llm(...)` —— 手机自己调 LLM**（用户令 2026-10-19）
+        //
+        // 用户原话：
+        // > 「你试试不用脚本直接把AI接口接入苹果手机里面做控制手机…
+        // >   我倒是再接入一个账号用里面的token工作，然后写成工作流。
+        // >   AI调用工作流应该不是很消耗token」
+        //
+        // ## 为什么必须做成 App 内的原语（⛔ 不是 PC 侧代办）
+        // `ScriptRuntime` 的 JS 是**纯 JavaScriptCore**，里没有 `fetch` / `XMLHttpRequest`
+        // （真机实测 2026-10-19：`typeof fetch = undefined`）⇒ JS 自己**发不了网络请求**。
+        // ⇒ 要么 PC 侧代办（那手机就还是离不开电脑），要么**在 Swift 侧开一个口**。
+        // ✅ 选后者：Swift 用 `URLSession` 调 OpenAI 兼容接口，JS 侧一行 `pg.llm(prompt)` 就能用。
+        //
+        // ## 省 token 的设计（照用户"工作流为主"的口径）
+        // · ⛔ 不做"每帧都问 AI"——那会把 token 烧穿。
+        // · ✅ 调用方（JS 工作流）**只在确定性腿全部失败时**问一次，问的是**选择题**
+        //   （"现在是 A/B/C 哪一种页面？"），不是开放式对话。
+        // · ✅ 支持 `maxTokens` 限制（默认 256），避免模型长篇大论。
+        // · ✅ 支持 `json:true` ⇒ 只回 JSON，方便工作流解析。
+        //
+        // ## 配置（⛔ 不用环境变量 —— 手机上没法设）
+        // 从 `Documents/pgconfig/llm.json` 读：
+        // ```json
+        // { "provider": "deepseek",
+        //   "baseURL": "https://api.deepseek.com/v1",
+        //   "model": "deepseek-chat",
+        //   "apiKey": "sk-..." }
+        // ```
+        // ⛔ 缺文件/缺 key ⇒ `{ok:false, why:"..."}`，JS 侧**如实回退**到确定性腿。
+        //
+        // ## 参数
+        // `pg.llm(prompt, opts?)`  → `{ok, text, model, ms}` 或 `{ok:false, why, ms}`
+        //   `opts` = `{ system?, maxTokens?, json?, withFrame? }`
+        //   ⭐ `withFrame:true` ⇒ **把当前屏幕帧一起发给模型**（AI 直接"看"屏幕）
+        //      真机已验证该模型支持看图（PC 侧喂纯红图 ⇒ 回 "Red"）
+        // ⚠️ 同步阻塞（与 `pg.*` 其它原语一致）：内部用信号量等 `URLSession` 回调。
+        //    超时 30s（⛔ 不让工作流卡死在网络上）。
+        let fLlm: @convention(block) (JSValue, JSValue) -> JSValue = { promptV, optsV in
+            if self.stopped() { return JSValue(undefinedIn: JSContext.current()) }
+            guard promptV.isString else {
+                return self.fail("pg.llm(prompt, opts?)：prompt 必须是字符串")
+            }
+            var system: String? = nil
+            var maxTok = 256
+            var wantJSON = false
+            var withFrame = false
+            if optsV.isObject, let o = optsV.toDictionary() {
+                if let s = o["system"] as? String { system = s }
+                if let m = o["maxTokens"] as? NSNumber { maxTok = m.intValue }
+                if let j = o["json"] as? Bool { wantJSON = j }
+                if let w = o["withFrame"] as? Bool { withFrame = w }
+            }
+            var img: Data? = nil
+            if withFrame {
+                // ⚠️ 用 broadcaster 的**原始帧**（JPEG），⛔ 不做二次压缩 —— 保留小字细节
+                img = self.rt.broadcaster.lastFrame
+                if img == nil {
+                    return self.val(["ok": false, "why": "withFrame:true 但还没有帧（先开录屏）", "ms": 0])
+                }
+            }
+            let t0 = Date()
+            let res = LLMClient.shared.complete(prompt: promptV.toString()!,
+                                                system: system, image: img,
+                                                maxTokens: maxTok, json: wantJSON)
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            if let r = res {
+                return self.val(["ok": true, "text": r.text, "model": r.model, "ms": ms])
+            }
+            return self.val(["ok": false, "why": LLMClient.shared.lastError, "ms": ms])
+        }
+        def("llm", unsafeBitCast(fLlm, to: AnyObject.self))
+
+        // 诊断：LLM 配置是否就位（省得每次都真发一次才知道）
+        let fLlmReady: @convention(block) () -> JSValue = {
+            LLMClient.shared.loadIfNeeded()
+            return self.val(["ok": LLMClient.shared.configured,
+                             "provider": LLMClient.shared.providerName,
+                             "model": LLMClient.shared.modelName,
+                             "why": LLMClient.shared.lastError])
+        }
+        def("llmReady", unsafeBitCast(fLlmReady, to: AnyObject.self))
+
         return pg
     }
 }
