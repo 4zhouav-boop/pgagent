@@ -45,6 +45,10 @@ final class PiPManager: NSObject, ObservableObject {
     private var timebase: CMTimebase?
     /// ⭐ 启动探测次数（诊断：>0 说明 possible 曾为 true）
     private(set) var startTries = 0
+    /// ⭐ §3465 剩余重试次数（诊断用；KVO 回调里会重置为 3）
+    /// ⚠️ §3467 编译失败过：上一版重写 `attemptStart` 时把这个声明一起删了，
+    ///    但 4 处还在用它 ⇒ `has no member 'startRetryLeft'` ⇒ 必须补回来。
+    private var startRetryLeft = 3
 
     /// 画面尺寸（小一点省资源）
     private let W = 320, H = 180
