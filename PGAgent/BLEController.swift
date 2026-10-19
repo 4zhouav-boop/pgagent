@@ -55,7 +55,27 @@ final class BLEController: NSObject, ObservableObject {
     private var notifyChar: CBCharacteristic?
     /// ⭐ 板子最近一条回执（`ok:<命令>`）⇒ 双向通的**直接证据**
     private(set) var lastAck = ""
-    /// ⭐ 服务/特征发现过程（`/blediag` 回显，排查用）
+    /// ⭐⭐ §3310 **最近一次 BLE 写入是否被系统确认**
+    ///
+    /// ## 为什么加这个（真机血案 2026-10-19 12:32）
+    /// ```
+    /// 现象：pg.send('T:z') 返回 true，但板子零回执（lastAck 停在 7 分钟前的 ok:H:HOME）
+    ///       连发 10 条 T:a（各 3 字节）也零回执
+    ///       重启 App + /ble/connect-paired 重连后**立刻**发，仍零回执
+    /// 根因：旧 `send()` 在 `writeValue` 之后**立刻 return true**，
+    ///       ⛔ 完全不知道写入是否真的送达（CBPeripheral 是异步的，失败只走回调）
+    ///       ⛔ 也**没有实现** `didWriteValueFor` ⇒ 失败被彻底吞掉
+    /// ⇒ 症状就是"App 说发了，板子没收到"，而工作流以为一切正常（**动作≠生效**的典型）
+    /// ```
+    /// ## 现在的做法
+    /// · 优先用 `.withResponse`（能拿到系统确认）；特征不支持才退回 `.withoutResponse`
+    /// · 用信号量等 `didWriteValueFor`（超时 1.5s）
+    /// · 失败**如实返回 false** 并把原因写进 `lastError`
+    private(set) var lastWriteOK = false
+    private(set) var lastWriteErr = ""
+    /// `didWriteValueFor` 用的信号量（一次只允许一笔在飞）
+    private var writeSem: DispatchSemaphore?
+    /// 服务/特征发现过程（`/blediag` 回显，排查用）
     private(set) var probeStore: [String] = []
 
     /// ESP32 常见的 HID/透传服务 UUID（PG 板子用的是 Nordic UART 风格的透传）
@@ -177,9 +197,58 @@ final class BLEController: NSObject, ObservableObject {
             report(false)
             return false
         }
-        let type: CBCharacteristicWriteType =
-            ch.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
-        p.writeValue(d, for: ch, type: type)
+
+        // ⭐⭐⭐ §3310 **写入要能被确认，失败必须如实返回 false**
+        //
+        // ⛔ 旧代码：`p.writeValue(d, for: ch, type: type); return true`
+        //    ⇒ 只表示"已交给系统"，**不代表送达**。真机实测（12:32）：
+        //      `pg.send('T:z')` 全返回 true，而板子 `lastAck` 一直停在 7 分钟前的
+        //      `ok:H:HOME`（固件对**每条**命令都回执，见 `main.cpp` L321-325）
+        //      ⇒ 铁证：写入没送达，App 却报成功。
+        // ✅ 现在：
+        //    · 特征支持 `.withResponse` 就用它（系统会给 `didWriteValueFor` 回调）
+        //    · 用信号量等回调（1.5s 超时）⇒ 超时/报错**如实 false**
+        //    · `.withoutResponse` 的特征只能"发完即认为成功"（系统无回调），
+        //      但要**额外核对** `p.state == .connected`（假连接时 state 会掉）
+        let canWithResp = ch.properties.contains(.write)
+        let type: CBCharacteristicWriteType = canWithResp ? .withResponse : .withoutResponse
+
+        if type == .withoutResponse {
+            // 没有回调可等 ⇒ 至少核对链路状态（假活连接在这里能被抓到）
+            guard p.state == .connected else {
+                lastError = "外设未连接（state=\(p.state.rawValue)）"
+                report(false)
+                return false
+            }
+            p.writeValue(d, for: ch, type: .withoutResponse)
+            lastWriteOK = true
+            lastWriteErr = ""
+            lastError = ""
+            report(true)
+            return true
+        }
+
+        // .withResponse ⇒ 等 didWriteValueFor
+        let sem = DispatchSemaphore(value: 0)
+        writeSem = sem
+        lastWriteOK = false
+        lastWriteErr = ""
+        p.writeValue(d, for: ch, type: .withResponse)
+        let waited = sem.wait(timeout: .now() + 1.5)
+        writeSem = nil
+        if waited == .timedOut {
+            lastWriteErr = "写入无确认（1.5s 超时）⇒ 链路可能已断"
+            lastError = lastWriteErr
+            NSLog("PGAgent BLE §3310 写入超时：%@", cmd)
+            report(false)
+            return false
+        }
+        if !lastWriteOK {
+            lastError = lastWriteErr.isEmpty ? "写入被系统拒绝" : lastWriteErr
+            NSLog("PGAgent BLE §3310 写入失败：%@ ｜ %@", cmd, lastError)
+            report(false)
+            return false
+        }
         lastError = ""
         report(true)
         return true
@@ -505,5 +574,21 @@ extension BLEController: CBPeripheralDelegate {
             lastAck = s.trimmingCharacters(in: .whitespacesAndNewlines)
             NSLog("PGAgent BLE: 板子回执 %@", lastAck)
         }
+    }
+
+    /// ⭐⭐⭐ §3310 **写入结果回调**（旧代码**完全没实现**它 ⇒ 失败被吞掉）
+    ///
+    /// 📏 为什么必须有：`CBPeripheral.writeValue` 是**异步**的，
+    ///    方法返回 ≠ 送达。真正的结果只在这个回调里。
+    ///    旧代码没有它 ⇒ `send()` 永远 `true`，即使链路早断了。
+    func peripheral(_ p: CBPeripheral, didWriteValueFor ch: CBCharacteristic, error: Error?) {
+        if let e = error {
+            lastWriteOK = false
+            lastWriteErr = "系统报错：\(e.localizedDescription)"
+        } else {
+            lastWriteOK = true
+            lastWriteErr = ""
+        }
+        writeSem?.signal()
     }
 }

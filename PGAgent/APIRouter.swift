@@ -797,6 +797,13 @@ final class APIRouter {
                     ? "（还没收到回执）" : ble.lastAck,
                 "probe": ble.probeStore,           // 服务/特征发现过程
                 "devices": ble.devices,
+                // ⭐ §3310 最近一次**写入**的确认结果
+                //   ⛔ 旧实现没有 `didWriteValueFor` ⇒ 写入失败被吞掉、`send` 永远 true
+                //   ⇒ 真机出现「App 说发了、板子没收到」（lastAck 停在几分钟前）。
+                //   现在把 `writeOK` / `writeErr` 暴露出来，一眼能分清
+                //   「链路断了」还是「板子没执行」。
+                "writeOK": ble.lastWriteOK,
+                "writeErr": ble.lastWriteErr,
             ])
 
         case ("POST", "/ble/send"):
