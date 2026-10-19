@@ -26,7 +26,7 @@ targets:
         CFBundleDisplayName: PGAgent
         # ⭐ 版本号**唯一来源**（界面标题从 Info.plist 读，见 AppVersion）
         #    发版时只改这里 ⇒ 界面/接口/包 三处自动一致（§2239 的教训）
-        CFBundleShortVersionString: "0.76"
+        CFBundleShortVersionString: "0.77"
         CFBundleVersion: "1"
         UILaunchScreen: {}
         # ⭐ 关键 1：让 App 的 Documents 暴露给「文件」App
@@ -106,10 +106,9 @@ targets:
         #   `ncnn.xcframework` 没有 modulemap ⇒ Swift 只能经 bridging header 拿到 `c_api.h`。
         #   ⛔ 不要改成 `import ncnn`：那个 framework 里没有 Swift module。
         SWIFT_OBJC_BRIDGING_HEADER: PGAgent/PGAgent-Bridging-Header.h
-        # ⭐ §3176 官方 ncnn 的头文件在 
-cnn.framework/Versions/A/Headers/ncnn/ 下
+        # ⭐ §3176 官方 ncnn 的头文件在 ncnn.framework/Versions/A/Headers/ncnn/ 下
         #   ⇒ bridging header 里写 <ncnn/c_api.h> 就要求这个 Headers 目录进搜索路径。
-        #   ⚠️ - framework: 依赖只加 -F（framework 搜索路径），**不加 -I** ⇒ 必须显式写。
+        #   ⚠️ 依赖写法 "framework:" 只加 -F（framework 搜索路径），不加 -I ⇒ 必须显式写。
         HEADER_SEARCH_PATHS:
           - $(inherited)
           - $(SRCROOT)/ncnn.framework/Versions/A/Headers
@@ -192,7 +191,7 @@ cnn.framework/Versions/A/Headers/ncnn/ 下
       path: PGShot/Info.plist
       properties:
         CFBundleDisplayName: PGShot
-        CFBundleShortVersionString: "0.76"
+        CFBundleShortVersionString: "0.77"
         CFBundleVersion: "1"
         # ⭐ 扩展必须声明 NSExtension，否则 iOS 不认（xcodegen 会重写 Info.plist）
         NSExtension:
