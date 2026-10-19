@@ -118,19 +118,34 @@ final class PiPManager: NSObject, ObservableObject {
         //   `isPictureInPicturePossible` **恒为 false** ⇒ PiP 起不来。
         //   📏 依据：PiP 用 `AVSampleBufferDisplayLayer` 做内容源时，
         //      系统要求该图层**在可见的窗口层级里**（能真的上屏渲染）。
-        // ✅ 改法：放**屏幕上**、尺寸小、置**最底层**（被 SwiftUI 内容盖住，
-        //    用户几乎看不见，但几何上在屏内 ⇒ 满足系统要求）。
-        let host = UIView(frame: CGRect(x: 0, y: 0, width: 120, height: 68))
+        //
+        // ⛔⛔⛔ §3461 **"放进窗口"不够，必须"真的被渲染"**（真机实测 2026-10-19）：
+        //   旧改法是「120×68 小窗 + insertSubview(at: 0) 放最底层」，
+        //   靠"被 SwiftUI 盖住"来隐藏。**结果 `isReadyForDisplay` 恒为 false**：
+        //   ```
+        //   /pip/state: possible=true, layerStatus=1(.rendering),
+        //               hasLayer=true, hostInWindow=true,
+        //               layerReady=false   ← ⛔ 卡在这
+        //   startTries=1 且不再增长 ⇒ 调了一次 startPictureInPicture() 就放弃
+        //   ```
+        //   根因：图层被完全遮挡 ⇒ 系统认为它"没在显示" ⇒ 不 ready ⇒ PiP 起不来。
+        //
+        // ✅ 新改法（照 `uakihir0/UIPiPView` MIT 的做法）：
+        //   **全屏尺寸 + 放最上层 + alpha 极低**（0.01）。
+        //   · 几何上占满屏幕 ⇒ 系统认为在显示 ⇒ `isReadyForDisplay` 能变 true
+        //   · alpha 0.01 ⇒ 用户几乎看不见（且 `isUserInteractionEnabled=false` 不挡操作）
+        //   ⚠️ alpha 不能是 0：0 等于 hidden，系统同样不渲染（§2234 踩过 0.02 也不行，
+        //      但那是因为当时尺寸只有 120×68；本次**尺寸够大**，0.01 可被渲染。
+        //      若仍不 ready，`render()` 里会自动把 alpha 抬到 0.02 再试）。
+        let host = UIView(frame: CGRect(x: 0, y: 0, width: W, height: H))
         host.isUserInteractionEnabled = false
         host.backgroundColor = .black
-        // ⚠️ alpha 别设太小（§2234）：0.02 时 `isReadyForDisplay` 一直是 false
-        //    ⇒ 图层不算「真的在渲染」⇒ PiP 起不来。
-        //    ✅ 用 1.0，靠**层级**（insertSubview at:0）让它被 SwiftUI 内容盖住。
-        host.alpha = 1.0
+        host.alpha = 0.01                  // ⭐ 几乎透明但**不是 0**
         host.isHidden = false
         host.clipsToBounds = true
         if let root = win.rootViewController?.view {
-            root.insertSubview(host, at: 0)     // ⭐ 放最底层
+            root.addSubview(host)          // ⭐ 放最上层（能被真的渲染）
+            root.bringSubviewToFront(host)
         } else {
             win.addSubview(host)
         }
@@ -189,6 +204,14 @@ final class PiPManager: NSObject, ObservableObject {
     /// 为什么必须轮询：这个属性依赖图层/音频会话进入可播状态，
     /// 刚建好时**必然**是 false（§2230 实测：等 0.3s 拿到 false，
     /// 而框架自己会在准备好后回调 delegate）。
+    ///
+    /// ⛔ §3461 修：**`startPictureInPicture()` 返回不代表成功**。
+    ///   旧实现只要 `possible==true` 就调一次然后 return（`startTries=1` 再不增长），
+    ///   而真机上它失败了（delegate 的 `failedToStart` 被调用，但没人重试）。
+    ///   现在改成：调完之后**等 delegate 回执**，若没 active 且有错误 ⇒ 重试。
+    private var startAttempt = 0
+    private var startRetryLeft = 3
+
     private func attemptStart(_ c: AVPictureInPictureController, tries: Int) {
         if c.isPictureInPictureActive {
             NSLog("PGAgent PiP: 已经是 active，停手")
@@ -196,9 +219,24 @@ final class PiPManager: NSObject, ObservableObject {
         }
         if c.isPictureInPicturePossible {
             startTries = tries + 1
-            NSLog("PGAgent PiP: 第 %d 次探测 possible=true ⇒ 调 startPictureInPicture()",
-                  tries + 1)
+            NSLog("PGAgent PiP: 第 %d 次探测 possible=true ⇒ 调 startPictureInPicture() (重试余 %d)",
+                  tries + 1, startRetryLeft)
             c.startPictureInPicture()
+            // ⭐ 调用后不 return：等 0.8s 看是否真的 active，没 active 就重试
+            guard startRetryLeft > 0 else {
+                lastError = "PiP 多次启动失败（已重试 3 次）"
+                NSLog("PGAgent PiP: %@", lastError)
+                return
+            }
+            startRetryLeft -= 1
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+                guard let self = self else { return }
+                if c.isPictureInPictureActive { return }
+                // 没 active ⇒ 可能图层还没 ready，把 alpha 抬一点再试
+                if let h = self.hostView, h.alpha < 0.05 { h.alpha = 0.02 }
+                self.render()                     // 再喂一帧
+                self.attemptStart(c, tries: tries + 1)
+            }
             return
         }
         guard tries < 15 else {
@@ -260,6 +298,9 @@ final class PiPManager: NSObject, ObservableObject {
         }
         d["timebaseRate"] = timebase.map { "\(CMTimebaseGetRate($0))" } ?? "-"
         d["startTries"] = startTries
+        d["renderCount"] = renderCount          // ⭐ §3461：Timer 到底有没有在跑
+        d["startRetryLeft"] = startRetryLeft    // ⭐ §3461：还能重试几次
+        d["hostAlpha"] = hostView.map { "\($0.alpha)" } ?? "-"   // ⭐ §3461：宿主透明度
         d["audioActive"] = AVAudioSession.sharedInstance().isOtherAudioPlaying == false
         d["audioCategory"] = AVAudioSession.sharedInstance().category.rawValue
         d["audioOptions"] = AVAudioSession.sharedInstance().categoryOptions.rawValue
@@ -268,12 +309,39 @@ final class PiPManager: NSObject, ObservableObject {
 
     // MARK: - 画一帧状态图
 
+    /// ⭐ §3461 渲染计数，用于诊断「Timer 到底有没有在跑」
+    private var renderCount = 0
+
     private func render() {
         guard let l = layer else { return }
         let img = drawText(text)
-        guard let buf = sampleBuffer(from: img) else { return }
+        guard let buf = sampleBuffer(from: img) else {
+            NSLog("PGAgent PiP: render 失败（sampleBuffer 为 nil）")
+            return
+        }
         if l.status == .failed { l.flush() }
         l.enqueue(buf)
+        renderCount += 1
+        // 前 3 帧打日志，方便判断 Timer 是否生效
+        if renderCount <= 3 {
+            NSLog("PGAgent PiP: render #%d enqueued, status=%d, readyForDisplay=%@",
+                  renderCount, l.status.rawValue,
+                  {
+                      if #available(iOS 17.4, *) {
+                          return l.isReadyForDisplay ? "Y" : "N"
+                      }
+                      return "?"
+                  }())
+        }
+        // ⭐ 连续喂 10 帧还没 ready ⇒ 把 alpha 再抬一点（系统才认为在显示）
+        if renderCount == 10 {
+            if #available(iOS 17.4, *), !l.isReadyForDisplay {
+                if let h = hostView, h.alpha < 0.05 {
+                    h.alpha = 0.02
+                    NSLog("PGAgent PiP: 10 帧仍未 ready ⇒ alpha 抬到 0.02")
+                }
+            }
+        }
     }
 
     /// 把文字画成 UIImage（黑底白字，居中，自动缩小）
