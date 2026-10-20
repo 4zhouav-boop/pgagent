@@ -158,7 +158,36 @@ class SampleHandler: RPBroadcastSampleHandler {
     ///   荔枝能做到长时间连续录屏（`_note_2010`），正是因为它不这么干。
     ///
     /// ⇒ 提到实例属性，**全程一个**。
-    private lazy var ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    ///
+    /// ## ⭐⭐⭐⭐⭐ §3341 再加 `.cacheIntermediates: false` —— 修 Jetsam `per-process-limit`
+    ///
+    /// ### 来源（**不是猜的**，是从开源同类项目 `boboabw/phone-agent` 的源码取的）
+    /// 本地路径：`C:\Users\4zhou\DSH\_research\dl\pa\phone-agent-main\PhoneAgent\Services\CaptureService.swift:96`
+    /// ```swift
+    /// private let context = CIContext(options: [.cacheIntermediates: false])
+    /// ```
+    /// 该项目用 ScreenCaptureKit（iOS 27）在主 App 内录屏，**长期运行不掉**。
+    ///
+    /// ### 为什么这条对我们有用
+    /// Core Image 默认会**缓存中间渲染结果**（intermediates）以加速后续帧。
+    /// 但广播扩展是**独立进程 + 300MB 硬顶**，而我们每帧都是**全新内容**（滚动/翻页/
+    /// 广告跳转），缓存**命中率≈0** ⇒ 只占内存不出力。
+    /// 📏 真机证据（Jetsam，3 次独立复现）：
+    /// ```
+    ///   JetsamEvent-2026-10-16-153317: rpages=19778 lifetimeMax=19778  (309MB)
+    ///   JetsamEvent-2026-10-17-161659: rpages=19200 lifetimeMax=19200  (300MB)
+    ///   JetsamEvent-2026-10-20-144710: rpages=19200 lifetimeMax=19200  (300MB)
+    ///   ⇒ phys.internal 里 dirty 占 15456~16096 页（≈250MB 是脏页）
+    /// ```
+    /// ⇒ 关掉中间缓存能直接减少这部分脏页增长。
+    ///
+    /// ⚠️ 与 §2263 的「每帧新建 CIContext」是两个不同的坑，⛔ 别混：
+    ///    §2263 = 新建 **context 对象**（已修，提成实例属性）
+    ///    §3341 = **context 内部的中间缓存**（本次修）
+    private lazy var ciContext = CIContext(options: [
+        .useSoftwareRenderer: false,      // ⛔ 不用软件渲染（慢且费 CPU）
+        .cacheIntermediates: false,       // ⭐ §3341 不缓存中间结果（省内存，命中率≈0）
+    ])
 
     /// ⭐⭐⭐ 本扩展**自己的** Documents（仅在 App Group 不可用时兜底）
     private var ownDir: URL {
@@ -315,6 +344,36 @@ class SampleHandler: RPBroadcastSampleHandler {
             return
         }
 
+        // ⭐⭐⭐⭐⭐ §3340 **每帧一个大 `autoreleasepool`** —— 修「录屏跑一会儿自己停」
+        //
+        // ## 血案（真机 Jetsam 报告，3 次独立复现）
+        // ```
+        //   JetsamEvent-2026-10-16-153317: reason=per-process-limit rpages=19778 lifetimeMax=19778
+        //   JetsamEvent-2026-10-17-161659: reason=per-process-limit rpages=19200 lifetimeMax=19200
+        //   JetsamEvent-2026-10-20-144710: reason=per-process-limit rpages=19200 lifetimeMax=19200
+        // ```
+        // ⇒ 每次都是 `rpages == lifetimeMax`（撞 300MB 顶）被系统杀掉 ⇒ 广播死 ⇒ 帧冻结。
+        //
+        // ## 为什么（`processSampleBuffer` 在 ReplayKit 自己的线程上，**没有为每次回调建 pool**）
+        // 每帧都要新建这几个**大头对象**（原分辨率 1170×2532）：
+        // ```
+        //   CIImage / CGImage（≈11.8 MB） / UIImage / JPEG Data
+        // ```
+        // 它们都是 autorelease 对象 ⇒ 没有 pool 就只能等**线程的 runloop 轮次**才释放
+        // ⇒ 帧一密就堆起来 ⇒ 渐进增长撞 300MB。
+        // 📏 与实测增长曲线吻合：27.7MB(10-14) → 71.2MB → 147MB → 300MB(被杀)。
+        // ⛔ 与 §2265 的「磁盘写入超限」是**两个不同的病**（那个是 diskwrites_resource，
+        //    这个是 Jetsam per-process-limit），⛔ 别混。
+        autoreleasepool {
+            renderOneFrame(sampleBuffer)
+        }
+    }
+
+    /// 出图 → 降采样 → 编码 → 写盘/投递。
+    ///
+    /// ⚠️ **只由 `processSampleBuffer` 的 `autoreleasepool` 调用**（§3340 内存修复）——
+    ///    ⛔ 别在别处直接调，否则又回到"无 pool 分配大图"的老路上。
+    private func renderOneFrame(_ sampleBuffer: CMSampleBuffer) {
         // ③ 出图
         guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let ci = CIImage(cvPixelBuffer: pb)
